@@ -747,7 +747,9 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
     settings.brokers.forEach((b) => Object.keys(b.products || {}).forEach((p) => { moves[`${b.id}|${p}`] = { v: S.defV, unit: S.defUnit }; }));
     setScen({ moves });
   };
-  const cap = (x) => (x === null ? "Set price" : !isFinite(x) ? "No limit" : x <= 0 ? "0" : qty(x));
+  // A capacity number is only meaningful once the product has a price and a margin.
+  const cap = (l, x) => (x === null ? (l.reason === "margin" ? "Set margin" : "Set price")
+    : !isFinite(x) ? "No limit" : x <= 0 ? "0" : qty(x));
 
   return (
     <>
@@ -808,6 +810,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                   {(S.openOnly === false ? res.lines : res.lines.filter((l) => l.pos)).map((l) => {
                     const mv = S.moves[l.key] || { v: S.defV, unit: S.defUnit };
                     const status = l.reason === "price" ? ["warn", "Enter a price"]
+                      : l.reason === "margin" ? ["warn", "Set margin per lot"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
                       : l.pos ? ["ok", "Within limit"] : ["dim", "Flat"];
@@ -825,8 +828,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                         <td className="dim">{l.stressed !== null ? px(l.stressed) : "—"}</td>
                         <td className={l.loss ? "bad" : "faint"}>{l.pos ? money(-l.loss) : "—"}</td>
                         <td>{l.pos ? money(l.im) : <span className="faint">—</span>}</td>
-                        <td className={l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}><b>{cap(l.canBuy)}</b></td>
-                        <td className={l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}><b>{cap(l.canSell)}</b></td>
+                        <td className={l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}><b>{cap(l, l.canBuy)}</b></td>
+                        <td className={l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}><b>{cap(l, l.canSell)}</b></td>
                         <td className="txt"><span className={`pill ${status[0]}`}><span className={status[0]}>{status[1]}</span></span></td>
                       </tr>
                     );

@@ -39,8 +39,15 @@ export function runScenario(broker, acc, products, target, scale = 1) {
   // Capacity: the account ratio after trading this product depends only on the new net size |p'|,
   // because trading at the current price doesn't change equity. Solve for the largest |p'| that keeps
   //   (TNE_now − loss_others − |p'|·L1) / (IM_others + |p'|·I1) ≥ target
+  // Lots you can actually trade: whole lots on a futures account, hundredths on a leverage account.
+  const step = broker.method === "leverage" ? 100 : 1;
+  const floorTo = (x) => (isFinite(x) ? Math.floor(x * step) / step : x);
+
   const withCap = lines.map((l) => {
     if (l.needsPrice && !l.hasPrice) return { ...l, canBuy: null, canSell: null, reason: "price" };
+    // With no margin per lot the product costs nothing to hold, so any capacity worked out
+    // from it would be nonsense — and far too generous. Say so instead of printing a number.
+    if (broker.method !== "leverage" && !num(l.spec.margin)) return { ...l, canBuy: null, canSell: null, reason: "margin" };
     const others = lines.filter((x) => x !== l);
     const lossO = others.reduce((a, x) => a + (isFinite(x.loss) ? x.loss : 0), 0);
     const imO = others.reduce((a, x) => a + x.im, 0);
@@ -54,12 +61,11 @@ export function runScenario(broker, acc, products, target, scale = 1) {
       return head / denom; // may be negative: account fails the scenario even without this product
     };
     const maxLong = side(1), maxShort = side(-1);
-    const floor2 = (x) => (isFinite(x) ? Math.floor(x * 100) / 100 : x);
-    const canBuy = floor2(maxLong - l.pos);   // from a short, buying first reduces it
-    const canSell = floor2(maxShort + l.pos); // from a long, selling first reduces it
+    const canBuy = floorTo(maxLong - l.pos);   // from a short, buying first reduces it
+    const canSell = floorTo(maxShort + l.pos); // from a long, selling first reduces it
     // If the current position itself is too big: lots to cut
     const maxHere = l.pos > 0 ? maxLong : l.pos < 0 ? maxShort : Infinity;
-    const cut = Math.abs(l.pos) > maxHere ? Math.ceil((Math.abs(l.pos) - Math.max(0, maxHere)) * 100) / 100 : 0;
+    const cut = Math.abs(l.pos) > maxHere ? Math.ceil((Math.abs(l.pos) - Math.max(0, maxHere)) * step) / step : 0;
     return { ...l, canBuy, canSell, cut, maxLong, maxShort };
   });
 
