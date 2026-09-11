@@ -3,24 +3,41 @@ import { createClient } from "@supabase/supabase-js";
 const URL = import.meta.env.VITE_SUPABASE_URL;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export const supabase = URL && KEY ? createClient(URL, KEY, { auth: { persistSession: false } }) : null;
+// persistSession keeps you signed in across page reloads; without it every
+// refresh would drop you back at the sign-in screen.
+export const supabase = URL && KEY
+  ? createClient(URL, KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } })
+  : null;
 export const isRemote = !!supabase;
 
 const CHUNK = 500;
 
 // ---------- Supabase (database) ----------
-// One shared workspace: no login. Everyone with the link reads and writes the same rows.
-const WS = "00000000-0000-0000-0000-000000000000";
+// Each trader signs in and sees only their own rows. The queries below don't
+// filter by user: the database's row-level security does that, so a mistake
+// here can't widen what someone can reach.
+
+// The signed-in account's id, needed where a row has to name its owner.
+const myId = async () => {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw error;
+  if (!data?.user) throw new Error("You've been signed out. Please sign in again.");
+  return data.user.id;
+};
 
 const remote = {
-  async getUser() { return { id: WS, email: "Shared workspace" }; },
+  async getUser() {
+    const { data } = await supabase.auth.getSession();
+    const u = data?.session?.user;
+    return u ? { id: u.id, email: u.email } : null;
+  },
   async loadSettings() {
-    const { data, error } = await supabase.from("settings").select("data").eq("user_id", WS).maybeSingle();
+    const { data, error } = await supabase.from("settings").select("data").maybeSingle();
     if (error) throw error;
     return data?.data ?? null;
   },
   async saveSettings(obj) {
-    const { error } = await supabase.from("settings").upsert({ user_id: WS, data: obj, updated_at: new Date().toISOString() });
+    const { error } = await supabase.from("settings").upsert({ user_id: await myId(), data: obj, updated_at: new Date().toISOString() });
     if (error) throw error;
   },
   async loadFills() {
@@ -35,11 +52,12 @@ const remote = {
   },
   // returns number of new fills stored (duplicates are skipped)
   async addFills(rows) {
+    const uid = await myId();
     let added = 0;
     for (let i = 0; i < rows.length; i += CHUNK) {
       const { data, error } = await supabase
         .from("fills")
-        .upsert(rows.slice(i, i + CHUNK).map((r) => ({ ...r, user_id: WS })), { onConflict: "user_id,broker,ref", ignoreDuplicates: true })
+        .upsert(rows.slice(i, i + CHUNK).map((r) => ({ ...r, user_id: uid })), { onConflict: "user_id,broker,ref", ignoreDuplicates: true })
         .select("id");
       if (error) throw error;
       added += data.length;
@@ -51,14 +69,43 @@ const remote = {
     if (error) throw error;
   },
   async deleteAllFills() {
-    const { error } = await supabase.from("fills").delete().eq("user_id", WS);
+    const { error } = await supabase.from("fills").delete().eq("user_id", await myId());
     if (error) throw error;
   },
   async deleteBrokerFills(broker) {
-    const { error } = await supabase.from("fills").delete().eq("user_id", WS).eq("broker", broker);
+    const { error } = await supabase.from("fills").delete().eq("user_id", await myId()).eq("broker", broker);
     if (error) throw error;
   },
 };
+
+// ---------- Signing in and out ----------
+// Accounts are created by invitation in Supabase; there is no sign-up here.
+export const auth = isRemote
+  ? {
+      enabled: true,
+      async signIn(email, password) {
+        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (error) throw error;
+      },
+      async signOut() { await supabase.auth.signOut(); },
+      // Sends a link back to this site, where onAuthChange reports "recovery".
+      async sendReset(email) {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
+        if (error) throw error;
+      },
+      async setPassword(password) {
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) throw error;
+      },
+      // Calls back with the current user (or null) whenever the session changes.
+      onAuthChange(cb) {
+        const { data } = supabase.auth.onAuthStateChange((event, session) => {
+          cb(session?.user ? { id: session.user.id, email: session.user.email } : null, event);
+        });
+        return () => data.subscription.unsubscribe();
+      },
+    }
+  : { enabled: false, onAuthChange: () => () => {} };
 
 // ---------- Browser storage (used until a database is connected) ----------
 const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills";
