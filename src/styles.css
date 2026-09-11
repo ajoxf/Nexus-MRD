@@ -264,3 +264,4 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
 }
 tbody tr.sep-row td { height: 6px; padding: 0; background: var(--panel2) !important; border-bottom: 1px solid var(--line2); }
 td.faded { opacity: .35; }
+.cell.planning { border-color: #E2B866; background: #FFFBF2; font-weight: 600; }

@@ -26,15 +26,21 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const needsPrice = mv.unit === "%" || broker.method === "leverage";
     const dist = hasPrice || mv.unit === "pts" ? moveDist(hasPrice ? p.mark : 0, mv) : NaN;
     // A held position sets the direction. Flat, the trader can name the side they are
-    // considering (p.plan); with neither, both directions are reported.
-    const dir = Math.sign(p.pos) || (p.plan === "long" ? 1 : p.plan === "short" ? -1 : 0);
+    // considering (p.plan) and how many lots (p.planLots); with neither, both directions
+    // are reported. A plan with lots on it is stressed as though it were already on, so
+    // the row and the account answer "what would this trade look like".
+    const planSign = p.plan === "long" ? 1 : p.plan === "short" ? -1 : 0;
+    const planLots = !p.pos && planSign && num(p.planLots) > 0 ? num(p.planLots) : 0;
+    const effPos = p.pos || planSign * planLots;
+    const planned = !p.pos && !!planLots;
+    const dir = Math.sign(p.pos) || planSign;
     const stressed = hasPrice && dir ? p.mark - dir * dist : null;
     const both = hasPrice && isFinite(dist) && !dir;
     const stressedIfLong = both ? p.mark - dist : null;
     const stressedIfShort = both ? p.mark + dist : null;
-    const loss = p.pos ? Math.abs(p.pos) * size * dist : 0;   // a plan costs nothing until it is on
-    const im = p.pos ? Math.abs(p.pos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
-    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, loss, im, hasPrice, needsPrice };
+    const loss = effPos ? Math.abs(effPos) * size * dist : 0;
+    const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
+    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, planned, loss, im, hasPrice, needsPrice };
   });
   const loss = lines.reduce((a, l) => a + (isFinite(l.loss) ? l.loss : 0), 0);
   const IM = lines.reduce((a, l) => a + l.im, 0);
@@ -66,11 +72,11 @@ export function runScenario(broker, acc, products, target, scale = 1) {
       return head / denom; // may be negative: account fails the scenario even without this product
     };
     const maxLong = side(1), maxShort = side(-1);
-    const canBuy = floorTo(maxLong - l.pos);   // from a short, buying first reduces it
-    const canSell = floorTo(maxShort + l.pos); // from a long, selling first reduces it
-    // If the current position itself is too big: lots to cut
-    const maxHere = l.pos > 0 ? maxLong : l.pos < 0 ? maxShort : Infinity;
-    const cut = Math.abs(l.pos) > maxHere ? Math.ceil((Math.abs(l.pos) - Math.max(0, maxHere)) * step) / step : 0;
+    const canBuy = floorTo(maxLong - l.effPos);   // from a short, buying first reduces it
+    const canSell = floorTo(maxShort + l.effPos); // from a long, selling first reduces it
+    // If the position (or the planned one) is too big: lots to cut
+    const maxHere = l.effPos > 0 ? maxLong : l.effPos < 0 ? maxShort : Infinity;
+    const cut = Math.abs(l.effPos) > maxHere ? Math.ceil((Math.abs(l.effPos) - Math.max(0, maxHere)) * step) / step : 0;
     return { ...l, canBuy, canSell, cut, maxLong, maxShort };
   });
 

@@ -173,7 +173,7 @@ function scenarioFor(pf, settings, b) {
     // On a flat product you can say which way you're thinking of trading, so the
     // stressed price and the loss are worked out for that side rather than both.
     const plan = !pos && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
-    return { key, product, spec, pos, mark, move: mv, plan };
+    return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots };
   });
   const res = runScenario(b, acc, prods, target);
   const st = statusOf(res.ratio, acc, pf.minR);
@@ -773,10 +773,16 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 <select className="in" style={{ width: 80 }} value={S.defUnit} onChange={(e) => setScen({ defUnit: e.target.value })}><option value="%">%</option><option value="pts">pts</option></select>
               </div>
             </F>
-            <F label="Products shown" hint="Flat products are only useful when you're sizing a new trade.">
-              <select className="in" value={S.openOnly === false ? "all" : "open"} onChange={(e) => setScen({ openOnly: e.target.value === "open" })}>
+            <F label="Products shown" hint="Focus on one instrument when you're sizing a trade.">
+              <select className="in" value={S.focus || (S.openOnly === false ? "all" : "open")}
+                onChange={(e) => { const v = e.target.value;
+                  setScen(v === "open" || v === "all" ? { focus: "", openOnly: v === "open" } : { focus: v, openOnly: false }); }}>
                 <option value="open">Open positions only</option>
                 <option value="all">Every product</option>
+                <optgroup label="Just one instrument">
+                  {[...new Set(settings.brokers.flatMap((b) => Object.keys(b.products || {})))].sort()
+                    .map((pr) => <option key={pr} value={pr}>{pr}</option>)}
+                </optgroup>
               </select>
             </F>
             <button className="btn" onClick={applyAll}>Apply to all products</button>
@@ -793,7 +799,13 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
           : ["ok", "Survives this scenario above your minimum."];
         return (
           <section className="panel" key={b.id} style={{ marginTop: 12, borderTop: `3px solid var(--${verdict[0] === "dim" ? "line2" : verdict[0]})` }}>
-            <div className="ph"><h2>{b.name}<span className="dim">{basis(b)}</span></h2><span className={verdict[0]} style={{ fontSize: 12, fontWeight: 600 }}>{verdict[1]}</span></div>
+            <div className="ph"><h2>{b.name}<span className="dim">{basis(b)}</span></h2>
+              {res.lines.some((l) => l.planned)
+                ? <span className="warn" style={{ fontSize: 12, fontWeight: 600 }}>
+                    Includes a trade you haven't put on — clear the lots to see the account as it stands
+                  </span>
+                : <span className={verdict[0]} style={{ fontSize: 12, fontWeight: 600 }}>{verdict[1]}</span>}
+            </div>
             <div className="strip">
               <div className="kpi"><label>TNE now → after</label><b>{money(acc.TNE)} <span className="faint">→</span> <span className={res.loss ? "bad" : ""}>{money(res.TNE)}</span></b></div>
               <div className="kpi"><label>TNE / IM now → after</label><b><span className={statusOf(acc.ratio, acc, pf.minR).cls}>{ratioTxt(acc.ratio)}</span> <span className="faint">→</span> <span className={st.cls}>{ratioTxt(res.ratio)}</span></b></div>
@@ -802,7 +814,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <div className="kpi"><label>Stop-out ({b.stopRatio}%) if all move</label><b>{moveTxt(stopMove)}</b></div>
             </div>
             {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div>
-             : S.openOnly !== false && !res.lines.some((l) => l.pos) ? <div className="empty">{b.name} is flat. <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button> to size a new trade.</div>
+             : !S.focus && S.openOnly !== false && !res.lines.some((l) => l.pos) ? <div className="empty">{b.name} is flat. <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button> to size a new trade.</div>
              : <div className="tw">
               <table>
                 <thead><tr>
@@ -810,13 +822,16 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                   <th>Can buy</th><th>Can sell</th><th className="txt">Status</th>
                 </tr></thead>
                 <tbody>
-                  {(S.openOnly === false ? res.lines : res.lines.filter((l) => l.pos)).map((l) => {
+                  {(S.focus ? res.lines.filter((l) => l.product === S.focus)
+                    : S.openOnly === false ? res.lines
+                    : res.lines.filter((l) => l.pos)).map((l) => {
                     const mv = S.moves[l.key] || { v: S.defV, unit: S.defUnit };
                     const status = l.reason === "price" ? ["warn", "Enter a price"]
                       : l.reason === "margin" ? ["warn", "Set margin per lot"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
                       : l.pos ? ["ok", "Within limit"]
+                      : l.planned ? ["warn", `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
                       : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
                       : ["dim", "Flat"];
                     return (
@@ -824,15 +839,24 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                         <td className="txt"><b>{l.product}</b></td>
                         <td>{l.pos
                           ? <><Side s={l.pos > 0 ? "Long" : "Short"} /> {qty(Math.abs(l.pos))}</>
-                          : <select className="cell" style={{ width: 92, textAlign: "left" }}
-                              value={settings.marks[l.key]?.dir || ""}
-                              onChange={(e) => setMark(l.key, "dir", e.target.value)}
-                              aria-label={`Direction you're considering for ${l.product}`}
-                              title="Flat. Pick the side you're thinking of trading and the stress is worked out for it.">
-                              <option value="">Either way</option>
-                              <option value="long">If long</option>
-                              <option value="short">If short</option>
-                            </select>}</td>
+                          : <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                              <select className="cell" style={{ width: 86, textAlign: "left" }}
+                                value={settings.marks[l.key]?.dir || ""}
+                                onChange={(e) => setMark(l.key, "dir", e.target.value)}
+                                aria-label={`Direction you're considering for ${l.product}`}
+                                title="Flat. Pick the side you're thinking of trading.">
+                                <option value="">Either way</option>
+                                <option value="long">If long</option>
+                                <option value="short">If short</option>
+                              </select>
+                              {settings.marks[l.key]?.dir && (
+                                <input className={`cell ${l.planned ? "planning" : ""}`} style={{ width: 52 }} type="number" min="0" step="any"
+                                  placeholder="lots" value={settings.marks[l.key]?.lots ?? ""}
+                                  onChange={(e) => setMark(l.key, "lots", e.target.value)}
+                                  aria-label={`Lots you're considering for ${l.product}`}
+                                  title="Lots you're thinking of trading. The scenario treats them as if they were already on." />
+                              )}
+                            </span>}</td>
                         <td>{l.pos ? px(l.mark) : <input className="cell" type="number" step="0.01" placeholder="Price" value={settings.marks[l.key]?.price ?? ""} onChange={(e) => setMark(l.key, "price", e.target.value)} aria-label={`Reference price ${l.product}`} />}</td>
                         <td>
                           <span style={{ display: "inline-flex", gap: 4 }}>
@@ -848,8 +872,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                                 </span>
                               : "—"}
                         </td>
-                        <td className={l.loss ? "bad" : "faint"}>{l.pos ? money(-l.loss) : "—"}</td>
-                        <td>{l.pos ? money(l.im) : <span className="faint">—</span>}</td>
+                        <td className={l.loss ? "bad" : "faint"}>{l.effPos ? money(-l.loss) : "—"}</td>
+                        <td>{l.effPos ? money(l.im) : <span className="faint">—</span>}</td>
                         <td className={`${l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}${!l.pos && l.dir < 0 ? " faded" : ""}`}><b>{cap(l, l.canBuy)}</b></td>
                         <td className={`${l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}${!l.pos && l.dir > 0 ? " faded" : ""}`}><b>{cap(l, l.canSell)}</b></td>
                         <td className="txt"><span className={`pill ${status[0]}`}><span className={status[0]}>{status[1]}</span></span></td>
@@ -859,7 +883,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                   <tr className="total"><td className="txt">Account</td><td colSpan={4}></td><td className={res.loss ? "bad" : ""}>{money(-res.loss)}</td><td>{money(res.IM)}</td><td colSpan={3} className="txt dim">Lots you can add and still stay above {ratioTxt(target)} after the scenario</td></tr>
                 </tbody>
               </table>
-              {S.openOnly !== false && res.lines.some((l) => !l.pos) && (
+              {!S.focus && S.openOnly !== false && res.lines.some((l) => !l.pos) && (
                 <div className="pb faint" style={{ fontSize: 11 }}>
                   {res.lines.filter((l) => !l.pos).length} flat product{res.lines.filter((l) => !l.pos).length === 1 ? "" : "s"} hidden.{" "}
                   <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button>
