@@ -1,0 +1,134 @@
+// Turns fills (across all broker accounts) into open positions, closed positions and realized P&L.
+//
+// Matching, per broker account:
+//   "fifo"    – closing fills square off the OLDEST open lots first (futures brokers, e.g. Orient).
+//   "average" – closing fills book P&L against the average entry price (MT5 netting accounts).
+//   Position tickets – if a closing fill names an open position ticket (MT5 hedging), it closes that
+//   ticket at that ticket's price, whatever the method; each closed ticket is its own closed position.
+// Going through zero closes the position; any remainder opens a new one at the fill price.
+// Fees (commission, swap…) are signed P&L amounts on each fill (negative = cost), included in realized P&L.
+
+const EPS = 1e-9;
+const r9 = (x) => (Math.abs(x) < EPS ? 0 : x);
+
+// sizeOf: (broker, product) => contract size | methodOf: (broker) => "fifo" | "average"
+export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
+  const sizeFn = typeof sizeOf === "function" ? sizeOf : (_b, p) => +sizeOf[p]?.size || 1000;
+  const sorted = [...fills].sort(
+    (a, b) => new Date(a.ts) - new Date(b.ts) || String(a.created_at || "").localeCompare(String(b.created_at || ""))
+  );
+  const state = {};
+  const closed = [];
+  const realized = [];
+
+  const newLot = (f, q, price, fee) => ({ id: f.position || null, q, price, q0: Math.abs(q), ts: f.ts, exitQty: 0, exitVal: 0, pnl: fee, fees: fee, fills: 1 });
+  const lotsAvg = (lots, fallback) => {
+    const tq = lots.reduce((a, l) => a + Math.abs(l.q), 0);
+    return tq ? lots.reduce((a, l) => a + Math.abs(l.q) * l.price, 0) / tq : fallback;
+  };
+  const startCycle = (st, f, price, q, fee) => {
+    st.pos = q; st.avg = price; st.lots = [newLot(f, q, price, fee)];
+    st.cycle = {
+      broker: st.broker, product: f.product, side: q > 0 ? "Long" : "Short", openTs: f.ts,
+      entryQty: Math.abs(q), entryVal: Math.abs(q) * price,
+      exitQty: 0, exitVal: 0, pnl: fee, fees: fee, fills: 1, maxQty: Math.abs(q), ticketed: false,
+    };
+  };
+  const closeCycle = (st, ts) => {
+    const c = st.cycle;
+    if (!c.ticketed) closed.push({ ...c, closeTs: ts, qty: c.entryQty, avgEntry: c.entryVal / c.entryQty, avgExit: c.exitVal / c.exitQty });
+    st.cycle = null; st.lots = [];
+  };
+
+  for (const f of sorted) {
+    const broker = f.broker || "default";
+    const size = +sizeFn(broker, f.product) || 1000;
+    const fifo = methodOf(broker) === "fifo";
+    const price = +f.price;
+    const q = f.side === "Buy" ? +f.qty : -f.qty;
+    const fee = +f.fee || 0;
+    const st = (state[`${broker}|${f.product}`] ||= { broker, product: f.product, pos: 0, avg: 0, cycle: null, lots: [] });
+    if (fee) realized.push({ ts: f.ts, broker, product: f.product, pnl: fee, fee: true });
+
+    if (st.pos === 0) { startCycle(st, f, price, q, fee); continue; }
+
+    const c = st.cycle;
+    c.fills++; c.pnl += fee; c.fees += fee;
+
+    // 1) Closing a named position ticket (MT5 hedging)
+    const lot = f.position ? st.lots.find((l) => l.id === f.position && Math.sign(l.q) !== Math.sign(q)) : null;
+    if (lot) {
+      const closeQty = Math.min(Math.abs(q), Math.abs(lot.q));
+      const d = Math.sign(lot.q);
+      const pnl = d * (price - lot.price) * closeQty * size;
+      realized.push({ ts: f.ts, broker, product: f.product, pnl });
+      c.pnl += pnl; c.exitQty += closeQty; c.exitVal += closeQty * price; c.ticketed = true;
+      lot.pnl += pnl + fee; lot.fees += fee; lot.exitQty += closeQty; lot.exitVal += closeQty * price; lot.fills++;
+      lot.q = r9(lot.q - d * closeQty);
+      if (lot.q === 0) {
+        closed.push({ broker, product: f.product, side: d > 0 ? "Long" : "Short", openTs: lot.ts, closeTs: f.ts, qty: lot.q0, maxQty: lot.q0,
+          avgEntry: lot.price, avgExit: lot.exitVal / lot.exitQty, pnl: lot.pnl, fees: lot.fees, fills: lot.fills, ticket: lot.id });
+      }
+      st.lots = st.lots.filter((l) => l.q !== 0);
+      st.pos = r9(st.pos - d * closeQty);
+      st.avg = lotsAvg(st.lots, st.avg);
+      if (st.pos === 0) closeCycle(st, f.ts);
+      continue;
+    }
+
+    // 2) Adding to the position
+    if (Math.sign(q) === Math.sign(st.pos)) {
+      st.lots.push(newLot(f, q, price, 0));
+      st.pos = r9(st.pos + q);
+      st.avg = fifo || f.position ? lotsAvg(st.lots, price) : (Math.abs(st.pos - q) * st.avg + Math.abs(q) * price) / Math.abs(st.pos);
+      c.entryQty += Math.abs(q); c.entryVal += Math.abs(q) * price;
+      c.maxQty = Math.max(c.maxQty, Math.abs(st.pos));
+      continue;
+    }
+
+    // 3) Reducing / closing / flipping
+    const closeQty = Math.min(Math.abs(q), Math.abs(st.pos));
+    const d = Math.sign(st.pos);
+    let pnl = 0, left = closeQty;
+    let feeLeft = fee;
+    for (const l of st.lots) {                       // lots are oldest-first: this is FIFO
+      if (left <= EPS) break;
+      const take = Math.min(left, Math.abs(l.q));
+      if (fifo) {
+        const lp = d * (price - l.price) * take * size;
+        pnl += lp;
+        l.pnl += lp + feeLeft; l.fees += feeLeft; feeLeft = 0; l.exitQty += take; l.exitVal += take * price; l.fills++;
+      }
+      l.q = r9(l.q - d * take); left = r9(left - take);
+      if (fifo && l.q === 0) {
+        // FIFO: each squared-off lot is its own closed trade (entry lot vs the fills that closed it)
+        closed.push({ broker, product: f.product, side: d > 0 ? "Long" : "Short", openTs: l.ts, closeTs: f.ts, qty: l.q0, maxQty: l.q0,
+          avgEntry: l.price, avgExit: l.exitVal / l.exitQty, pnl: l.pnl, fees: l.fees, fills: l.fills, matched: "fifo" });
+      }
+    }
+    if (fifo) c.ticketed = true; // closed trades already recorded per lot
+    if (!fifo) pnl = d * (price - st.avg) * closeQty * size;
+    st.lots = st.lots.filter((l) => l.q !== 0);
+    realized.push({ ts: f.ts, broker, product: f.product, pnl });
+    c.pnl += pnl; c.exitQty += closeQty; c.exitVal += closeQty * price;
+    st.pos = r9(st.pos - d * closeQty);
+    if (fifo) st.avg = lotsAvg(st.lots, st.avg);
+    if (st.pos === 0) {
+      closeCycle(st, f.ts);
+      const remaining = r9(Math.abs(q) - closeQty);
+      if (remaining > 0) startCycle(st, f, price, Math.sign(q) * remaining, 0);
+    }
+  }
+
+  const open = Object.values(state)
+    .filter((st) => st.pos !== 0)
+    .map((st) => ({
+      broker: st.broker, product: st.product, side: st.pos > 0 ? "Long" : "Short", lots: Math.abs(st.pos), avg: st.avg,
+      openTs: st.cycle.openTs, fills: st.cycle.fills, realizedSoFar: st.cycle.pnl, fees: st.cycle.fees,
+      lotsOpen: st.lots.map((l) => ({ q: l.q, price: l.price, ts: l.ts, id: l.id })),
+    }))
+    .sort((a, b) => a.broker.localeCompare(b.broker) || a.product.localeCompare(b.product));
+
+  closed.sort((a, b) => new Date(b.closeTs) - new Date(a.closeTs));
+  return { open, closed, realized };
+}
