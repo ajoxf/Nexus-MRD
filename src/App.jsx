@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { db, isRemote, auth } from "./lib/db.js";
+import { db, isRemote } from "./lib/db.js";
 import { computeBook } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { FIELDS, parseCsvFile, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
@@ -203,124 +203,9 @@ const Side = ({ s }) => <span className={`side ${s === "Long" || s === "Buy" ? "
 // =====================================================================
 export default function App() {
   const [user, setUser] = useState(undefined);
-  // Set when you arrive from a password-reset email: show "choose a new password"
-  // instead of the desk, even though that link has already signed you in.
-  const [recovering, setRecovering] = useState(false);
-
-  useEffect(() => {
-    db.getUser().then(setUser);
-    return auth.onAuthChange((u, event) => {
-      setUser(u);
-      if (event === "PASSWORD_RECOVERY") setRecovering(true);
-    });
-  }, []);
-
+  useEffect(() => { db.getUser().then(setUser); }, []);
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
-  if (recovering) return <NewPassword onDone={() => setRecovering(false)} />;
-  if (!user) return <SignIn />;
-  return <Tracker key={user.id} user={user} />;
-}
-
-// Sign-in only: accounts are created by invitation, so there's no sign-up here.
-function SignIn() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [mode, setMode] = useState("in");     // "in" | "forgot"
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-  const [sent, setSent] = useState(false);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setBusy(true); setErr(null);
-    try {
-      if (mode === "forgot") { await auth.sendReset(email); setSent(true); }
-      else await auth.signIn(email, password);
-    } catch (e2) {
-      setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div className="auth">
-      <form className="panel" onSubmit={submit}>
-        <div className="ph"><h2>Nexus: MRD<span className="dim">Margin &amp; Risk Desk</span></h2></div>
-        <div className="pb">
-          {sent ? (
-            <>
-              <p style={{ margin: "0 0 10px" }}>If an account exists for <b>{email}</b>, a reset link is on its way.</p>
-              <p className="dim" style={{ margin: "0 0 12px", fontSize: 12 }}>The link signs you in and asks for a new password. Check spam if it doesn't arrive.</p>
-              <button type="button" className="btn ghost" onClick={() => { setSent(false); setMode("in"); }}>Back to sign in</button>
-            </>
-          ) : (
-            <div className="fg">
-              <F label="Email">
-                <input className="in" type="email" autoComplete="username" required autoFocus
-                  value={email} onChange={(e) => setEmail(e.target.value)} />
-              </F>
-              {mode === "in" && (
-                <F label="Password">
-                  <input className="in" type="password" autoComplete="current-password" required
-                    value={password} onChange={(e) => setPassword(e.target.value)} />
-                </F>
-              )}
-              {err && <div className="bad" style={{ fontSize: 12 }}>{err}</div>}
-              <button className="btn full" disabled={busy}>
-                {busy ? "Please wait…" : mode === "in" ? "Sign in" : "Email me a reset link"}
-              </button>
-              <button type="button" className="btn ghost" onClick={() => { setMode(mode === "in" ? "forgot" : "in"); setErr(null); }}>
-                {mode === "in" ? "Forgotten your password?" : "Back to sign in"}
-              </button>
-            </div>
-          )}
-        </div>
-      </form>
-    </div>
-  );
-}
-
-// Shown after following a reset link.
-function NewPassword({ onDone }) {
-  const [password, setPassword] = useState("");
-  const [again, setAgain] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-  const tooShort = password.length > 0 && password.length < 8;
-  const mismatch = again.length > 0 && password !== again;
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setBusy(true); setErr(null);
-    try { await auth.setPassword(password); onDone(); }
-    catch (e2) { setErr(e2.message); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="auth">
-      <form className="panel" onSubmit={submit}>
-        <div className="ph"><h2>Choose a new password</h2></div>
-        <div className="pb">
-          <div className="fg">
-            <F label="New password" hint="At least 8 characters.">
-              <input className="in" type="password" autoComplete="new-password" required autoFocus
-                value={password} onChange={(e) => setPassword(e.target.value)} />
-            </F>
-            <F label="Repeat it">
-              <input className="in" type="password" autoComplete="new-password" required
-                value={again} onChange={(e) => setAgain(e.target.value)} />
-            </F>
-            {tooShort && <div className="warn" style={{ fontSize: 12 }}>Too short — use at least 8 characters.</div>}
-            {mismatch && <div className="warn" style={{ fontSize: 12 }}>The two passwords don't match.</div>}
-            {err && <div className="bad" style={{ fontSize: 12 }}>{err}</div>}
-            <button className="btn full" disabled={busy || tooShort || mismatch || !password}>
-              {busy ? "Saving…" : "Save password"}
-            </button>
-          </div>
-        </div>
-      </form>
-    </div>
-  );
+  return <Tracker user={user} />;
 }
 
 function Tracker({ user }) {
@@ -447,12 +332,6 @@ function Tracker({ user }) {
         </div>
         <div className="topright">
           <span title={save[0]}><span className="dot" style={{ background: save[1] }} /><span className="savetxt">{save[0]}</span></span>
-          {auth.enabled && (
-            <>
-              <span className="who" title={user.email}>{user.email}</span>
-              <button className="btn ghost" onClick={() => auth.signOut()}>Sign out</button>
-            </>
-          )}
         </div>
       </header>
 
