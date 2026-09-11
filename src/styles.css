@@ -241,3 +241,24 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
   .signin-form { padding: 24px 16px 40px; align-items: start; }
   .signin-card { padding: 24px 20px; }
 }
+
+/* ---------- analysis ---------- */
+.chart-tip { position: absolute; top: 4px; transform: translateX(-50%); background: var(--navy); color: #fff; border-radius: 4px; padding: 6px 9px; font-size: 11px; line-height: 1.4; pointer-events: none; white-space: nowrap; display: grid; gap: 1px; z-index: 2; }
+.chart-tip b { font-family: var(--num); font-size: 13px; }
+.chart-tip span { color: #B9C7D9; }
+.chart-tip .ok { color: #7FD6B0; } .chart-tip .bad { color: #F2A6AB; }
+.chart-foot { display: flex; justify-content: space-between; font-size: 10px; color: var(--faint); padding: 2px 8px 0; }
+
+.dbars { display: grid; gap: 7px; }
+.dbar { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 96px; grid-template-areas: "label track val" "label sub val"; align-items: center; gap: 0 10px; }
+.dbar-label { grid-area: label; font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbar-sub { grid-area: sub; font-size: 10px; }
+.dbar-track { grid-area: track; position: relative; height: 14px; background: var(--panel2); border-radius: 3px; }
+.dbar-zero { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--line2); }
+.dbar-fill { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; min-width: 2px; }
+.dbar-fill.pos { background: var(--ok); border-radius: 0 3px 3px 0; }
+.dbar-fill.neg { background: var(--bad); border-radius: 3px 0 0 3px; }
+.dbar-val { grid-area: val; font-family: var(--num); font-size: 14px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  .dbar { grid-template-columns: minmax(0, 1fr) 90px; grid-template-areas: "label val" "track track" "sub sub"; gap: 2px 8px; }
+}

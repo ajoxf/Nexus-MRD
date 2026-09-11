@@ -193,6 +193,7 @@ const ICONS = {
   scen: <Icon d={<><path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 6-7" /><path d="M20 7v4h-4" /></>} />,
   fills: <Icon d={<><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="3.5" cy="6" r="1" /><circle cx="3.5" cy="12" r="1" /><circle cx="3.5" cy="18" r="1" /></>} />,
   closed: <Icon d={<><path d="M3 7h18v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" /><path d="M2 3h20v4H2zM10 12h4" /></>} />,
+  analysis: <Icon d={<><path d="M3 3v18h18" /><path d="M7 15l4-5 3 3 5-7" /><circle cx="11" cy="10" r="1.2" /><circle cx="14" cy="13" r="1.2" /></>} />,
   funds: <Icon d={<><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /><path d="M16 3l3 3-3 3" /></>} />,
   settings: <Icon d={<><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></>} />,
 };
@@ -406,7 +407,7 @@ function Tracker({ user }) {
   const scaleMax = Math.max(pf.minR * 2, 3, isFinite(ratio) ? Math.min(ratio, pf.minR * 4) : 0);
   const pos = (r) => Math.min(100, Math.max(0, (r / scaleMax) * 100));
   const save = { saved: [isRemote ? "Saved" : "Saved locally", "var(--ok)"], saving: ["Saving…", "var(--warn)"], error: ["Save failed", "var(--bad)"] }[saveState];
-  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["closed", "Closed", pf.book.closed.length], ["funds", "Funds"], ["settings", "Settings"]];
+  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
 
   return (
     <div className="app">
@@ -475,6 +476,7 @@ function Tracker({ user }) {
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} />}
+        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} setLimit={setLimit} setBroker={setBroker} setProduct={setProduct} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
@@ -1628,5 +1630,256 @@ function FundsTab({ pf, settings, setSettings, view }) {
         </section>
       </div>
     </div>
+  );
+}
+
+// =====================================================================
+// Analysis: how the book has actually done. Everything here is built from
+// closed trades, so it is realized money — open positions are excluded.
+// P&L colour is backed up by a signed number and by which side of zero a
+// bar sits on, so the sign never depends on telling red from green.
+const HOUR = 3600e3;
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const monthName = (ym) => `${MONTHS[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
+
+function analyse(closed) {
+  const t = [...closed].sort((a, b) => new Date(a.closeTs) - new Date(b.closeTs));
+  const wins = t.filter((x) => x.pnl > 0), losses = t.filter((x) => x.pnl < 0);
+  const grossWin = sum(wins, (x) => x.pnl), grossLoss = Math.abs(sum(losses, (x) => x.pnl));
+  const net = sum(t, (x) => x.pnl);
+
+  // Equity curve and the deepest fall from a peak along the way.
+  let run = 0, peak = 0, maxDD = 0, ddAt = null;
+  const curve = t.map((x) => {
+    run += x.pnl;
+    if (run > peak) peak = run;
+    const dd = peak - run;
+    if (dd > maxDD) { maxDD = dd; ddAt = x.closeTs; }
+    return { ts: x.closeTs, equity: run, pnl: x.pnl, product: x.product };
+  });
+
+  // Longest run of winners and of losers, in a single pass.
+  let winStreak = 0, lossStreak = 0, cw = 0, cl = 0;
+  t.forEach((x) => {
+    if (x.pnl > 0) { cw++; cl = 0; } else if (x.pnl < 0) { cl++; cw = 0; } else { cw = 0; cl = 0; }
+    winStreak = Math.max(winStreak, cw); lossStreak = Math.max(lossStreak, cl);
+  });
+
+  const group = (keyOf) => {
+    const m = {};
+    t.forEach((x) => {
+      const k = keyOf(x);
+      const g = (m[k] ||= { key: k, trades: 0, lots: 0, wins: 0, net: 0, gw: 0, gl: 0 });
+      g.trades++; g.lots += x.qty; g.net += x.pnl;
+      if (x.pnl > 0) { g.wins++; g.gw += x.pnl; } else if (x.pnl < 0) g.gl += Math.abs(x.pnl);
+    });
+    return Object.values(m).sort((a, b) => b.net - a.net);
+  };
+
+  const held = t.map((x) => (new Date(x.closeTs) - new Date(x.openTs)) / HOUR).filter((h) => isFinite(h) && h >= 0);
+  const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const i = s.length >> 1;
+    return s.length % 2 ? s[i] : (s[i - 1] + s[i]) / 2; };
+
+  return {
+    trades: t, n: t.length, net, wins: wins.length, losses: losses.length,
+    winRate: t.length ? wins.length / t.length : null,
+    grossWin, grossLoss,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
+    expectancy: t.length ? net / t.length : null,
+    avgWin: wins.length ? grossWin / wins.length : 0,
+    avgLoss: losses.length ? grossLoss / losses.length : 0,
+    best: t.reduce((a, x) => (!a || x.pnl > a.pnl ? x : a), null),
+    worst: t.reduce((a, x) => (!a || x.pnl < a.pnl ? x : a), null),
+    curve, peak, maxDD, ddAt, winStreak, lossStreak,
+    byProduct: group((x) => x.product),
+    bySide: group((x) => x.side),
+    byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
+    lots: sum(t, (x) => x.qty),
+    medianHours: median(held),
+  };
+}
+
+// Cumulative realized P&L. One series, so it needs no legend — the title names it.
+function EquityCurve({ curve }) {
+  const [hover, setHover] = useState(null);
+  const W = 760, H = 200, pad = { l: 8, r: 8, t: 12, b: 18 };
+  if (curve.length < 2) return <div className="empty">At least two closed trades are needed to draw a curve.</div>;
+  const ys = curve.map((p) => p.equity).concat(0);
+  const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
+  const x = (i) => pad.l + (i * (W - pad.l - pad.r)) / (curve.length - 1);
+  const y = (v) => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / span);
+  const line = curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(curve.length - 1).toFixed(1)},${y(Math.max(lo, 0)).toFixed(1)} L${x(0).toFixed(1)},${y(Math.max(lo, 0)).toFixed(1)} Z`;
+  const pick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / (curve.length - 1)));
+    setHover(Math.max(0, Math.min(curve.length - 1, i)));
+  };
+  const h = hover !== null ? curve[hover] : null;
+  return (
+    <div style={{ position: "relative" }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+        aria-label={`Cumulative realized P&L over ${curve.length} closed trades, ending at ${money(curve[curve.length - 1].equity)}`}
+        onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+        <line x1={pad.l} x2={W - pad.r} y1={y(0)} y2={y(0)} stroke="var(--line2)" strokeWidth="1" />
+        <path d={area} fill="var(--accent-soft)" />
+        <path d={line} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {h && <>
+          <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={H - pad.b} stroke="var(--line2)" strokeWidth="1" />
+          <circle cx={x(hover)} cy={y(h.equity)} r="4" fill="var(--accent)" stroke="#fff" strokeWidth="2" />
+        </>}
+      </svg>
+      {h && (
+        <div className="chart-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
+          <b>{money(h.equity)}</b>
+          <span>{h.product}</span>
+          <span className={pc(h.pnl)}>{signed(h.pnl)} · {dt(h.ts)}</span>
+        </div>
+      )}
+      <div className="chart-foot">
+        <span>Oldest closed trade</span><span>Most recent</span>
+      </div>
+    </div>
+  );
+}
+
+// Magnitude with polarity: bars run left for a loss and right for a profit, and
+// every bar is labelled with its signed value, so colour is never the only cue.
+function DivergingBars({ rows, label = "row" }) {
+  if (!rows.length) return <div className="empty">Nothing to show yet.</div>;
+  const max = Math.max(...rows.map((r) => Math.abs(r.value)), 1);
+  return (
+    <div className="dbars">
+      {rows.map((r) => {
+        const w = (Math.abs(r.value) / max) * 50;
+        const neg = r.value < 0;
+        return (
+          <div className="dbar" key={r.key} title={`${r.key}: ${signed(r.value)}`}>
+            <span className="dbar-label txt" title={r.key}>{r.key}</span>
+            <span className="dbar-track">
+              <i className="dbar-zero" />
+              <i className={`dbar-fill ${neg ? "neg" : "pos"}`}
+                 style={neg ? { right: "50%", width: `${w}%` } : { left: "50%", width: `${w}%` }} />
+            </span>
+            <span className={`dbar-val ${pc(r.value)}`}>{signed(r.value)}</span>
+            <span className="dbar-sub faint">{r.sub}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AnalysisTab({ pf, settings, view }) {
+  const brokers = settings.brokers;
+  const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
+  const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
+  const a = useMemo(() => analyse(closed), [closed]);
+  const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
+  const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
+
+  if (!a.n) return (
+    <section className="panel"><div className="ph"><h2>Analysis</h2></div>
+      <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
+    </section>
+  );
+
+  return (
+    <>
+      <section className="panel">
+        <div className="ph">
+          <h2>Performance<span className="dim">{a.n} closed trades · {qty(a.lots)} lots</span></h2>
+          <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
+        </div>
+        <div className="strip">
+          <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(a.net)}>{signed(a.net)}</b></div>
+          <div className="kpi"><label>Win rate</label><b>{pct(a.winRate)}</b><span className="faint" style={{ fontSize: 11 }}>{a.wins} won · {a.losses} lost</span></div>
+          <div className="kpi"><label>Profit factor</label><b className={a.profitFactor !== null && a.profitFactor < 1 ? "bad" : a.profitFactor >= 1.5 ? "ok" : ""}>{ratio(a.profitFactor)}</b><span className="faint" style={{ fontSize: 11 }}>won ÷ lost</span></div>
+          <div className="kpi"><label>Expectancy / trade</label><b className={pc(a.expectancy)}>{signed(a.expectancy || 0)}</b></div>
+          <div className="kpi"><label>Average win</label><b className="ok">{money(a.avgWin)}</b></div>
+          <div className="kpi"><label>Average loss</label><b className="bad">{money(-a.avgLoss)}</b></div>
+          <div className="kpi"><label>Largest drawdown</label><b className={a.maxDD ? "bad" : ""}>{a.maxDD ? money(-a.maxDD) : "—"}</b><span className="faint" style={{ fontSize: 11 }}>peak to trough</span></div>
+          <div className="kpi hide-m"><label>Longest streak</label><b><span className="ok">{a.winStreak}W</span> <span className="faint">/</span> <span className="bad">{a.lossStreak}L</span></b></div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="ph"><h2>Cumulative realized P&amp;L<span className="dim">trade by trade</span></h2>
+          <span className="faint" style={{ fontSize: 11 }}>Peak {money(a.peak)}{a.maxDD ? ` · deepest fall from a peak ${money(-a.maxDD)}` : ""}</span></div>
+        <div className="pb"><EquityCurve curve={a.curve} /></div>
+      </section>
+
+      <div className="grid-settings">
+        <section className="panel">
+          <div className="ph"><h2>By product</h2></div>
+          <div className="pb"><DivergingBars rows={a.byProduct.map((g) => ({ key: g.key, value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"} · ${pct(g.trades ? g.wins / g.trades : null)} won` }))} /></div>
+        </section>
+        <section className="panel">
+          <div className="ph"><h2>By month<span className="dim">closed</span></h2></div>
+          <div className="pb"><DivergingBars rows={a.byMonth.map((g) => ({ key: monthName(g.key), value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"}` }))} /></div>
+        </section>
+      </div>
+
+      <section className="panel">
+        <div className="ph"><h2>Product detail</h2></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th className="txt">Product</th><th>Trades</th><th>Lots</th><th>Won</th><th>Win rate</th><th>Gross won</th><th>Gross lost</th><th>Profit factor</th><th>Net</th></tr></thead>
+            <tbody>
+              {a.byProduct.map((g) => (
+                <tr key={g.key}>
+                  <td className="txt"><b>{g.key}</b></td><td>{g.trades}</td><td>{qty(g.lots)}</td><td>{g.wins}</td>
+                  <td>{pct(g.trades ? g.wins / g.trades : null)}</td>
+                  <td className="ok">{money(g.gw)}</td><td className="bad">{money(-g.gl)}</td>
+                  <td className={g.gl > 0 && g.gw / g.gl < 1 ? "bad" : ""}>{ratio(g.gl > 0 ? g.gw / g.gl : (g.gw > 0 ? Infinity : null))}</td>
+                  <td className={pc(g.net)}><b>{signed(g.net)}</b></td>
+                </tr>
+              ))}
+              <tr className="total"><td className="txt">All products</td><td>{a.n}</td><td>{qty(a.lots)}</td><td>{a.wins}</td><td>{pct(a.winRate)}</td>
+                <td className="ok">{money(a.grossWin)}</td><td className="bad">{money(-a.grossLoss)}</td><td>{ratio(a.profitFactor)}</td>
+                <td className={pc(a.net)}><b>{signed(a.net)}</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div className="grid-settings">
+        <section className="panel">
+          <div className="ph"><h2>Long against short</h2></div>
+          <div className="tw">
+            <table>
+              <thead><tr><th className="txt">Side</th><th>Trades</th><th>Win rate</th><th>Net</th></tr></thead>
+              <tbody>
+                {a.bySide.map((g) => (
+                  <tr key={g.key}><td className="txt"><Side s={g.key} /></td><td>{g.trades}</td>
+                    <td>{pct(g.trades ? g.wins / g.trades : null)}</td><td className={pc(g.net)}><b>{signed(g.net)}</b></td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="pb faint" style={{ fontSize: 11 }}>
+            Typical holding time {a.medianHours === null ? "—" : a.medianHours < 24 ? `${a.medianHours.toFixed(1)} hours` : `${(a.medianHours / 24).toFixed(1)} days`} (median).
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="ph"><h2>Biggest trades</h2></div>
+          <div className="tw">
+            <table>
+              <thead><tr><th className="txt"></th><th className="txt">Product</th><th>Side</th><th>Lots</th><th>Closed</th><th>P&amp;L</th></tr></thead>
+              <tbody>
+                {[["Best", a.best], ["Worst", a.worst]].map(([lab, x]) => x && (
+                  <tr key={lab}><td className="txt faint">{lab}</td><td className="txt">{x.product}</td><td><Side s={x.side} /></td>
+                    <td>{qty(x.qty)}</td><td className="dim">{dt(x.closeTs)}</td><td className={pc(x.pnl)}><b>{signed(x.pnl)}</b></td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="pb faint" style={{ fontSize: 11 }}>
+            {view === "all" && brokers.length > 1 ? "Across every broker account. Pick one in the top bar to narrow it." : `${bname(view === "all" ? brokers[0]?.id : view)} only.`}
+          </div>
+        </section>
+      </div>
+    </>
   );
 }
