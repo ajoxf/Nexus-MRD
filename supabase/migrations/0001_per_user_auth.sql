@@ -19,7 +19,7 @@ declare
   n_set    int;
   n_fill   int;
 begin
-  select id into owner_id from auth.users where email = 'aj.oxford16@gmail.com';
+  select id into owner_id from auth.users where email = 'a0504879526@gmail.com';
 
   if owner_id is null then
     raise exception
