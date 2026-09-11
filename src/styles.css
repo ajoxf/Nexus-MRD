@@ -263,3 +263,4 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
   .dbar { grid-template-columns: minmax(0, 1fr) 90px; grid-template-areas: "label val" "track track" "sub sub"; gap: 2px 8px; }
 }
 tbody tr.sep-row td { height: 6px; padding: 0; background: var(--panel2) !important; border-bottom: 1px solid var(--line2); }
+td.faded { opacity: .35; }

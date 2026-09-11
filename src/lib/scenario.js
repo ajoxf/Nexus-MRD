@@ -25,15 +25,16 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const hasPrice = p.mark !== null && isFinite(p.mark);
     const needsPrice = mv.unit === "%" || broker.method === "leverage";
     const dist = hasPrice || mv.unit === "pts" ? moveDist(hasPrice ? p.mark : 0, mv) : NaN;
-    const dir = Math.sign(p.pos);
+    // A held position sets the direction. Flat, the trader can name the side they are
+    // considering (p.plan); with neither, both directions are reported.
+    const dir = Math.sign(p.pos) || (p.plan === "long" ? 1 : p.plan === "short" ? -1 : 0);
     const stressed = hasPrice && dir ? p.mark - dir * dist : null;
-    // Flat, so there is no "against you" yet: give both, since you could go either way.
-    // Buying means the price falling hurts; selling means it rising hurts.
-    const stressedIfLong = hasPrice && isFinite(dist) && !dir ? p.mark - dist : null;
-    const stressedIfShort = hasPrice && isFinite(dist) && !dir ? p.mark + dist : null;
-    const loss = dir ? Math.abs(p.pos) * size * dist : 0;
-    const im = dir ? Math.abs(p.pos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
-    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, loss, im, hasPrice, needsPrice };
+    const both = hasPrice && isFinite(dist) && !dir;
+    const stressedIfLong = both ? p.mark - dist : null;
+    const stressedIfShort = both ? p.mark + dist : null;
+    const loss = p.pos ? Math.abs(p.pos) * size * dist : 0;   // a plan costs nothing until it is on
+    const im = p.pos ? Math.abs(p.pos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
+    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, loss, im, hasPrice, needsPrice };
   });
   const loss = lines.reduce((a, l) => a + (isFinite(l.loss) ? l.loss : 0), 0);
   const IM = lines.reduce((a, l) => a + l.im, 0);

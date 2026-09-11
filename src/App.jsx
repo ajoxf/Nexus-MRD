@@ -170,7 +170,10 @@ function scenarioFor(pf, settings, b) {
     const pos = row ? (row.side === "Long" ? row.lots : -row.lots) : 0;
     const mark = row ? row.mark : has(M[key]?.price) ? n(M[key].price) : null;
     const mv = S.moves[key] || { v: S.defV, unit: S.defUnit };
-    return { key, product, spec, pos, mark, move: mv };
+    // On a flat product you can say which way you're thinking of trading, so the
+    // stressed price and the loss are worked out for that side rather than both.
+    const plan = !pos && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
+    return { key, product, spec, pos, mark, move: mv, plan };
   });
   const res = runScenario(b, acc, prods, target);
   const st = statusOf(res.ratio, acc, pf.minR);
@@ -813,11 +816,23 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       : l.reason === "margin" ? ["warn", "Set margin per lot"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
-                      : l.pos ? ["ok", "Within limit"] : ["dim", "Flat"];
+                      : l.pos ? ["ok", "Within limit"]
+                      : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
+                      : ["dim", "Flat"];
                     return (
                       <tr key={l.key}>
                         <td className="txt"><b>{l.product}</b></td>
-                        <td>{l.pos ? <><Side s={l.pos > 0 ? "Long" : "Short"} /> {qty(Math.abs(l.pos))}</> : <span className="faint">—</span>}</td>
+                        <td>{l.pos
+                          ? <><Side s={l.pos > 0 ? "Long" : "Short"} /> {qty(Math.abs(l.pos))}</>
+                          : <select className="cell" style={{ width: 92, textAlign: "left" }}
+                              value={settings.marks[l.key]?.dir || ""}
+                              onChange={(e) => setMark(l.key, "dir", e.target.value)}
+                              aria-label={`Direction you're considering for ${l.product}`}
+                              title="Flat. Pick the side you're thinking of trading and the stress is worked out for it.">
+                              <option value="">Either way</option>
+                              <option value="long">If long</option>
+                              <option value="short">If short</option>
+                            </select>}</td>
                         <td>{l.pos ? px(l.mark) : <input className="cell" type="number" step="0.01" placeholder="Price" value={settings.marks[l.key]?.price ?? ""} onChange={(e) => setMark(l.key, "price", e.target.value)} aria-label={`Reference price ${l.product}`} />}</td>
                         <td>
                           <span style={{ display: "inline-flex", gap: 4 }}>
@@ -835,8 +850,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                         </td>
                         <td className={l.loss ? "bad" : "faint"}>{l.pos ? money(-l.loss) : "—"}</td>
                         <td>{l.pos ? money(l.im) : <span className="faint">—</span>}</td>
-                        <td className={l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}><b>{cap(l, l.canBuy)}</b></td>
-                        <td className={l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}><b>{cap(l, l.canSell)}</b></td>
+                        <td className={`${l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}${!l.pos && l.dir < 0 ? " faded" : ""}`}><b>{cap(l, l.canBuy)}</b></td>
+                        <td className={`${l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}${!l.pos && l.dir > 0 ? " faded" : ""}`}><b>{cap(l, l.canSell)}</b></td>
                         <td className="txt"><span className={`pill ${status[0]}`}><span className={status[0]}>{status[1]}</span></span></td>
                       </tr>
                     );
