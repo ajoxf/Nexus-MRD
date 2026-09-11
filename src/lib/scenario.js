@@ -85,7 +85,10 @@ export function runScenario(broker, acc, products, target, scale = 1) {
 
 // Smallest uniform % move against every open position that pushes the account to `level` (e.g. callR).
 export function breakingMove(broker, acc, products, level) {
-  const open = products.filter((p) => p.pos && p.mark !== null && isFinite(p.mark));
+  // A planned trade counts: the whole point of sizing one is to see where it would
+  // put the margin call and the stop-out.
+  const held = (p) => p.pos || ((p.plan === "long" || p.plan === "short") && num(p.planLots) > 0);
+  const open = products.filter((p) => held(p) && p.mark !== null && isFinite(p.mark));
   if (!open.length) return null;
   const at = (u) => runScenario(broker, acc, open.map((p) => ({ ...p, move: { v: u, unit: "%" } })), level).ratio;
   if (at(0) <= level) return 0;

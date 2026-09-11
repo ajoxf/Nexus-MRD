@@ -808,6 +808,10 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <div className="kpi"><label>Initial margin after</label><b>{money(res.IM)}</b></div>
               <div className="kpi"><label>Margin call ({b.callRatio}%) if all move</label><b className={callMove !== null && isFinite(callMove) && callMove < 10 ? "bad" : ""}>{moveTxt(callMove)}</b></div>
               <div className="kpi"><label>Stop-out ({b.stopRatio}%) if all move</label><b>{moveTxt(stopMove)}</b></div>
+              <div className="kpi"><label>Max risk per trade</label><b>{acc.riskCap > 0 ? money(acc.riskCap) : "—"}</b>
+                <span className="faint" style={{ fontSize: 11 }}>{L.maxRiskPct}% of {b.name} capital</span></div>
+              <div className="kpi"><label>Daily loss limit</label><b>{pf.dailyCap > 0 ? money(pf.dailyCap) : "—"}</b>
+                <span className="faint" style={{ fontSize: 11 }}>{L.dailyLossPct}% of all capital{pf.total.todayPnl < 0 ? ` · ${money(-pf.total.todayPnl)} used today` : ""}</span></div>
             </div>
             {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div> : <>
             <div className="chips">
@@ -842,6 +846,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
                       : l.pos ? ["ok", "Within limit"]
+                      : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap
+                        ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit`]
                       : l.planned ? ["warn", `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
                       : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
                       : ["dim", "Flat"];
