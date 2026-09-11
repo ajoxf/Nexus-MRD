@@ -1494,8 +1494,15 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings })
           </tbody>
         </table>
       </div>
+      <div className="pb faint" style={{ fontSize: 11, paddingBottom: 0 }}>
+        Products appear here on their own when you import fills. Add one by hand only to trade something
+        before its first fill — and spell it exactly as {b.name} does, or the import will treat it as a
+        second product and split the position.
+      </div>
       <div className="pb" style={{ display: "flex", gap: 8 }}>
-        <input className="in" placeholder={lev ? "Add symbol, e.g. XBRUSD" : "Add product, e.g. RB_CL"} value={newP} onChange={(e) => setNewP(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && addProduct()} />
+        <input className="in" placeholder={lev ? "Add symbol, e.g. XBRUSD" : "Add product, e.g. CL Dec26 - BZ Dec26 Inter-Product"}
+          value={newP} onChange={(e) => setNewP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addProduct()}
+          aria-label={`Add a product to ${b.name}`} />
         <button className="btn" disabled={!newP.trim() || !!b.products?.[newP.trim()]} onClick={addProduct}>Add</button>
       </div>
     </section>
