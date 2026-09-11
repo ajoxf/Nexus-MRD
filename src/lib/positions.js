@@ -14,7 +14,9 @@ const r9 = (x) => (Math.abs(x) < EPS ? 0 : x);
 // sizeOf: (broker, product) => contract size | methodOf: (broker) => "fifo" | "average"
 export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
   const sizeFn = typeof sizeOf === "function" ? sizeOf : (_b, p) => +sizeOf[p]?.size || 1000;
-  const sorted = [...fills].sort(
+  // Legs of a spread trade are kept for reference only — the spread is the trade, so counting
+  // its legs too would book the same risk twice.
+  const sorted = [...fills].filter((f) => !f.is_leg).sort(
     (a, b) => new Date(a.ts) - new Date(b.ts) || String(a.created_at || "").localeCompare(String(b.created_at || ""))
   );
   const state = {};

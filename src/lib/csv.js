@@ -293,25 +293,24 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
     }
     const account = map.account ? String(row[map.account] ?? "").trim() || null : null;
     const position = map.position ? String(row[map.position] ?? "").trim() || null : null;
-    const f = { ts, broker, product, side, qty, price, fee: +fee.toFixed(6), ref, account, position, source: "csv", _order: orderId };
+    const f = { ts, broker, product, side, qty, price, fee: +fee.toFixed(6), ref, account, position, source: "csv", order_id: orderId || null, is_leg: false, _order: orderId };
     if (map.profit) { const pv = num(row[map.profit]); if (isFinite(pv)) f._profit = pv; }
     fills.push(f);
   });
   // Spread orders: an order ID holding a spread fill and its leg fills is one trade shown several ways.
+  // The side that isn't the trade is kept as a leg (is_leg) rather than thrown away, so the fills that
+  // made up a spread can still be looked at. Legs are skipped by every position, margin and P&L sum.
   let legsSkipped = 0, spreadsSkipped = 0, spreadOrders = 0;
   if (map.ref && spreadMode !== "all") {
     const byOrder = {};
     fills.forEach((f) => { if (f._order) (byOrder[f._order] ||= []).push(f); });
-    const drop = new Set();
     for (const list of Object.values(byOrder)) {
       const sp = list.filter((f) => isSpreadSymbol(f.product)), legs = list.filter((f) => !isSpreadSymbol(f.product));
       if (!sp.length || !legs.length) continue;
       spreadOrders++;
-      (spreadMode === "spread" ? legs : sp).forEach((f) => drop.add(f));
+      (spreadMode === "spread" ? legs : sp).forEach((f) => { f.is_leg = true; });
     }
-    const kept = fills.filter((f) => !drop.has(f));
-    fills.forEach((f) => { if (drop.has(f)) { if (isSpreadSymbol(f.product)) spreadsSkipped++; else legsSkipped++; } });
-    fills.length = 0; kept.forEach((f) => fills.push(f));
+    fills.forEach((f) => { if (f.is_leg) { if (isSpreadSymbol(f.product)) spreadsSkipped++; else legsSkipped++; } });
   }
   fills.forEach((f) => delete f._order);
   return { fills, errors, ignored, nonTrade: ignored, feesArePositiveCosts: positiveCosts, offsetMs, legsSkipped, spreadsSkipped, spreadOrders, cash };

@@ -207,3 +207,4 @@ tr.clickable:hover td { background: var(--accent-soft) !important; }
 .seg.seg3 { grid-template-columns: 1fr 1fr 1fr; }
 .seg button.on-charge, .btn.charge { background: #7A5A12; color: #fff; }
 .side.chg { color: #7A5A12; background: var(--warn-soft); }
+tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid var(--line); }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { db, isRemote } from "./lib/db.js";
 import { computeBook } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -238,12 +238,13 @@ function Tracker({ user }) {
   useEffect(() => {
     if (!settings) return;
     const ids = new Set(settings.brokers.map((b) => b.id));
-    const newBrokers = [...new Set(fills.map((f) => f.broker))].filter((id) => !ids.has(id));
-    const missing = fills.filter((f) => { const b = settings.brokers.find((x) => x.id === f.broker); return b && !b.products?.[f.product]; });
+    const traded = fills.filter((f) => !f.is_leg);   // spread legs aren't products in their own right
+    const newBrokers = [...new Set(traded.map((f) => f.broker))].filter((id) => !ids.has(id));
+    const missing = traded.filter((f) => { const b = settings.brokers.find((x) => x.id === f.broker); return b && !b.products?.[f.product]; });
     if (!newBrokers.length && !missing.length) return;
     setSettings((s) => {
       const brokers = [...s.brokers, ...newBrokers.map((id) => ({ ...NEW_BROKER, method: "fixed", id, name: id === "default" ? "Main account" : id }))].map((b) => {
-        const add = [...new Set(fills.filter((f) => f.broker === b.id && !b.products?.[f.product]).map((f) => f.product))];
+        const add = [...new Set(traded.filter((f) => f.broker === b.id && !b.products?.[f.product]).map((f) => f.product))];
         return add.length ? { ...b, products: { ...b.products, ...Object.fromEntries(add.map((p) => [p, { size: b.method === "leverage" ? 100 : 1000, margin: 0, lev: "", note: "" }])) } } : b;
       });
       return { ...s, brokers };
@@ -817,6 +818,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const [applySizes, setApplySizes] = useState(true);
   const [importCash, setImportCash] = useState(true);
   const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "", side: "", from: "", to: "" });
+  const [openLegs, setOpenLegs] = useState(null);   // order_id whose legs are shown
   const [limit, setLimit] = useState(200);
   const fileRef = useRef();
   const tb = brokers.find((b) => b.id === target);
@@ -911,7 +913,11 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   };
+  // Legs hang under their spread rather than listing separately.
+  const legsByOrder = {};
+  fills.forEach((f) => { if (f.is_leg && f.order_id) (legsByOrder[`${f.broker}|${f.order_id}`] ||= []).push(f); });
   const shown = fills.filter((x) =>
+    !x.is_leg &&
     (!filter.broker || x.broker === filter.broker) &&
     (!filter.product || x.product === filter.product) &&
     (!filter.side || x.side === filter.side) &&
@@ -922,7 +928,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   // Deleting acts on a whole broker, never on a filtered view, so the button is held back
   // while a narrowing filter is on — otherwise "Delete all" would bin far more than is on screen.
   const narrowed = !!(filter.product || filter.side || filter.from || filter.to);
-  const productsInFills = [...new Set(fills.filter((x) => !filter.broker || x.broker === filter.broker).map((x) => x.product))].sort();
+  const productsInFills = [...new Set(fills.filter((x) => !x.is_leg && (!filter.broker || x.broker === filter.broker)).map((x) => x.product))].sort();
   const previewing = csv && parsed && !missingReq.length;
   const shortRef = (r) => (/^(fp|m):/.test(r) ? "auto" : String(r).split("|")[0]);
 
@@ -1097,16 +1103,36 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
             <table>
               <thead><tr><th>Time</th><th className="txt">Broker</th><th className="txt">Account</th><th className="txt">Product</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th><th>Fill ID</th><th className="txt">Source</th><th></th></tr></thead>
               <tbody>
-                {shown.slice(0, limit).map((x) => (
-                  <tr key={x.id}>
+                {shown.slice(0, limit).map((x) => {
+                  const key = `${x.broker}|${x.order_id}`;
+                  const legs = x.order_id ? legsByOrder[key] : null;
+                  const open = legs && openLegs === key;
+                  return (
+                  <React.Fragment key={x.id}>
+                  <tr className={legs ? "clickable" : undefined} onClick={legs ? () => setOpenLegs(open ? null : key) : undefined}>
                     <td className="dim">{dt(x.ts)}</td><td className="txt dim">{bname(x.broker)}</td>
                     <td className="txt faint" title="The broker's own account number, as it appears in the file">{x.account || "—"}</td>
-                    <td className="txt">{x.product}</td><td><Side s={x.side} /></td><td>{qty(x.qty)}</td><td>{px(x.price)}</td>
+                    <td className="txt">
+                      {legs && <span className="faint" style={{ marginRight: 5 }} aria-hidden="true">{open ? "▾" : "▸"}</span>}
+                      {x.product}
+                      {legs && <span className="tag" style={{ marginLeft: 6 }}>{legs.length} legs</span>}
+                    </td>
+                    <td><Side s={x.side} /></td><td>{qty(x.qty)}</td><td>{px(x.price)}</td>
                     <td className={+x.fee ? "bad" : "faint"}>{+x.fee ? (+x.fee).toFixed(2) : "—"}</td>
                     <td className="faint">{shortRef(x.ref)}</td><td className="faint txt">{x.source === "csv" ? "CSV" : "Manual"}</td>
-                    <td><button className="btn ghost" onClick={async () => { if (window.confirm("Delete this fill?")) { await db.deleteFill(x.id); await reloadFills(); } }} aria-label="Delete fill">✕</button></td>
+                    <td><button className="btn ghost" onClick={async (e) => { e.stopPropagation(); if (window.confirm("Delete this fill?")) { await db.deleteFill(x.id); await reloadFills(); } }} aria-label="Delete fill">✕</button></td>
                   </tr>
-                ))}
+                  {open && legs.map((g) => (
+                    <tr key={g.id} className="leg">
+                      <td className="faint">{dt(g.ts)}</td><td></td><td></td>
+                      <td className="txt faint" style={{ paddingLeft: 28 }}>{g.product}</td>
+                      <td><Side s={g.side} /></td><td className="faint">{qty(g.qty)}</td><td className="faint">{px(g.price)}</td>
+                      <td colSpan={4} className="txt faint" style={{ fontSize: 11 }}>leg of this spread · not counted in the position</td>
+                    </tr>
+                  ))}
+                  </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
             {shown.length > limit && <div className="pb"><button className="btn ghost" onClick={() => setLimit(limit + 500)}>Show {Math.min(500, shown.length - limit)} more</button></div>}
