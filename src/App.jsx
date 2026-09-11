@@ -753,6 +753,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
   // A capacity number is only meaningful once the product has a price and a margin.
   // Which instruments are on the table. Untouched, it follows what you hold; once you
   // pick, it is exactly what you picked — including nothing.
+  // What is left of today's allowance: the limit, less whatever today has already lost.
+  const dailyLeft = pf.dailyCap > 0 ? Math.max(0, pf.dailyCap - Math.max(0, -pf.total.todayPnl)) : Infinity;
   const picked = Array.isArray(S.pick) ? S.pick : null;
   const isOn = (line) => (picked ? picked.includes(line.key) : !!line.pos);
   const toggle = (line, lines) => {
@@ -832,7 +834,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 {picked ? "Nothing picked." : `${b.name} is flat.`}{" "}
                 Choose the instruments you're thinking of trading{picked ? "" : ", or press All"}.
               </div>
-            ) : <div className="tw">
+            ) : <>
+            <div className="tw">
               <table>
                 <thead><tr>
                   <th className="txt">Product</th><th>Position</th><th>Current price</th><th>Move against you</th><th title="Where the price ends up after the move. Flat products show it both ways: if you bought / if you sold.">Stressed price</th><th>Scenario P&L</th><th>Margin after</th>
@@ -846,8 +849,12 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
                       : l.pos ? ["ok", "Within limit"]
+                      : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap && l.loss > dailyLeft
+                        ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit and past ${money(dailyLeft)} left today`]
                       : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap
                         ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit`]
+                      : l.planned && l.loss > dailyLeft
+                        ? ["bad", `Risks ${money(l.loss)} — only ${money(dailyLeft)} left under today's limit`]
                       : l.planned ? ["warn", `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
                       : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
                       : ["dim", "Flat"];
@@ -897,10 +904,20 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       </tr>
                     );
                   })}
-                  <tr className="total"><td className="txt">Account</td><td colSpan={4}></td><td className={res.loss ? "bad" : ""}>{money(-res.loss)}</td><td>{money(res.IM)}</td><td colSpan={3} className="txt dim">Lots you can add and still stay above {ratioTxt(target)} after the scenario</td></tr>
+                  <tr className="total"><td className="txt">Account</td><td colSpan={4}></td>
+                    <td className={res.loss ? "bad" : ""} title="Every row's loss added up: lots x contract size x the price distance of its move">{money(-res.loss)}</td>
+                    <td title="Every row's margin added up, worked out at the stressed price on a leverage account">{money(res.IM)}</td>
+                    <td colSpan={3} className="txt dim">Lots you can add and still stay above {ratioTxt(target)} after the scenario</td></tr>
                 </tbody>
               </table>
-            </div>}</>}
+            </div>
+            {res.lines.some((l) => l.planned) && isFinite(dailyLeft) && (
+              <div className={`pb ${res.loss > dailyLeft ? "bad" : "faint"}`} style={{ fontSize: 11 }}>
+                {res.loss > dailyLeft
+                  ? `This plan loses ${money(res.loss)} in the scenario, past the ${money(dailyLeft)} left under today's ${money(pf.dailyCap)} daily limit.`
+                  : `This plan loses ${money(res.loss)} in the scenario, within the ${money(dailyLeft)} left under today's ${money(pf.dailyCap)} daily limit.`}
+              </div>
+            )}</>}</>}
           </section>
         );
       })}
