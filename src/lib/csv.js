@@ -7,7 +7,7 @@ export const FIELDS = [
   { key: "side", label: "Buy / sell", required: false, guess: /^(side|b\/s|buy\/sell|action|direction|type|bs)$/i, loose: /side|buy|action/i },
   { key: "qty", label: "Quantity / lots", required: true, guess: /^(qty|quantity|lots?|volume|filled|size|contracts|no\.? of lots)$/i, loose: /qty|quantity|lots?|volume/i },
   { key: "price", label: "Fill price", required: true, guess: /^(price|fill ?price|trade ?price|exec(ution)? ?price|avg ?price|px)$/i, loose: /price|px/i },
-  { key: "ref", label: "Fill / deal ID", required: false, guess: /^(deal|fill[ _]?id|exec(ution)?[ _]?id|trade[ _]?id|deal[ _]?id|id|ref|reference|trade ?no\.?)$/i, loose: /(fill|exec|trade|deal).?(id|no)/i },
+  { key: "ref", label: "Fill / deal ID", required: false, guess: /^(deal|fill[ _]?id|exec(ution)?[ _]?id|trade[ _]?id|deal[ _]?id|(tt)?order[ _]?id|id|ref|reference|trade ?no\.?)$/i, loose: /(fill|exec|trade|deal|order).?(id|no)/i },
   { key: "fee", label: "Commission / fees", required: false, guess: /^(commission|comm|fees?|charges|brokerage)$/i, loose: /commission|fee/i },
   { key: "swap", label: "Swap / rollover", required: false, guess: /^(swap|swaps|rollover|financing)$/i },
   { key: "broker", label: "Broker (multi-broker files)", required: false, guess: /^(broker|platform|portal ?account)$/i },
@@ -24,7 +24,24 @@ export const FIELDS = [
 // single field. Naming the candidates explicitly makes it pick the tab.
 export const DELIMITERS = [",", "\t", ";", "|"];
 
+// Excel workbooks, including the old .xls format. The reader is a big library, so it is only
+// fetched when someone actually picks a spreadsheet; CSV uploads never load it.
+export const SPREADSHEET_RE = /\.(xlsx|xlsm|xlsb|xls|ods)$/i;
+
+async function rowsFromSpreadsheet(file) {
+  const XLSX = await import("@e965/xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  // raw:false gives the text as Excel displays it, so dates and times arrive
+  // looking the way they do in the CSV and go through the same parsing.
+  for (const name of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: "" });
+    if (aoa.some((r) => r.filter(Boolean).length > 1)) return aoa;   // first sheet with real rows
+  }
+  throw new Error("that workbook has no rows in it");
+}
+
 export function parseCsvFile(file) {
+  if (SPREADSHEET_RE.test(file.name || "")) return rowsFromSpreadsheet(file).then(tableFromRows);
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
       header: false, skipEmptyLines: true, delimitersToGuess: DELIMITERS,
@@ -41,17 +58,20 @@ const scoreHeader = (cells) => {
   return FIELDS.filter((f) => f.required || f.key === "side" || f.key === "ref").filter((f) => hs.some((h) => f.guess.test(h) || (f.loose && f.loose.test(h)))).length;
 };
 
-// TT's Fills grid (right-click → Select All → save as CSV) exports the rows with no header line,
-// so there is nothing to match column names against. The layout is fixed, though, and the first
-// seven columns are distinctive enough to recognise: 11Sep26 | 11:56:49.536 | CME | CL Nov26 | B | 1 | 95.29
-const TT_FILLS_HEADERS = ["Date", "Time", "Exchange", "Symbols", "Buy/Sell", "Lot", "Price", "Type", "Route", "Account", "User", "Login", "ID", "Column 14", "Column 15"];
+// TT's Fills grid (right-click → Select All → save) exports the rows with NO header line, so there
+// is nothing to match column names against. The layout is fixed, though, and a row is unmistakable:
+//   11Sep26 | 11:56:49.536 | CME | CL Nov26 | B | 1 | 95.29 | F | Direct | 1003050011-GHF | ...
+// TT's own column names, in the order the Fills grid shows them.
+const TT_FILLS_HEADERS = ["Date", "Time", "Exchange", "Contract", "B/S", "FillQty", "Price", "P/F", "Route", "Account", "Originator", "CurrentUser", "TTOrderID", "Column 14", "Column 15"];
 const ttFillsRow = (r) =>
   r.length >= 13 &&
-  /^\d{1,2}[A-Za-z]{3}\d{2,4}$/.test(r[0] || "") &&           // 11Sep26
-  /^\d{1,2}:\d{2}:\d{2}(\.\d+)?$/.test((r[1] || "").trim()) && // 11:56:49.536
+  // Date: TT writes 11Sep26, but a file opened and re-saved in Excel may hold 9/11/26.
+  /^(\d{1,2}[A-Za-z]{3}\d{2,4}|\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4})$/.test((r[0] || "").trim()) &&
+  /^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(am|pm)?$/i.test((r[1] || "").trim()) && // 11:56:49.536
   /^[BS]$/i.test((r[4] || "").trim()) &&                       // B / S
-  (r[5] || "") !== "" && !isNaN(Number(r[5])) &&               // lots
-  (r[6] || "") !== "" && !isNaN(Number(r[6]));                 // price (spreads can be negative)
+  (r[5] || "") !== "" && !isNaN(Number(r[5])) &&               // FillQty
+  (r[6] || "") !== "" && !isNaN(Number(r[6])) &&               // Price (spreads can be negative)
+  /^[PF]$/i.test((r[7] || "").trim());                         // P/F: partial or full fill
 
 // Every non-blank row must look like a fill: a file with a header line goes down the normal path.
 const looksLikeTtFills = (rows) => {

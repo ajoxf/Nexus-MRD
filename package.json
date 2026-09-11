@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@e965/xlsx": "^0.20.3",
     "@supabase/supabase-js": "^2.116.0",
     "papaparse": "^5.7.0",
     "react": "^18.3.1",

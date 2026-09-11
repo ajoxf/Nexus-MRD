@@ -921,7 +921,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
               onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
               onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
               onDrop={(e) => { e.preventDefault(); setOver(false); load(e.dataTransfer.files?.[0]); }}>
-              <b>Drop a CSV here</b> or click to choose<br /><span className="faint" style={{ fontSize: 11 }}>Orient / TT exports or MT5 deal reports · duplicates are skipped</span>
+              <b>Drop a file here</b> or click to choose<br /><span className="faint" style={{ fontSize: 11 }}>Orient / TT exports or MT5 deal reports · CSV or Excel · duplicates are skipped</span>
             </div>
           ) : (
             <>
@@ -996,7 +996,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
               </div>
             </>
           )}
-          <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={(e) => load(e.target.files?.[0])} />
+          <input ref={fileRef} type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm,.xlsb,.xls,.ods,text/csv" hidden onChange={(e) => load(e.target.files?.[0])} />
           {result && <div className={result[0]}>{result[1]}</div>}
         </div>
       </section>
