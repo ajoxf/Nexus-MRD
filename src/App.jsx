@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS = {
   ],
   marks: {},
   view: "all",
-  scenario: { target: "min", defV: 5, defUnit: "%", moves: {} },
+  scenario: { target: "min", defV: 5, defUnit: "%", moves: {}, openOnly: true },
   cash: [],
   statement: {},
 };
@@ -633,6 +633,12 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 <select className="in" style={{ width: 80 }} value={S.defUnit} onChange={(e) => setScen({ defUnit: e.target.value })}><option value="%">%</option><option value="pts">pts</option></select>
               </div>
             </F>
+            <F label="Products shown" hint="Flat products are only useful when you're sizing a new trade.">
+              <select className="in" value={S.openOnly === false ? "all" : "open"} onChange={(e) => setScen({ openOnly: e.target.value === "open" })}>
+                <option value="open">Open positions only</option>
+                <option value="all">Every product</option>
+              </select>
+            </F>
             <button className="btn" onClick={applyAll}>Apply to all products</button>
           </div>
         </div>
@@ -655,14 +661,16 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <div className="kpi"><label>Margin call ({b.callRatio}%) if all move</label><b className={callMove !== null && isFinite(callMove) && callMove < 10 ? "bad" : ""}>{moveTxt(callMove)}</b></div>
               <div className="kpi"><label>Stop-out ({b.stopRatio}%) if all move</label><b>{moveTxt(stopMove)}</b></div>
             </div>
-            {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div> : <div className="tw">
+            {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div>
+             : S.openOnly !== false && !res.lines.some((l) => l.pos) ? <div className="empty">{b.name} is flat. <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button> to size a new trade.</div>
+             : <div className="tw">
               <table>
                 <thead><tr>
                   <th className="txt">Product</th><th>Position</th><th>Current price</th><th>Move against you</th><th>Stressed price</th><th>Scenario P&L</th><th>Margin after</th>
                   <th>Can buy</th><th>Can sell</th><th className="txt">Status</th>
                 </tr></thead>
                 <tbody>
-                  {res.lines.map((l) => {
+                  {(S.openOnly === false ? res.lines : res.lines.filter((l) => l.pos)).map((l) => {
                     const mv = S.moves[l.key] || { v: S.defV, unit: S.defUnit };
                     const status = l.reason === "price" ? ["warn", "Enter a price"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
@@ -691,6 +699,12 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                   <tr className="total"><td className="txt">Account</td><td colSpan={4}></td><td className={res.loss ? "bad" : ""}>{money(-res.loss)}</td><td>{money(res.IM)}</td><td colSpan={3} className="txt dim">Lots you can add and still stay above {ratioTxt(target)} after the scenario</td></tr>
                 </tbody>
               </table>
+              {S.openOnly !== false && res.lines.some((l) => !l.pos) && (
+                <div className="pb faint" style={{ fontSize: 11 }}>
+                  {res.lines.filter((l) => !l.pos).length} flat product{res.lines.filter((l) => !l.pos).length === 1 ? "" : "s"} hidden.{" "}
+                  <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button>
+                </div>
+              )}
             </div>}
           </section>
         );
@@ -880,7 +894,8 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         const add = newIds.map((id) => ({ method: tb.method, leverage: tb.leverage, callRatio: tb.callRatio, stopRatio: tb.stopRatio, match: tb.match, capital: 0, id, name: id, products: {} }));
         const all = [...st.brokers, ...add].map((b) => {
           const prods = { ...b.products };
-          payload.filter((f) => f.broker === b.id).forEach((f) => {
+          // Legs are stored for reference only, so they don't get a product of their own.
+          payload.filter((f) => f.broker === b.id && !f.is_leg).forEach((f) => {
             const est = parsed.sizes[`${b.id}|${f.product}`]?.size;
             if (!prods[f.product]) {
               // Spreads: start from the margin of the matching house product (BZ_CL, HO_CL, CL_CL) if the broker has it.
