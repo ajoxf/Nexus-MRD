@@ -1680,6 +1680,9 @@ function FundsTab({ pf, settings, setSettings, view }) {
 // bar sits on, so the sign never depends on telling red from green.
 const HOUR = 3600e3;
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const dayKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const dayLabel = (k) => `${+k.slice(8, 10)} ${MONTHS[+k.slice(5, 7) - 1]} ${k.slice(0, 4)}`;
 const monthName = (ym) => `${MONTHS[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
 
 function analyse(closed) {
@@ -1734,6 +1737,12 @@ function analyse(closed) {
     byProduct: group((x) => x.product),
     bySide: group((x) => x.side),
     byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
+    // Hour and weekday go by when the trade was OPENED — that's the decision you can change.
+    byHour: group((x) => new Date(x.openTs).getHours()).sort((a, b) => a.key - b.key),
+    // Monday first: a trading week reads better that way than Sunday first.
+    byDow: group((x) => new Date(x.openTs).getDay()).sort((a, b) => ((a.key + 6) % 7) - ((b.key + 6) % 7)),
+    // A day's P&L is the money realized that day, so this one goes by the close.
+    byDay: group((x) => dayKey(x.closeTs)),
     lots: sum(t, (x) => x.qty),
     medianHours: median(held),
   };
@@ -1878,6 +1887,50 @@ function AnalysisTab({ pf, settings, view }) {
               <tr className="total"><td className="txt">All products</td><td>{a.n}</td><td>{qty(a.lots)}</td><td>{a.wins}</td><td>{pct(a.winRate)}</td>
                 <td className="ok">{money(a.grossWin)}</td><td className="bad">{money(-a.grossLoss)}</td><td>{ratio(a.profitFactor)}</td>
                 <td className={pc(a.net)}><b>{signed(a.net)}</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div className="grid-settings">
+        <section className="panel">
+          <div className="ph"><h2>By hour opened<span className="dim">your clock</span></h2>
+            <span className="faint" style={{ fontSize: 11 }}>When the trade was put on</span></div>
+          <div className="pb"><DivergingBars rows={a.byHour.map((g) => ({
+            key: `${String(g.key).padStart(2, "0")}:00`, value: g.net,
+            sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"} · ${pct(g.trades ? g.wins / g.trades : null)} won` }))} /></div>
+          <div className="pb faint" style={{ fontSize: 11, paddingTop: 0 }}>
+            Times are your browser's. If TT shows you a different clock, these hours shift with it.
+          </div>
+        </section>
+        <section className="panel">
+          <div className="ph"><h2>By day of week<span className="dim">opened</span></h2></div>
+          <div className="pb"><DivergingBars rows={a.byDow.map((g) => ({
+            key: DOW[g.key], value: g.net,
+            sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"} · ${pct(g.trades ? g.wins / g.trades : null)} won` }))} /></div>
+        </section>
+      </div>
+
+      <section className="panel">
+        <div className="ph"><h2>Best and worst days<span className="dim">by money realized that day</span></h2></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th className="txt"></th><th className="txt">Day</th><th>Trades</th><th>Lots</th><th>Won</th><th>Win rate</th><th>Net</th></tr></thead>
+            <tbody>
+              {(() => {
+                const best = a.byDay.filter((g) => g.net > 0).slice(0, 3);
+                const worst = a.byDay.filter((g) => g.net < 0).slice(-3).reverse();
+                if (!best.length && !worst.length) return <tr><td colSpan={7} className="txt faint">No closed days yet.</td></tr>;
+                return [...best.map((g) => [g, "ok"]), ...worst.map((g) => [g, "bad"])].map(([g, cls], i) => (
+                  <tr key={g.key}>
+                    <td className="txt faint">{cls === "ok" ? (i === 0 ? "Best" : "") : (i === best.length ? "Worst" : "")}</td>
+                    <td className="txt"><b>{dayLabel(g.key)}</b> <span className="faint">{DOW[new Date(`${g.key}T12:00:00`).getDay()]}</span></td>
+                    <td>{g.trades}</td><td>{qty(g.lots)}</td><td>{g.wins}</td>
+                    <td>{pct(g.trades ? g.wins / g.trades : null)}</td>
+                    <td className={pc(g.net)}><b>{signed(g.net)}</b></td>
+                  </tr>
+                ));
+              })()}
             </tbody>
           </table>
         </div>
