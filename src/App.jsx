@@ -803,7 +803,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
              : <div className="tw">
               <table>
                 <thead><tr>
-                  <th className="txt">Product</th><th>Position</th><th>Current price</th><th>Move against you</th><th>Stressed price</th><th>Scenario P&L</th><th>Margin after</th>
+                  <th className="txt">Product</th><th>Position</th><th>Current price</th><th>Move against you</th><th title="Where the price ends up after the move. Flat products show it both ways: if you bought / if you sold.">Stressed price</th><th>Scenario P&L</th><th>Margin after</th>
                   <th>Can buy</th><th>Can sell</th><th className="txt">Status</th>
                 </tr></thead>
                 <tbody>
@@ -825,7 +825,14 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                             <select className="cell" style={{ width: 58, textAlign: "left" }} value={mv.unit} onChange={(e) => setMove(l.key, { unit: e.target.value })} aria-label={`Unit ${l.product}`}><option value="%">%</option><option value="pts">pts</option></select>
                           </span>
                         </td>
-                        <td className="dim">{l.stressed !== null ? px(l.stressed) : "—"}</td>
+                        <td className="dim">
+                          {l.stressed !== null ? px(l.stressed)
+                            : l.stressedIfLong !== null
+                              ? <span title={`If you bought it: ${px(l.stressedIfLong)}. If you sold it: ${px(l.stressedIfShort)}.`}>
+                                  {px(l.stressedIfLong)}<span className="faint"> / </span>{px(l.stressedIfShort)}
+                                </span>
+                              : "—"}
+                        </td>
                         <td className={l.loss ? "bad" : "faint"}>{l.pos ? money(-l.loss) : "—"}</td>
                         <td>{l.pos ? money(l.im) : <span className="faint">—</span>}</td>
                         <td className={l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}><b>{cap(l, l.canBuy)}</b></td>
