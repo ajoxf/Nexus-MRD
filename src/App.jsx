@@ -1440,14 +1440,14 @@ function SettingsTab({ settings, setSettings, setLimit, setBroker, setProduct, p
       <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
 
       {settings.brokers.map((b) => (
-        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
+        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={L.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
           setBroker={setBroker} setProduct={setProduct} setSettings={setSettings} />
       ))}
     </div>
   );
 }
 
-function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings }) {
+function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings, minRatio }) {
   const [newP, setNewP] = useState("");
   const set = (k) => (e) => setBroker(b.id, k, e.target.value);
   const lev = b.method === "leverage";
@@ -1496,6 +1496,9 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings })
           </F>
           <F label="Margin call level (TNE/IM %)" hint={lev ? "MT5: 'Margin call' level" : null}><input className="in" type="number" value={b.callRatio} onChange={set("callRatio")} /></F>
           <F label="Stop-out level (TNE/IM %)" hint={lev ? "MT5: 'Stop out' level" : null}><input className="in" type="number" value={b.stopRatio} onChange={set("stopRatio")} /></F>
+          <F label="Your own minimum (TNE/IM %)" hint="Set once in Your limits — it applies to every account">
+            <div className="in dim" style={{ background: "var(--panel2)" }}>{minRatio}%</div>
+          </F>
         </div>
       </div>
       <div className="tw">
