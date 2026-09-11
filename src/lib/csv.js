@@ -40,6 +40,14 @@ async function rowsFromSpreadsheet(file) {
   throw new Error("that workbook has no rows in it");
 }
 
+// Rows copied straight out of a grid (TT's Fills, Excel, Google Sheets) arrive tab-separated on the
+// clipboard. Same table, same importer — only the source differs.
+export function parsePastedText(text) {
+  const t = String(text || "").trim();
+  if (!t) throw new Error("nothing was pasted");
+  return tableFromRows(Papa.parse(t, { header: false, skipEmptyLines: true, delimitersToGuess: DELIMITERS }).data);
+}
+
 export function parseCsvFile(file) {
   if (SPREADSHEET_RE.test(file.name || "")) return rowsFromSpreadsheet(file).then(tableFromRows);
   return new Promise((resolve, reject) => {

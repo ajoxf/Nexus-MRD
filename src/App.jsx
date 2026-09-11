@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { db, isRemote } from "./lib/db.js";
 import { computeBook } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
-import { FIELDS, parseCsvFile, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
+import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
 const ORIENT_PRODUCTS = {
@@ -810,6 +810,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
+  const [paste, setPaste] = useState(null);   // null = not pasting; string = the pasted text
   const [includeManual, setIncludeManual] = useState(false);
   const [split, setSplit] = useState(true);
   const [spreadMode, setSpreadMode] = useState("spread");
@@ -832,6 +833,16 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     setResult(null);
     try { const { headers, rows } = await parseCsvFile(file); setCsv({ name: file.name, headers, rows }); applyLayout(headers, target); }
     catch (err) { setResult(["bad", `Couldn't read the file: ${err.message}`]); }
+  };
+  // Rows pasted from the TT Fills grid go through exactly the same reader as a file.
+  const loadPasted = () => {
+    setResult(null);
+    try {
+      const { headers, rows } = parsePastedText(paste);
+      setCsv({ name: `${rows.length} pasted row${rows.length === 1 ? "" : "s"}`, headers, rows });
+      applyLayout(headers, target);
+      setPaste(null);
+    } catch (err) { setResult(["bad", `Couldn't read those rows: ${err.message}`]); }
   };
   const reset = () => { setCsv(null); setIncludeManual(false); setSplit(true); setApplySizes(true); setSpreadMode("spread"); setImportCash(true); if (fileRef.current) fileRef.current.value = ""; };
   const resolveBroker = (raw) => { const v = raw.toLowerCase(); return brokers.find((b) => b.id.toLowerCase() === v || b.name.toLowerCase() === v)?.id || null; };
@@ -916,13 +927,28 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
               {brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </F>
-          {!csv ? (
-            <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
-              onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
-              onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
-              onDrop={(e) => { e.preventDefault(); setOver(false); load(e.dataTransfer.files?.[0]); }}>
-              <b>Drop a file here</b> or click to choose<br /><span className="faint" style={{ fontSize: 11 }}>Orient / TT exports or MT5 deal reports · CSV or Excel · duplicates are skipped</span>
-            </div>
+          {!csv && paste === null ? (
+            <>
+              <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
+                onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+                onDrop={(e) => { e.preventDefault(); setOver(false); load(e.dataTransfer.files?.[0]); }}>
+                <b>Drop a file here</b> or click to choose<br /><span className="faint" style={{ fontSize: 11 }}>Orient / TT exports or MT5 deal reports · CSV or Excel · duplicates are skipped</span>
+              </div>
+              <button className="btn ghost" style={{ marginTop: 8, width: "100%" }} onClick={() => setPaste("")}>Or paste rows from the Fills grid</button>
+            </>
+          ) : !csv ? (
+            <>
+              <F label="Paste rows" hint="In TT: select the fills, copy, then paste here. No header row needed.">
+                <textarea className="in" rows={8} autoFocus value={paste} onChange={(e) => setPaste(e.target.value)}
+                  style={{ fontFamily: "var(--num)", fontSize: 11, whiteSpace: "pre", overflowWrap: "normal", overflowX: "auto" }}
+                  placeholder={"11Sep26\t11:56:49.536\tCME\tCL Nov26\tB\t1\t95.29\tF\t…"} />
+              </F>
+              <div className="fg c2" style={{ marginTop: 8 }}>
+                <button className="btn" disabled={!paste.trim()} onClick={loadPasted}>Read rows</button>
+                <button className="btn ghost" onClick={() => { setPaste(null); setResult(null); }}>Cancel</button>
+              </div>
+            </>
           ) : (
             <>
               <div><b>{csv.name}</b> <span className="dim">· {csv.rows.length} rows</span>{savedLayout && <span className="ok" style={{ fontSize: 11, marginLeft: 6 }}>Using {tb.name}'s saved layout</span>}</div>
