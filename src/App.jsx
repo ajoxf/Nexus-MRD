@@ -816,7 +816,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const [spreadMode, setSpreadMode] = useState("spread");
   const [applySizes, setApplySizes] = useState(true);
   const [importCash, setImportCash] = useState(true);
-  const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "" });
+  const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "", side: "", from: "", to: "" });
   const [limit, setLimit] = useState(200);
   const fileRef = useRef();
   const tb = brokers.find((b) => b.id === target);
@@ -906,7 +906,22 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const download = (text, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" })); a.download = name; a.click(); };
 
 
-  const shown = fills.filter((x) => (!filter.broker || x.broker === filter.broker) && (!filter.product || x.product === filter.product)).sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  // Dates are compared on the local calendar day, so "from 10 Sep to 10 Sep" keeps that whole day.
+  const dayOf = (ts) => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const shown = fills.filter((x) =>
+    (!filter.broker || x.broker === filter.broker) &&
+    (!filter.product || x.product === filter.product) &&
+    (!filter.side || x.side === filter.side) &&
+    (!filter.from || dayOf(x.ts) >= filter.from) &&
+    (!filter.to || dayOf(x.ts) <= filter.to)
+  ).sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  const filtered = !!(filter.broker || filter.product || filter.side || filter.from || filter.to);
+  // Deleting acts on a whole broker, never on a filtered view, so the button is held back
+  // while a narrowing filter is on — otherwise "Delete all" would bin far more than is on screen.
+  const narrowed = !!(filter.product || filter.side || filter.from || filter.to);
   const productsInFills = [...new Set(fills.filter((x) => !filter.broker || x.broker === filter.broker).map((x) => x.product))].sort();
   const previewing = csv && parsed && !missingReq.length;
   const shortRef = (r) => (/^(fp|m):/.test(r) ? "auto" : String(r).split("|")[0]);
@@ -1032,15 +1047,25 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
           <h2>{previewing ? "Preview" : "All fills"}<span className="dim">{previewing ? `${toImport.length} of ${parsed.rows.length} will be imported` : shown.length}</span></h2>
           {!csv && (
             <div className="actions">
-              <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter({ broker: e.target.value, product: "" })} aria-label="Filter by broker">
+              <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter((x) => ({ ...x, broker: e.target.value, product: "" }))} aria-label="Filter by broker">
                 <option value="">All brokers</option>{brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
               <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.product} onChange={(e) => setFilter((x) => ({ ...x, product: e.target.value }))} aria-label="Filter by product">
                 <option value="">All products</option>{productsInFills.map((p) => <option key={p}>{p}</option>)}
               </select>
+              <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.side} onChange={(e) => setFilter((x) => ({ ...x, side: e.target.value }))} aria-label="Filter by buy or sell">
+                <option value="">Buy &amp; sell</option><option value="Buy">Buy only</option><option value="Sell">Sell only</option>
+              </select>
+              <input className="in" style={{ width: "auto", padding: "4px 8px" }} type="date" value={filter.from}
+                onChange={(e) => setFilter((x) => ({ ...x, from: e.target.value }))} aria-label="Fills from this date" title="From this date" />
+              <input className="in" style={{ width: "auto", padding: "4px 8px" }} type="date" value={filter.to}
+                onChange={(e) => setFilter((x) => ({ ...x, to: e.target.value }))} aria-label="Fills up to this date" title="Up to this date" />
+              {filtered && <button className="btn ghost" onClick={() => setFilter({ broker: "", product: "", side: "", from: "", to: "" })}>Clear filters</button>}
               <button className="btn ghost" disabled={!fills.length} onClick={() => downloadBackup(fills, brokers)}>Export CSV</button>
-              <button className="btn ghost red" disabled={!shown.length} onClick={async () => {
-                const one = filter.broker && !filter.product;
+              <button className="btn ghost red" disabled={!shown.length || narrowed}
+                title={narrowed ? "Clear the product, side and date filters first — deleting only works on a whole broker" : undefined}
+                onClick={async () => {
+                const one = filter.broker;
                 const list = one ? fills.filter((x) => x.broker === filter.broker) : fills;
                 const ok = await safeDelete({ fills: list, brokers, label: one ? filter.broker : "all", what: one ? `all ${list.length} ${bname(filter.broker)} fills` : `all ${list.length} fills across every broker`, run: () => (one ? db.deleteBrokerFills(filter.broker) : db.deleteAllFills()) });
                 if (ok) await reloadFills();
