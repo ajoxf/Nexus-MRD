@@ -88,8 +88,12 @@ export function breakingMove(broker, acc, products, level) {
   // A planned trade counts: the whole point of sizing one is to see where it would
   // put the margin call and the stop-out.
   const held = (p) => p.pos || ((p.plan === "long" || p.plan === "short") && num(p.planLots) > 0);
-  const open = products.filter((p) => held(p) && p.mark !== null && isFinite(p.mark));
-  if (!open.length) return null;
+  const on = products.filter(held);
+  if (!on.length) return null;                    // genuinely nothing on
+  // This walks the move in %, which needs a price to move from. A position priced in points
+  // still costs money and still takes margin, so saying "no open positions" here would be a lie.
+  const open = on.filter((p) => p.mark !== null && isFinite(p.mark));
+  if (!open.length) return NaN;                   // something is on, but there is no price to stress
   const at = (u) => runScenario(broker, acc, open.map((p) => ({ ...p, move: { v: u, unit: "%" } })), level).ratio;
   if (at(0) <= level) return 0;
   let lo = 0, hi = 100;

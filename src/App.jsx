@@ -182,9 +182,16 @@ function scenarioFor(pf, settings, b) {
   });
   const res = runScenario(b, acc, prods, target);
   const st = statusOf(res.ratio, acc, pf.minR);
-  return { acc, target, res, st, callMove: breakingMove(b, acc, prods, acc.callR), stopMove: breakingMove(b, acc, prods, acc.stopR) };
+  return { acc, target, res, st,
+    minMove: breakingMove(b, acc, prods, pf.minR),
+    callMove: breakingMove(b, acc, prods, acc.callR),
+    stopMove: breakingMove(b, acc, prods, acc.stopR) };
 }
-const moveTxt = (x) => (x === null ? "No open positions" : !isFinite(x) ? "Not reachable" : x === 0 ? "Already there" : `${x.toFixed(1)}% against you`);
+const moveTxt = (x) => (x === null ? "No open positions"
+  : Number.isNaN(x) ? "Enter a current price"
+  : !isFinite(x) ? "Not reachable"
+  : x === 0 ? "Already there"
+  : `${x.toFixed(1)}% against you`);
 
 const statusOf = (ratio, acc, minR) =>
   !isFinite(ratio) || !acc ? { cls: "dim", t: "Flat" } :
@@ -794,7 +801,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
       </section>
 
       {brokers.map((b) => {
-        const { acc, target, res, st, callMove, stopMove } = scenarioFor(pf, settings, b);
+        const { acc, target, res, st, minMove, callMove, stopMove } = scenarioFor(pf, settings, b);
         const verdict = !isFinite(res.ratio) ? ["dim", "No open positions. Capacity shows what you could put on under this scenario."]
           : res.ratio <= acc.stopR ? ["bad", "This scenario takes the account to stop-out. Positions would be liquidated."]
           : res.ratio <= acc.callR ? ["bad", "This scenario triggers a margin call. Reduce positions or add funds."]
@@ -923,6 +930,25 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 </tbody>
               </table>
             </div>
+            {res.lines.some((l) => l.effPos) && (
+              <div className="pb faint" style={{ fontSize: 11 }}>
+                <b className="dim">What stops you first.</b>{" "}
+                {(() => {
+                  const steps = [
+                    [minMove, `your own ${L.minRatio}% minimum`],
+                    [callMove, `${b.name}'s margin call at ${b.callRatio}%`],
+                    [stopMove, `stop-out at ${b.stopRatio}%`],
+                  ].filter(([m]) => typeof m === "number" && !Number.isNaN(m) && isFinite(m));
+                  if (!steps.length) return `Nothing on this account is reachable within a 100% move. Your ${money(acc.riskCap)} per-trade and ${money(pf.dailyCap)} daily limits still cap the size.`;
+                  return <>
+                    {steps.map(([m, what], i) => (
+                      <span key={what}>{i ? ", then " : "Moving against you, "}<b className={i === 0 ? "warn" : ""}>{m.toFixed(1)}%</b> hits {what}</span>
+                    ))}
+                    . Size is capped before any of that by your {money(acc.riskCap)} per-trade limit and {money(pf.dailyCap)} daily limit — whichever bites first is the one that stops you.
+                  </>;
+                })()}
+              </div>
+            )}
             {res.lines.some((l) => l.pos && !isOn(l)) && (
               <div className="pb warn" style={{ fontSize: 11 }}>
                 The Account row also covers {res.lines.filter((l) => l.pos && !isOn(l)).length} open position
