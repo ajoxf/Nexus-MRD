@@ -42,7 +42,10 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
   const closed = [];
   const realized = [];
 
-  const newLot = (f, q, price, fee) => ({ id: f.position || null, q, price, q0: Math.abs(q), ts: f.ts, exitQty: 0, exitVal: 0, pnl: fee, fees: fee, fills: 1 });
+  // openOrders / closeOrders are the broker order ids behind a trade, so the legs of a
+  // spread can be looked up again once it is closed.
+  const newLot = (f, q, price, fee) => ({ id: f.position || null, q, price, q0: Math.abs(q), ts: f.ts, exitQty: 0, exitVal: 0, pnl: fee, fees: fee, fills: 1, openOrders: f.order_id ? [f.order_id] : [], closeOrders: [] });
+  const note = (arr, id) => { if (id && !arr.includes(id)) arr.push(id); };
   const lotsAvg = (lots, fallback) => {
     const tq = lots.reduce((a, l) => a + Math.abs(l.q), 0);
     return tq ? lots.reduce((a, l) => a + Math.abs(l.q) * l.price, 0) / tq : fallback;
@@ -53,6 +56,7 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
       broker: st.broker, product: f.product, side: q > 0 ? "Long" : "Short", openTs: f.ts,
       entryQty: Math.abs(q), entryVal: Math.abs(q) * price,
       exitQty: 0, exitVal: 0, pnl: fee, fees: fee, fills: 1, maxQty: Math.abs(q), ticketed: false,
+      openOrders: f.order_id ? [f.order_id] : [], closeOrders: [],
     };
   };
   const closeCycle = (st, ts) => {
@@ -83,12 +87,14 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
       const d = Math.sign(lot.q);
       const pnl = d * (price - lot.price) * closeQty * size;
       realized.push({ ts: f.ts, broker, product: f.product, pnl });
-      c.pnl += pnl; c.exitQty += closeQty; c.exitVal += closeQty * price; c.ticketed = true;
+      c.pnl += pnl; c.exitQty += closeQty; c.exitVal += closeQty * price; note(c.closeOrders, f.order_id); c.ticketed = true;
       lot.pnl += pnl + fee; lot.fees += fee; lot.exitQty += closeQty; lot.exitVal += closeQty * price; lot.fills++;
+      note(lot.closeOrders, f.order_id); note(c.closeOrders, f.order_id);
       lot.q = r9(lot.q - d * closeQty);
       if (lot.q === 0) {
         closed.push({ broker, product: f.product, side: d > 0 ? "Long" : "Short", openTs: lot.ts, closeTs: f.ts, qty: lot.q0, maxQty: lot.q0,
-          avgEntry: lot.price, avgExit: lot.exitVal / lot.exitQty, pnl: lot.pnl, fees: lot.fees, fills: lot.fills, ticket: lot.id });
+          avgEntry: lot.price, avgExit: lot.exitVal / lot.exitQty, pnl: lot.pnl, fees: lot.fees, fills: lot.fills, ticket: lot.id,
+          openOrders: lot.openOrders, closeOrders: lot.closeOrders });
       }
       st.lots = st.lots.filter((l) => l.q !== 0);
       st.pos = r9(st.pos - d * closeQty);
@@ -100,6 +106,7 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
     // 2) Adding to the position
     if (Math.sign(q) === Math.sign(st.pos)) {
       st.lots.push(newLot(f, q, price, 0));
+      note(c.openOrders, f.order_id);
       st.pos = r9(st.pos + q);
       st.avg = fifo || f.position ? lotsAvg(st.lots, price) : (Math.abs(st.pos - q) * st.avg + Math.abs(q) * price) / Math.abs(st.pos);
       c.entryQty += Math.abs(q); c.entryVal += Math.abs(q) * price;
@@ -119,12 +126,14 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
         const lp = d * (price - l.price) * take * size;
         pnl += lp;
         l.pnl += lp + feeLeft; l.fees += feeLeft; feeLeft = 0; l.exitQty += take; l.exitVal += take * price; l.fills++;
+        note(l.closeOrders, f.order_id);
       }
       l.q = r9(l.q - d * take); left = r9(left - take);
       if (fifo && l.q === 0) {
         // FIFO: each squared-off lot is its own closed trade (entry lot vs the fills that closed it)
         closed.push({ broker, product: f.product, side: d > 0 ? "Long" : "Short", openTs: l.ts, closeTs: f.ts, qty: l.q0, maxQty: l.q0,
-          avgEntry: l.price, avgExit: l.exitVal / l.exitQty, pnl: l.pnl, fees: l.fees, fills: l.fills, matched: "fifo" });
+          avgEntry: l.price, avgExit: l.exitVal / l.exitQty, pnl: l.pnl, fees: l.fees, fills: l.fills, matched: "fifo",
+          openOrders: l.openOrders, closeOrders: l.closeOrders });
       }
     }
     if (fifo) c.ticketed = true; // closed trades already recorded per lot

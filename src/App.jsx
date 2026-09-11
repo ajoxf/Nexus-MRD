@@ -475,7 +475,7 @@ function Tracker({ user }) {
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} goFills={() => setTab("fills")} goSettings={() => setTab("settings")} goScen={() => setTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
-        {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} />}
+        {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} setLimit={setLimit} setBroker={setBroker} setProduct={setProduct} pf={pf} fills={fills} reloadFills={reloadFills} />}
@@ -1294,8 +1294,17 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
 }
 
 // ---------- closed ----------
-function ClosedTab({ pf, settings, view }) {
+function ClosedTab({ pf, settings, view, fills }) {
   const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "" });
+  const [open, setOpen] = useState(null);
+  // Spread legs, keyed by the broker order they belong to, so a closed trade can show
+  // what its two instruments actually filled at going in and coming out.
+  const legsByOrder = useMemo(() => {
+    const m = {};
+    (fills || []).forEach((f) => { if (f.is_leg && f.order_id) (m[`${f.broker}|${f.order_id}`] ||= []).push(f); });
+    return m;
+  }, [fills]);
+  const legsFor = (broker, orders) => (orders || []).flatMap((o) => legsByOrder[`${broker}|${o}`] || []);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product));
   const total = sum(closed, (c) => c.pnl);
@@ -1328,13 +1337,44 @@ function ClosedTab({ pf, settings, view }) {
           <table>
             <thead><tr><th className="txt">Broker</th><th className="txt">Product</th><th>Side</th><th>Lots</th><th>Entry</th><th>Exit</th><th>Opened</th><th>Closed</th><th>Fees</th><th>Realized P&L</th></tr></thead>
             <tbody>
-              {closed.map((c, i) => (
-                <tr key={i}>
-                  <td className="txt dim">{bname(c.broker)}</td><td className="txt"><b>{c.product}</b></td><td><Side s={c.side} /></td><td>{qty(c.qty)}</td>
+              {closed.map((c, i) => {
+                const inLegs = legsFor(c.broker, c.openOrders), outLegs = legsFor(c.broker, c.closeOrders);
+                const hasLegs = inLegs.length || outLegs.length;
+                const isOpen = open === i;
+                return (
+                <React.Fragment key={i}>
+                <tr className={hasLegs ? "clickable" : undefined} onClick={hasLegs ? () => setOpen(isOpen ? null : i) : undefined}>
+                  <td className="txt dim">{bname(c.broker)}</td>
+                  <td className="txt">
+                    {hasLegs && <span className="faint" style={{ marginRight: 5 }} aria-hidden="true">{isOpen ? "▾" : "▸"}</span>}
+                    <b>{c.product}</b>
+                  </td>
+                  <td><Side s={c.side} /></td><td>{qty(c.qty)}</td>
                   <td>{px(c.avgEntry)}</td><td>{px(c.avgExit)}</td><td className="dim">{dt(c.openTs)}</td><td className="dim">{dt(c.closeTs)}</td>
                   <td className={c.fees ? "bad" : "faint"}>{c.fees ? money(c.fees) : "—"}</td><td className={pc(c.pnl)}><b>{signed(c.pnl)}</b></td>
                 </tr>
-              ))}
+                {isOpen && [["Entry", inLegs], ["Exit", outLegs]].map(([lab, ls]) =>
+                  ls.length ? ls.map((g) => (
+                    <tr key={`${lab}-${g.id}`} className="leg">
+                      <td className="txt faint">{lab} leg</td>
+                      <td className="txt faint" style={{ paddingLeft: 28 }}>{g.product}</td>
+                      <td><Side s={g.side} /></td><td className="faint">{qty(g.qty)}</td>
+                      <td className="faint" colSpan={2}>{px(g.price)}</td>
+                      <td className="faint" colSpan={2}>{dt(g.ts)}</td>
+                      <td colSpan={2} className="txt faint" style={{ fontSize: 11 }}>
+                        {lab === "Entry" ? "filled when the spread was opened" : "filled when the spread was closed"}
+                      </td>
+                    </tr>
+                  )) : (
+                    <tr key={lab} className="leg">
+                      <td className="txt faint">{lab} leg</td>
+                      <td colSpan={9} className="txt faint" style={{ fontSize: 11 }}>No legs recorded for this side — re-import the fills to capture them.</td>
+                    </tr>
+                  )
+                )}
+                </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
