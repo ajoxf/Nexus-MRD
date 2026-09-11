@@ -751,6 +751,14 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
     setScen({ moves });
   };
   // A capacity number is only meaningful once the product has a price and a margin.
+  // Which instruments are on the table. Untouched, it follows what you hold; once you
+  // pick, it is exactly what you picked — including nothing.
+  const picked = Array.isArray(S.pick) ? S.pick : null;
+  const isOn = (line) => (picked ? picked.includes(line.key) : !!line.pos);
+  const toggle = (line, lines) => {
+    const now = picked || lines.filter((l) => l.pos).map((l) => l.key);
+    setScen({ pick: now.includes(line.key) ? now.filter((k) => k !== line.key) : [...now, line.key] });
+  };
   const cap = (l, x) => (x === null ? (l.reason === "margin" ? "Set margin" : "Set price")
     : !isFinite(x) ? "No limit" : x <= 0 ? "0" : qty(x));
 
@@ -772,18 +780,6 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 <input className="in" type="number" step="0.1" value={S.defV} onChange={(e) => setScen({ defV: e.target.value })} />
                 <select className="in" style={{ width: 80 }} value={S.defUnit} onChange={(e) => setScen({ defUnit: e.target.value })}><option value="%">%</option><option value="pts">pts</option></select>
               </div>
-            </F>
-            <F label="Products shown" hint="Focus on one instrument when you're sizing a trade.">
-              <select className="in" value={S.focus || (S.openOnly === false ? "all" : "open")}
-                onChange={(e) => { const v = e.target.value;
-                  setScen(v === "open" || v === "all" ? { focus: "", openOnly: v === "open" } : { focus: v, openOnly: false }); }}>
-                <option value="open">Open positions only</option>
-                <option value="all">Every product</option>
-                <optgroup label="Just one instrument">
-                  {[...new Set(settings.brokers.flatMap((b) => Object.keys(b.products || {})))].sort()
-                    .map((pr) => <option key={pr} value={pr}>{pr}</option>)}
-                </optgroup>
-              </select>
             </F>
             <button className="btn" onClick={applyAll}>Apply to all products</button>
           </div>
@@ -813,18 +809,33 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <div className="kpi"><label>Margin call ({b.callRatio}%) if all move</label><b className={callMove !== null && isFinite(callMove) && callMove < 10 ? "bad" : ""}>{moveTxt(callMove)}</b></div>
               <div className="kpi"><label>Stop-out ({b.stopRatio}%) if all move</label><b>{moveTxt(stopMove)}</b></div>
             </div>
-            {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div>
-             : !S.focus && S.openOnly !== false && !res.lines.some((l) => l.pos) ? <div className="empty">{b.name} is flat. <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button> to size a new trade.</div>
-             : <div className="tw">
+            {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div> : <>
+            <div className="chips">
+              <span className="chips-label">Instruments</span>
+              {res.lines.map((l) => (
+                <button key={l.key} type="button" className={`chip ${isOn(l) ? "on" : ""}`}
+                  aria-pressed={isOn(l)} onClick={() => toggle(l, res.lines)}>
+                  {l.product}{l.pos ? <span className="chip-tag">open</span> : null}
+                </button>
+              ))}
+              <span className="chips-gap" />
+              <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.map((l) => l.key) })}>All</button>
+              <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.filter((l) => l.pos).map((l) => l.key) })}>Only open</button>
+              <button type="button" className="btn ghost" onClick={() => setScen({ pick: [] })}>None</button>
+            </div>
+            {!res.lines.some(isOn) ? (
+              <div className="empty">
+                {picked ? "Nothing picked." : `${b.name} is flat.`}{" "}
+                Choose the instruments you're thinking of trading{picked ? "" : ", or press All"}.
+              </div>
+            ) : <div className="tw">
               <table>
                 <thead><tr>
                   <th className="txt">Product</th><th>Position</th><th>Current price</th><th>Move against you</th><th title="Where the price ends up after the move. Flat products show it both ways: if you bought / if you sold.">Stressed price</th><th>Scenario P&L</th><th>Margin after</th>
                   <th>Can buy</th><th>Can sell</th><th className="txt">Status</th>
                 </tr></thead>
                 <tbody>
-                  {(S.focus ? res.lines.filter((l) => l.product === S.focus)
-                    : S.openOnly === false ? res.lines
-                    : res.lines.filter((l) => l.pos)).map((l) => {
+                  {res.lines.filter(isOn).map((l) => {
                     const mv = S.moves[l.key] || { v: S.defV, unit: S.defUnit };
                     const status = l.reason === "price" ? ["warn", "Enter a price"]
                       : l.reason === "margin" ? ["warn", "Set margin per lot"]
@@ -883,13 +894,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                   <tr className="total"><td className="txt">Account</td><td colSpan={4}></td><td className={res.loss ? "bad" : ""}>{money(-res.loss)}</td><td>{money(res.IM)}</td><td colSpan={3} className="txt dim">Lots you can add and still stay above {ratioTxt(target)} after the scenario</td></tr>
                 </tbody>
               </table>
-              {!S.focus && S.openOnly !== false && res.lines.some((l) => !l.pos) && (
-                <div className="pb faint" style={{ fontSize: 11 }}>
-                  {res.lines.filter((l) => !l.pos).length} flat product{res.lines.filter((l) => !l.pos).length === 1 ? "" : "s"} hidden.{" "}
-                  <button className="btn ghost" onClick={() => setScen({ openOnly: false })}>Show every product</button>
-                </div>
-              )}
-            </div>}
+            </div>}</>}
           </section>
         );
       })}
