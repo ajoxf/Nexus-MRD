@@ -19,10 +19,15 @@ export const FIELDS = [
 
 // Reads a CSV. Broker reports (e.g. MT5) often have title lines and several sections before the real
 // header row, so we look for the row that best matches known column names — preferring a "Deals" section.
+// Tab-separated exports (TT's Fills grid saved as "Text (tab delimited)", or a file that has been
+// through Excel) have no commas at all, and Papa then falls back to comma and reads each line as a
+// single field. Naming the candidates explicitly makes it pick the tab.
+export const DELIMITERS = [",", "\t", ";", "|"];
+
 export function parseCsvFile(file) {
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
-      header: false, skipEmptyLines: true,
+      header: false, skipEmptyLines: true, delimitersToGuess: DELIMITERS,
       complete: (res) => {
         try { resolve(tableFromRows(res.data)); } catch (e) { reject(e); }
       },
@@ -36,8 +41,54 @@ const scoreHeader = (cells) => {
   return FIELDS.filter((f) => f.required || f.key === "side" || f.key === "ref").filter((f) => hs.some((h) => f.guess.test(h) || (f.loose && f.loose.test(h)))).length;
 };
 
+// TT's Fills grid (right-click → Select All → save as CSV) exports the rows with no header line,
+// so there is nothing to match column names against. The layout is fixed, though, and the first
+// seven columns are distinctive enough to recognise: 11Sep26 | 11:56:49.536 | CME | CL Nov26 | B | 1 | 95.29
+const TT_FILLS_HEADERS = ["Date", "Time", "Exchange", "Symbols", "Buy/Sell", "Lot", "Price", "Type", "Route", "Account", "User", "Login", "ID", "Column 14", "Column 15"];
+const ttFillsRow = (r) =>
+  r.length >= 13 &&
+  /^\d{1,2}[A-Za-z]{3}\d{2,4}$/.test(r[0] || "") &&           // 11Sep26
+  /^\d{1,2}:\d{2}:\d{2}(\.\d+)?$/.test((r[1] || "").trim()) && // 11:56:49.536
+  /^[BS]$/i.test((r[4] || "").trim()) &&                       // B / S
+  (r[5] || "") !== "" && !isNaN(Number(r[5])) &&               // lots
+  (r[6] || "") !== "" && !isNaN(Number(r[6]));                 // price (spreads can be negative)
+
+// Every non-blank row must look like a fill: a file with a header line goes down the normal path.
+const looksLikeTtFills = (rows) => {
+  const body = rows.filter((r) => r.filter(Boolean).length > 1);
+  return body.length > 0 && body.every(ttFillsRow);
+};
+
+// If a file holds no commas at all, Papa scores "one field per line" as perfectly consistent and
+// picks the comma anyway, leaving every row as a single long string. Re-split those on whichever
+// delimiter actually divides them.
+function resplit(rows) {
+  const singles = rows.filter((r) => r.length === 1 && r[0]);
+  if (singles.length < rows.length * 0.9) return rows;         // genuinely parsed already
+  for (const d of ["\t", ";", "|"]) {
+    const counts = singles.map((r) => r[0].split(d).length);
+    const tally = {};
+    counts.forEach((n) => { tally[n] = (tally[n] || 0) + 1; });
+    // Trailing junk lines have their own width, so look for the width most rows agree on.
+    const [best, hits] = Object.entries(tally).sort((a, b) => b[1] - a[1])[0] || [];
+    if (+best > 2 && hits >= counts.length * 0.8) {
+      return rows.map((r) => (r.length === 1 && r[0] ? r[0].split(d) : r));
+    }
+  }
+  return rows;
+}
+
 export function tableFromRows(raw) {
-  const rows = raw.map((r) => r.map((c) => String(c ?? "").trim()));
+  const rows = resplit(raw.map((r) => r.map((c) => String(c ?? "")))).map((r) => r.map((c) => String(c ?? "").trim()));
+  if (looksLikeTtFills(rows)) {
+    const body = rows.filter((r) => r.filter(Boolean).length > 1);
+    return {
+      headers: TT_FILLS_HEADERS,
+      rows: body.map((r) => Object.fromEntries(TT_FILLS_HEADERS.map((h, j) => [h, r[j] ?? ""]))),
+      headerLine: 0,          // no header line in the file
+      layout: "TT Fills (no header row)",
+    };
+  }
   let dealsAt = rows.findIndex((r) => r.filter(Boolean).length === 1 && /^deals$/i.test(r.find(Boolean) || ""));
   let best = -1, bestScore = 0;
   const from = dealsAt >= 0 ? dealsAt + 1 : 0;
@@ -238,10 +289,10 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
   return { fills, errors, ignored, nonTrade: ignored, feesArePositiveCosts: positiveCosts, offsetMs, legsSkipped, spreadsSkipped, spreadOrders, cash };
 }
 
-// Orient fills export (TT) layout, as in Orient's tt-export.csv: 15 columns, one ID per order,
-// a spread order appears as the spread fill plus its two leg fills. Account and IDs are placeholders.
+// Orient fills export (TT): what you get from the Fills grid with right-click → Select All → save
+// as CSV. 15 columns and NO header row; one order ID per trade, and a spread order appears as the
+// spread fill plus its two leg fills under that same ID. Account and IDs here are placeholders.
 export const ORIENT_TEMPLATE_CSV = [
-  "Date,Time,Exchange,Symbols,Buy/Sell,Lot,Price,,,Account,,,ID,,",
   "10Sep26,09:15:02.114 ,CME,CL Nov26,S,1,97.78,F,Direct,YOUR-ACCOUNT,TRADER,TRADER,0001-sample-order-a,,",
   "10Sep26,09:15:02.114 ,CME,BZ Nov26,B,1,107.08,F,Direct,YOUR-ACCOUNT,TRADER,TRADER,0001-sample-order-a,,",
   "10Sep26,09:15:02.114 ,CME,CL Nov26 - BZ Nov26 Inter-Product,S,1,-9.30,F,Direct,YOUR-ACCOUNT,TRADER,TRADER,0001-sample-order-a,,",

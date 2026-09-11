@@ -1044,11 +1044,13 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         ) : (
           <div className="tw tall">
             <table>
-              <thead><tr><th>Time</th><th className="txt">Broker</th><th className="txt">Product</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th><th>Fill ID</th><th className="txt">Source</th><th></th></tr></thead>
+              <thead><tr><th>Time</th><th className="txt">Broker</th><th className="txt">Account</th><th className="txt">Product</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th><th>Fill ID</th><th className="txt">Source</th><th></th></tr></thead>
               <tbody>
                 {shown.slice(0, limit).map((x) => (
                   <tr key={x.id}>
-                    <td className="dim">{dt(x.ts)}</td><td className="txt dim">{bname(x.broker)}</td><td className="txt">{x.product}</td><td><Side s={x.side} /></td><td>{qty(x.qty)}</td><td>{px(x.price)}</td>
+                    <td className="dim">{dt(x.ts)}</td><td className="txt dim">{bname(x.broker)}</td>
+                    <td className="txt faint" title="The broker's own account number, as it appears in the file">{x.account || "—"}</td>
+                    <td className="txt">{x.product}</td><td><Side s={x.side} /></td><td>{qty(x.qty)}</td><td>{px(x.price)}</td>
                     <td className={+x.fee ? "bad" : "faint"}>{+x.fee ? (+x.fee).toFixed(2) : "—"}</td>
                     <td className="faint">{shortRef(x.ref)}</td><td className="faint txt">{x.source === "csv" ? "CSV" : "Manual"}</td>
                     <td><button className="btn ghost" onClick={async () => { if (window.confirm("Delete this fill?")) { await db.deleteFill(x.id); await reloadFills(); } }} aria-label="Delete fill">✕</button></td>
