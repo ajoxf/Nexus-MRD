@@ -242,15 +242,15 @@ function SignInPage({ children }) {
   return (
     <div className="signin">
       <aside className="signin-brand">
-        <div className="mark">N</div>
-        <h1>Nexus <span>· MRD</span></h1>
-        <p className="desk">Margin &amp; Risk Desk</p>
+        <div className="brand-top">
+          <div className="mark">N</div>
+          <div>
+            <h1>Nexus <span>· MRD</span></h1>
+            <p className="desk">Margin &amp; Risk Desk</p>
+          </div>
+        </div>
+        <p className="tagline">Know what a move against you costs before you put the trade on.</p>
         <div className="rule" />
-        <ul>
-          <li>Positions and margin across every broker account</li>
-          <li>Stress a move against you before you put it on</li>
-          <li>Fills, closed trades and funding in one book</li>
-        </ul>
         <p className="foot">Access is by invitation. Speak to your desk administrator.</p>
       </aside>
       <main className="signin-form">{children}</main>
