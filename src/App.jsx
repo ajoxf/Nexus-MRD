@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { db, isRemote } from "./lib/db.js";
+import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
@@ -203,9 +203,136 @@ const Side = ({ s }) => <span className={`side ${s === "Long" || s === "Buy" ? "
 // =====================================================================
 export default function App() {
   const [user, setUser] = useState(undefined);
-  useEffect(() => { db.getUser().then(setUser); }, []);
+  // Set when you arrive from a password-reset email: the link has already signed
+  // you in, so show "choose a new password" rather than the desk.
+  const [recovering, setRecovering] = useState(false);
+
+  useEffect(() => {
+    db.getUser().then(setUser);
+    return auth.onAuthChange((u, event) => {
+      setUser(u);
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+    });
+  }, []);
+
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
-  return <Tracker user={user} />;
+  if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
+  if (!user) return <SignInPage><SignIn /></SignInPage>;
+  return <Tracker key={user.id} user={user} />;
+}
+
+// The desk's front door: navy brand panel beside the form, stacking on a phone.
+function SignInPage({ children }) {
+  return (
+    <div className="signin">
+      <aside className="signin-brand">
+        <div className="mark">N</div>
+        <h1>Nexus <span>· MRD</span></h1>
+        <p className="desk">Margin &amp; Risk Desk</p>
+        <div className="rule" />
+        <ul>
+          <li>Positions and margin across every broker account</li>
+          <li>Stress a move against you before you put it on</li>
+          <li>Fills, closed trades and funding in one book</li>
+        </ul>
+        <p className="foot">Access is by invitation. Speak to your desk administrator.</p>
+      </aside>
+      <main className="signin-form">{children}</main>
+    </div>
+  );
+}
+
+// Sign-in only: accounts are created by invitation, so there is no sign-up here.
+function SignIn() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("in");     // "in" | "forgot"
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [sent, setSent] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      if (mode === "forgot") { await auth.sendReset(email); setSent(true); }
+      else await auth.signIn(email, password);
+    } catch (e2) {
+      setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
+    } finally { setBusy(false); }
+  };
+
+  if (sent) return (
+    <form className="signin-card" onSubmit={(e) => e.preventDefault()}>
+      <h2>Check your email</h2>
+      <p className="lede">If an account exists for <b>{email}</b>, a reset link is on its way.</p>
+      <p className="note">The link signs you in and asks for a new password. Look in spam if it doesn't arrive within a few minutes.</p>
+      <button type="button" className="btn full" onClick={() => { setSent(false); setMode("in"); }}>Back to sign in</button>
+    </form>
+  );
+
+  return (
+    <form className="signin-card" onSubmit={submit}>
+      <h2>{mode === "in" ? "Sign in" : "Reset your password"}</h2>
+      <p className="lede">{mode === "in" ? "Use the email address your desk account was opened with." : "We'll email you a link to set a new password."}</p>
+      <F label="Email">
+        <input className="in" type="email" autoComplete="username" required autoFocus
+          placeholder="you@firm.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+      </F>
+      {mode === "in" && (
+        <F label="Password">
+          <input className="in" type="password" autoComplete="current-password" required
+            value={password} onChange={(e) => setPassword(e.target.value)} />
+        </F>
+      )}
+      {err && <div className="signin-err">{err}</div>}
+      <button className="btn full" disabled={busy}>
+        {busy ? "Please wait…" : mode === "in" ? "Sign in" : "Email me a reset link"}
+      </button>
+      <button type="button" className="linklike" onClick={() => { setMode(mode === "in" ? "forgot" : "in"); setErr(null); }}>
+        {mode === "in" ? "Forgotten your password?" : "Back to sign in"}
+      </button>
+    </form>
+  );
+}
+
+// Shown after following a reset link.
+function NewPassword({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [again, setAgain] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const tooShort = password.length > 0 && password.length < 8;
+  const mismatch = again.length > 0 && password !== again;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try { await auth.setPassword(password); onDone(); }
+    catch (e2) { setErr(e2.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <form className="signin-card" onSubmit={submit}>
+      <h2>Choose a new password</h2>
+      <p className="lede">At least 8 characters.</p>
+      <F label="New password">
+        <input className="in" type="password" autoComplete="new-password" required autoFocus
+          value={password} onChange={(e) => setPassword(e.target.value)} />
+      </F>
+      <F label="Repeat it">
+        <input className="in" type="password" autoComplete="new-password" required
+          value={again} onChange={(e) => setAgain(e.target.value)} />
+      </F>
+      {tooShort && <div className="signin-err warn">Too short — use at least 8 characters.</div>}
+      {mismatch && <div className="signin-err warn">The two passwords don't match.</div>}
+      {err && <div className="signin-err">{err}</div>}
+      <button className="btn full" disabled={busy || tooShort || mismatch || !password}>
+        {busy ? "Saving…" : "Save password"}
+      </button>
+    </form>
+  );
 }
 
 function Tracker({ user }) {
@@ -333,6 +460,12 @@ function Tracker({ user }) {
         </div>
         <div className="topright">
           <span title={save[0]}><span className="dot" style={{ background: save[1] }} /><span className="savetxt">{save[0]}</span></span>
+          {auth.enabled && (
+            <>
+              <span className="who" title={user.email}>{user.email}</span>
+              <button className="btn ghost" onClick={() => auth.signOut()}>Sign out</button>
+            </>
+          )}
         </div>
       </header>
 
