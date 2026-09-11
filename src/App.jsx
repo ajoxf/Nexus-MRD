@@ -172,7 +172,12 @@ function scenarioFor(pf, settings, b) {
     const mv = S.moves[key] || { v: S.defV, unit: S.defUnit };
     // On a flat product you can say which way you're thinking of trading, so the
     // stressed price and the loss are worked out for that side rather than both.
-    const plan = !pos && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
+    // A plan only counts while its instrument is one of the ones you've picked. Leaving lots
+    // typed on something you later deselected must not quietly weigh on the account.
+    // A real position always counts, picked or not — you can't untick your way out of risk.
+    const picked = Array.isArray(S.pick) ? S.pick : null;
+    const considered = picked ? picked.includes(key) : !!pos;
+    const plan = !pos && considered && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
     return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots };
   });
   const res = runScenario(b, acc, prods, target);
@@ -828,6 +833,13 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.map((l) => l.key) })}>All</button>
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.filter((l) => l.pos).map((l) => l.key) })}>Only open</button>
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: [] })}>None</button>
+              {res.lines.some((l) => settings.marks[l.key]?.dir || settings.marks[l.key]?.lots) && (
+                <button type="button" className="btn ghost red"
+                  title="Forget every direction and lot count typed on this account"
+                  onClick={() => res.lines.forEach((l) => { setMark(l.key, "dir", ""); setMark(l.key, "lots", ""); })}>
+                  Clear plans
+                </button>
+              )}
             </div>
             {!res.lines.some(isOn) ? (
               <div className="empty">
@@ -911,6 +923,14 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 </tbody>
               </table>
             </div>
+            {res.lines.some((l) => l.pos && !isOn(l)) && (
+              <div className="pb warn" style={{ fontSize: 11 }}>
+                The Account row also covers {res.lines.filter((l) => l.pos && !isOn(l)).length} open position
+                {res.lines.filter((l) => l.pos && !isOn(l)).length === 1 ? "" : "s"} the chips are hiding
+                ({res.lines.filter((l) => l.pos && !isOn(l)).map((l) => l.product).join(", ")}).
+                A position you hold counts whether or not it's shown.
+              </div>
+            )}
             {res.lines.some((l) => l.planned) && isFinite(dailyLeft) && (
               <div className={`pb ${res.loss > dailyLeft ? "bad" : "faint"}`} style={{ fontSize: 11 }}>
                 {res.loss > dailyLeft
