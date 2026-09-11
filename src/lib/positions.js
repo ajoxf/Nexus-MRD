@@ -11,6 +11,25 @@
 const EPS = 1e-9;
 const r9 = (x) => (Math.abs(x) < EPS ? 0 : x);
 
+// Commission per lot, per side. Brokers like Orient bill it separately, so their fills carry no fee
+// at all; MT5 puts the real figure on each deal. The rate is therefore only applied to fills that
+// have no fee of their own, so a commission the broker already reported is never charged twice.
+// A spread billed per leg costs twice the leg rate: set that on the product.
+const cn = (v) => (v === "" || v === null || v === undefined || isNaN(+v) ? 0 : +v);
+const cset = (v) => v !== "" && v !== null && v !== undefined && !isNaN(+v);
+
+export const commissionOf = (broker, product) => {
+  const over = broker?.products?.[product]?.comm;
+  return cset(over) ? cn(over) : cn(broker?.commission);
+};
+
+export const withCommission = (fills, byId) =>
+  fills.map((f) => {
+    if (+f.fee) return f;
+    const rate = commissionOf(byId[f.broker], f.product);
+    return rate ? { ...f, fee: -Math.abs(rate) * cn(f.qty) } : f;
+  });
+
 // sizeOf: (broker, product) => contract size | methodOf: (broker) => "fifo" | "average"
 export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
   const sizeFn = typeof sizeOf === "function" ? sizeOf : (_b, p) => +sizeOf[p]?.size || 1000;

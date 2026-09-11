@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { db, isRemote } from "./lib/db.js";
-import { computeBook } from "./lib/positions.js";
+import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
@@ -106,7 +106,7 @@ function funding(settings, brokerId) {
 function portfolio(fills, settings) {
   const { limits: L, brokers: B, marks: M } = settings;
   const byId = Object.fromEntries(B.map((b) => [b.id, b]));
-  const book = computeBook(fills, (b, p) => n(byId[b]?.products?.[p]?.size) || 1000, (b) => matchOf(byId[b]));
+  const book = computeBook(withCommission(fills, byId), (b, p) => n(byId[b]?.products?.[p]?.size) || 1000, (b) => matchOf(byId[b]));
   const minR = n(L.minRatio) / 100;
 
   const rows = book.open.map((p) => {
@@ -1291,15 +1291,18 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings })
               <option value="average">Average price (e.g. MT5 netting)</option>
             </select>
           </F>
+          <F label="Commission per lot ($)" hint="Per side. Only used where the fill carries no commission of its own.">
+            <input className="in" type="number" step="0.01" placeholder="0" value={b.commission ?? ""} onChange={set("commission")} />
+          </F>
           <F label="Margin call level (TNE/IM %)" hint={lev ? "MT5: 'Margin call' level" : null}><input className="in" type="number" value={b.callRatio} onChange={set("callRatio")} /></F>
           <F label="Stop-out level (TNE/IM %)" hint={lev ? "MT5: 'Stop out' level" : null}><input className="in" type="number" value={b.stopRatio} onChange={set("stopRatio")} /></F>
         </div>
       </div>
       <div className="tw">
         <table>
-          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : "Margin / lot ($)"}</th><th></th></tr></thead>
+          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : "Margin / lot ($)"}</th><th>Commission / lot</th><th></th></tr></thead>
           <tbody>
-            {Object.keys(b.products || {}).length === 0 && <tr><td colSpan={4} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
+            {Object.keys(b.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
             {Object.entries(b.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, s]) => (
               <tr key={p}>
                 <td className="txt"><b>{p}</b>{s.note && <div className="faint" style={{ fontSize: 11 }}>{s.note}</div>}</td>
@@ -1307,6 +1310,9 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings })
                 <td>{lev
                   ? <input className="cell" type="number" placeholder={`1:${b.leverage}`} value={s.lev ?? ""} onChange={(e) => setProduct(b.id, p, "lev", e.target.value)} aria-label={`${p} leverage override`} />
                   : <input className={`cell ${n(s.margin) ? "" : "need"}`} style={{ width: 96 }} type="number" placeholder="Set" value={s.margin ?? ""} onChange={(e) => setProduct(b.id, p, "margin", e.target.value)} aria-label={`${p} margin per lot`} />}</td>
+                <td><input className="cell" type="number" step="0.01" placeholder={n(b.commission) ? money(n(b.commission)) : "0"}
+                  value={s.comm ?? ""} onChange={(e) => setProduct(b.id, p, "comm", e.target.value)}
+                  aria-label={`${p} commission per lot`} title="Overrides the account rate. A spread billed per leg costs twice the leg rate." /></td>
                 <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => setSettings((st) => ({ ...st, brokers: st.brokers.map((x) => { if (x.id !== b.id) return x; const { [p]: _, ...rest } = x.products; return { ...x, products: rest }; }) }))}>✕</button>}</td>
               </tr>
             ))}
