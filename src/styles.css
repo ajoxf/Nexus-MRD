@@ -131,7 +131,17 @@ input.in[type=number] { font-family: var(--num); font-size: 14px; }
 .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .drop b { color: var(--text); font-weight: 600; }
 .strip { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
-.strip .kpi { flex: 1 1 140px; min-width: 0; }
+/* Never shrink a tile below the figure inside it.
+   These tiles were `flex: 1 1 140px; min-width: 0`, so flex divided the row evenly and
+   every tile got the same width — but the two "now → after" tiles carry two numbers and
+   an arrow, so they need about 40px more than the rest. With nowrap figures and no
+   min-width the surplus simply painted over the next tile: "$604,870 → $602,901" ran
+   into "3200% → 3190%". Measured, not guessed.
+   `1 0 auto` keeps them filling the row edge to edge as before, refuses to squeeze one
+   narrower than its own number, and lets flex-wrap drop a tile to the next line when the
+   row genuinely cannot hold them all. A figure is never clipped and never overlapped —
+   which for a margin number is the whole point. */
+.strip .kpi { flex: 1 0 auto; }
 /* A long label ("Margin call (100%) if all move against you") was running past
    its own tile and over the next one on a narrow screen. Inside a panel strip
    labels wrap; the figures under them stay on one line. The header's own tiles
