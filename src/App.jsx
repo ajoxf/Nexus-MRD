@@ -367,6 +367,37 @@ function NewPassword({ onDone }) {
   );
 }
 
+// ---------- phone layout ----------
+// On a phone a twelve-column table can't stay a table, so each row becomes a
+// card (see .tw in the stylesheet). A figure on its own card means nothing
+// without its heading, so every cell borrows the text of the column above it.
+// Doing it here rather than in the markup gives it to every table at once,
+// including any added later.
+function useCardLabels() {
+  useEffect(() => {
+    for (const t of document.querySelectorAll(".tw table")) {
+      const head = t.tHead?.rows[t.tHead.rows.length - 1];
+      if (!head) continue;
+      const names = [...head.cells].map((c) => c.textContent.trim());
+      // Which column names the card. The product is what a trader looks for;
+      // where a table has none, the account or instrument does the job.
+      let title = names.findIndex((h) => /^product$/i.test(h));
+      if (title < 0) title = names.findIndex((h) => /^(broker|instrument|symbol|name|account)$/i.test(h));
+      for (const body of t.tBodies) {
+        for (const r of body.rows) {
+          // Rows that span columns (totals, notes, a spread's legs) have no
+          // one heading per cell, so they are left as they are.
+          if ([...r.cells].some((c) => c.colSpan > 1)) continue;
+          [...r.cells].forEach((c, i) => {
+            if (names[i]) c.setAttribute("data-l", names[i]);
+            if (i === title) c.setAttribute("data-card-title", "");
+          });
+        }
+      }
+    }
+  });
+}
+
 // ---------- edit, then save ----------
 // Settings panels hold what you type until you press Save. A margin on its way
 // to 3000 passes through "3", and a figure like that reaching the risk engine
@@ -465,6 +496,7 @@ function Tracker({ user }) {
   const [fills, setFills] = useState([]);
   const [tab, setTab] = useState("dash");
   const ask = useConfirm();
+  useCardLabels();
   // Which settings panels have edits that haven't been saved.
   const unsaved = useRef(new Set());
   const mark = useCallback((id, on) => { if (on) unsaved.current.add(id); else unsaved.current.delete(id); }, []);
@@ -666,7 +698,7 @@ function Book({ pf, settings, view }) {
         <div className="tile"><label>Realized P&amp;L</label><b className={pc(realized)}>{signed(realized)}</b><small>After fees</small></div>
       </div>
       <div className="ph"><h2>Book by product<span className="dim">Open position and closed trades, side by side. Click an open position to see its lots.</span></h2></div>
-      {rows.length === 0 ? <div className="empty">Nothing traded yet. Upload fills or record a trade.</div> : (
+      {rows.length === 0 ? <div className="empty">Nothing traded yet. Upload a fills file to get started.</div> : (
         <div className="tw">
           <table className="booktable">
             <thead>
@@ -1591,7 +1623,8 @@ function ClosedTab({ pf, settings, view, fills }) {
             <tbody>
               {closed.map((c, i) => {
                 const inLegs = legsFor(c.broker, c.openOrders), outLegs = legsFor(c.broker, c.closeOrders);
-                const hasLegs = inLegs.length || outLegs.length;
+                // A count here would render as a stray "0" beside every product that has no legs.
+                const hasLegs = inLegs.length > 0 || outLegs.length > 0;
                 const isOpen = open === i;
                 return (
                 <React.Fragment key={i}>

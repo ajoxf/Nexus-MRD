@@ -69,18 +69,18 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- tables ---------- */
 .tw { overflow: auto; }
 .tw.tall { max-height: calc(100dvh - 180px); }
-table { width: 100%; border-collapse: collapse; }
+/* Tables size to their content rather than stretching to fill the panel. A
+   stretched table has to put the spare width somewhere, and wherever it goes —
+   spread between every column, or all into the product name — it pushes the
+   figures away from what they describe. Any leftover is plain space at the
+   right instead. Wider-than-the-panel tables still scroll inside .tw. */
+table { width: auto; min-width: 0; border-collapse: collapse; }
 th, td { padding: 5px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
 th:first-child, td:first-child { text-align: left; padding-left: 12px; }
 th:last-child, td:last-child { padding-right: 12px; }
-/* A table fills its panel, and the spare width has to go somewhere. Left to
-   itself the browser spreads it between every column, which pushes a price
-   away from the product it belongs to. Giving it to the text columns instead
-   keeps each row's figures together and close enough to read across. */
-th.txt, td.txt { width: 100%; }
-/* Where a row has two text columns (broker, then product) only the last one
-   grows; a short broker name shouldn't sit in a column of its own whitespace. */
-th.txt:has(~ th.txt), td.txt:has(~ td.txt) { width: 1%; }
+/* A total row spans the table, so it needs the full width even though the
+   table itself is only as wide as its columns. */
+tr.total td:first-child { white-space: nowrap; }
 th { position: sticky; top: 0; background: var(--panel); z-index: 1; font-size: 11px; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--line2); }
 /* A two-word heading like "Risk to stop" was setting the width of a column of
    five-character numbers. Let headings wrap; the figures underneath never do. */
@@ -142,7 +142,12 @@ input.in[type=number] { font-family: var(--num); font-size: 14px; }
 .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .drop b { color: var(--text); font-weight: 600; }
 .strip { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
-.strip .kpi { flex: 1; min-width: 120px; }
+.strip .kpi { flex: 1 1 140px; min-width: 0; }
+/* A long label ("Margin call (100%) if all move against you") was running past
+   its own tile and over the next one on a narrow screen. Inside a panel strip
+   labels wrap; the figures under them stay on one line. The header's own tiles
+   are short enough to keep theirs on one line. */
+.strip .kpi label { white-space: normal; }
 .banner { background: var(--warn-soft); border: 1px solid #E8CD99; color: var(--text); border-radius: 4px; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 
@@ -374,3 +379,51 @@ td.faded { opacity: .35; }
 .verdict.ok { color: var(--ok); background: var(--ok-soft); border-color: #B6DFCC; }
 .verdict.bad { color: var(--bad); background: var(--bad-soft); border-color: #F0CDD0; }
 .verdict.idle { color: var(--dim); background: var(--panel2); border-color: var(--line); font-weight: 400; }
+
+/* ---------- tables become cards on a phone ---------- */
+/* A wide table on a 390px screen is a sideways scroll, and you can't compare
+   two rows you can't see at once. Below 760px each row becomes a card: the
+   product on top, then one line per figure with the column heading beside it
+   (the heading text is copied onto each cell by useCardLabels). */
+@media (max-width: 760px) {
+  .tw { overflow: visible; }
+  .tw table, .tw tbody, .tw tr, .tw td { display: block; width: auto; }
+  .tw thead { display: none; }
+  .tw tbody tr {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
+    margin: 0 0 8px; padding: 2px 0; overflow: hidden;
+  }
+  .tw tbody tr:nth-child(even) td, .tw tbody tr:hover td { background: transparent; }
+  .tw td {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 5px 12px; border: 0; text-align: right; min-height: 26px;
+  }
+  .tw td::before {
+    content: attr(data-l); flex: none; text-align: left;
+    font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--dim);
+    white-space: normal;
+  }
+  /* A cell under a blank heading (a delete button, a caret) has nothing to
+     label, so it sits on its own at the end of the card. */
+  .tw td:not([data-l])::before { content: none; }
+  .tw td:not([data-l]) { justify-content: flex-end; }
+  /* An empty cell on its own line is just a gap. */
+  .tw td:empty { display: none; }
+
+  /* The product names the card, so it goes to the top as the heading even in a
+     table that lists the broker first. useCardLabels marks which cell it is. */
+  .tw tbody tr td[data-card-title] {
+    order: -1; justify-content: flex-start; text-align: left;
+    background: var(--panel2); border-bottom: 1px solid var(--line);
+    padding: 7px 12px; margin-bottom: 2px; font-weight: 600; font-size: 13px;
+  }
+  .tw tbody tr td[data-card-title]::before { content: none; }
+
+  /* A row that spans columns (totals, a note, the legs of a spread) keeps its
+     own shape rather than pretending to be a card. */
+  .tw tbody tr.total { background: var(--head); font-weight: 600; }
+  .tw tr.sep-row { display: none; }
+  .tw td .cell { width: 96px; }
+  .tw .lots table { width: 100%; }
+}
