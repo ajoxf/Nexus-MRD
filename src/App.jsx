@@ -51,6 +51,13 @@ const pct = (v) => (isFinite(v) ? (v * 100).toFixed(1) + "%" : "—");
 const ratioTxt = (r) => (isFinite(r) ? (r * 100).toFixed(0) + "%" : "—");
 const px = (v) => (isFinite(v) ? (+v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 }) : "—");
 const qty = (v) => String(+(+v).toFixed(4));
+// Holding time in the unit a trader would say it in: minutes, hours, then days.
+const holdTxt = (h) => {
+  if (h === null || !isFinite(h)) return "—";
+  if (h < 1) return `${Math.round(h * 60)} min`;
+  if (h < 24) return `${h.toFixed(1)} h`;
+  return `${(h / 24).toFixed(1)} d`;
+};
 const dt = (s) => new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const isToday = (s) => new Date(s).toDateString() === new Date().toDateString();
 const pc = (v) => (v >= 0 ? "ok" : "bad");
@@ -2071,7 +2078,6 @@ function analyse(closed) {
     topLosses: [...t].filter((x) => x.pnl < 0).sort((a, b) => a.pnl - b.pnl).slice(0, 5),
     curve, peak, maxDD, ddAt, winStreak, lossStreak,
     byProduct: group((x) => x.product),
-    bySide: group((x) => x.side),
     byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
     lots: sum(t, (x) => x.qty),
     medianHours: median(held),
@@ -2188,6 +2194,7 @@ function AnalysisTab({ pf, settings, view }) {
           <div className="kpi"><label>Average win</label><b className="ok">{money(a.avgWin)}</b></div>
           <div className="kpi"><label>Average loss</label><b className="bad">{money(-a.avgLoss)}</b></div>
           <div className="kpi"><label>Largest drawdown</label><b className={a.maxDD ? "bad" : ""}>{a.maxDD ? money(-a.maxDD) : "—"}</b><span className="faint" style={{ fontSize: 11 }}>peak to trough</span></div>
+          <div className="kpi"><label>Typical hold</label><b>{holdTxt(a.medianHours)}</b><span className="faint" style={{ fontSize: 11 }}>median, open to close</span></div>
           <div className="kpi hide-m"><label>Longest streak</label><b><span className="ok">{a.winStreak}W</span> <span className="faint">/</span> <span className="bad">{a.lossStreak}L</span></b></div>
         </div>
       </section>
@@ -2232,41 +2239,21 @@ function AnalysisTab({ pf, settings, view }) {
         </div>
       </section>
 
-      <div className="grid-settings">
-        <section className="panel">
-          <div className="ph"><h2>Long against short</h2></div>
-          <div className="tw">
-            <table>
-              <thead><tr><th className="txt">Side</th><th>Trades</th><th>Win rate</th><th>Net</th></tr></thead>
-              <tbody>
-                {a.bySide.map((g) => (
-                  <tr key={g.key}><td className="txt"><Side s={g.key} /></td><td>{g.trades}</td>
-                    <td>{pct(g.trades ? g.wins / g.trades : null)}</td><td className={pc(g.net)}><b>{signed(g.net)}</b></td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="pb faint" style={{ fontSize: 11 }}>
-            Typical holding time {a.medianHours === null ? "—" : a.medianHours < 24 ? `${a.medianHours.toFixed(1)} hours` : `${(a.medianHours / 24).toFixed(1)} days`} (median).
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="ph"><h2>Biggest wins and losses</h2>
-            <span className="faint" style={{ fontSize: 11 }}>up to five each way</span></div>
-          <div className="tw">
-            <table>
-              <thead><tr><th className="txt">Product</th><th>Side</th><th>Lots</th><th>Entry</th><th>Exit</th><th>Opened</th><th>Closed</th><th>P&amp;L</th></tr></thead>
-              <tbody>
-                {a.topWins.map((x, i) => <BigTrade key={`w${i}`} x={x} />)}
-                {a.topWins.length > 0 && a.topLosses.length > 0 && <tr className="sep-row"><td colSpan={8}></td></tr>}
-                {a.topLosses.map((x, i) => <BigTrade key={`l${i}`} x={x} />)}
-                {!a.topWins.length && !a.topLosses.length && <tr><td colSpan={8} className="txt faint">No closed trades yet.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </div>
+      <section className="panel">
+        <div className="ph"><h2>Biggest wins and losses</h2>
+          <span className="faint" style={{ fontSize: 11 }}>up to five each way</span></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th className="txt">Product</th><th>Side</th><th>Lots</th><th>Entry</th><th>Exit</th><th>Opened</th><th>Closed</th><th>P&amp;L</th></tr></thead>
+            <tbody>
+              {a.topWins.map((x, i) => <BigTrade key={`w${i}`} x={x} />)}
+              {a.topWins.length > 0 && a.topLosses.length > 0 && <tr className="sep-row"><td colSpan={8}></td></tr>}
+              {a.topLosses.map((x, i) => <BigTrade key={`l${i}`} x={x} />)}
+              {!a.topWins.length && !a.topLosses.length && <tr><td colSpan={8} className="txt faint">No closed trades yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </>
   );
 }
