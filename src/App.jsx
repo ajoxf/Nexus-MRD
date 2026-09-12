@@ -280,6 +280,7 @@ export default function App() {
 
 // The desk's front door: navy brand panel beside the form, stacking on a phone.
 function SignInPage({ children }) {
+  const trial = useTrialOffer();
   return (
     <div className="signin">
       <aside className="signin-brand">
@@ -296,7 +297,7 @@ function SignInPage({ children }) {
           {/* "By invitation" and "start a free trial" cannot both be true on the
               same screen, so the invitation line stands down while the offer is
               open. Both are driven by the one variable. */}
-          {!TRIAL_URL && <>Access is by invitation. Speak to your desk administrator.<br /></>}
+          {!trial && <>Access is by invitation. Speak to your desk administrator.<br /></>}
           A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product.
         </p>
       </aside>
@@ -307,6 +308,7 @@ function SignInPage({ children }) {
 
 // Sign-in only: accounts are created by invitation, so there is no sign-up here.
 function SignIn() {
+  const trial = useTrialOffer();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState("in");     // "in" | "forgot"
@@ -384,17 +386,17 @@ function SignIn() {
         created for you once you hold the product. So this is a link out, and
         the portal remains the one place that decides who gets a trial.
 
-        Shown only when TRIAL_URL is configured, which is also the switch:
-        unset the variable when the offer closes. RAMP cannot ask the portal
-        whether trials are open — different app, different origin — so the
-        offer is only as current as that variable. An offer on screen that the
-        portal then refuses is worse than no offer, so if you close trials,
-        clear the variable in the same sitting.
+        Shown only when the portal says a trial is open AND that it grants this
+        product. RAMP asks on every load rather than trusting a setting of its
+        own, so closing the offer at the portal closes it here with nothing for
+        anybody to remember.
       */}
-      {mode === "in" && TRIAL_URL && (
+      {mode === "in" && trial && (
         <p className="signin-trial">
           New to Nexus RAMP?{" "}
-          <a href={TRIAL_URL} target="_blank" rel="noopener noreferrer">Start a 14-day free trial</a>
+          <a href={trial.url} target="_blank" rel="noopener noreferrer">
+            Start a {trial.days}-day free trial
+          </a>
           {" "}— no card required.
         </p>
       )}
@@ -404,10 +406,55 @@ function SignIn() {
 
 // Where the portal hands out sessions. Unset in a build that has no portal, which is why
 // every use of it is guarded rather than assumed.
-const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || "";
+/*
+ * Where the portal lives.
+ *
+ * Hard-wired rather than configured, the same way the portal hard-wires this
+ * application's address in its own header. A build-time variable put the truth
+ * in two places and failed silently in both: set it wrongly, or forget to set
+ * it at all, and the sign-in screen simply drops the button with nothing to
+ * say why. That is exactly what happened. Override it only if the portal
+ * genuinely moves.
+ */
+const PORTAL_URL = (import.meta.env.VITE_PORTAL_URL || "https://nordstarpro.com").replace(/\/+$/, "");
+const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || `${PORTAL_URL}/api/sso/ramp`;
 
-// Where the portal opens a trial. Unset means no offer is shown at all.
-const TRIAL_URL = import.meta.env.VITE_TRIAL_URL || "";
+// The item a trial has to grant before this screen will mention one. An
+// operator can point the portal's trial at a research section instead; saying
+// "start a 14-day free trial" here while it in fact hands over research would
+// be a straight misrepresentation, so the slug is checked, not assumed.
+const RAMP_ITEM_SLUG = "nexus-ramp";
+
+/*
+ * Asks the portal whether a trial is open.
+ *
+ * The portal decides. Nothing here caches the answer beyond the life of the
+ * page, so closing the offer there closes it here on the next load, with
+ * nothing for anybody to remember to change.
+ *
+ * Every failure is treated as "no offer": unreachable, slow, malformed, or
+ * granting something other than this product. An offer that is not really open
+ * is worse than no offer, so silence is the safe direction to fail in.
+ */
+function useTrialOffer() {
+  const [offer, setOffer] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 6000);
+    fetch(`${PORTAL_URL}/api/trial/status`, { signal: stop.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.open || d.slug !== RAMP_ITEM_SLUG) return;
+        const days = Number(d.days);
+        if (!Number.isFinite(days) || days < 1) return;
+        setOffer({ days: Math.round(days), url: `${PORTAL_URL}/trial` });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; clearTimeout(timer); stop.abort(); };
+  }, []);
+  return offer;
+}
 
 // Shown after following a reset link.
 function NewPassword({ onDone }) {
