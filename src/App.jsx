@@ -940,7 +940,6 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
           {warnings.length > 0 && <ul className="warns">{warnings.map(([lvl, m], i) => <li key={i}><span className="dot" style={{ background: `var(--${lvl})` }} />{m}</li>)}</ul>}
         </section>
 
-        <TradeTicket key={view} cls="o3" pf={pf} settings={settings} view={view} fills={fills} goSettings={goSettings} />
 
         <section className="panel o4">
           <div className="ph"><h2>Scenario check</h2><button className="btn ghost" onClick={goScen}>Open analysis</button></div>
@@ -1192,98 +1191,6 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
         Selling a long (or buying back a short) reduces risk first. Leverage accounts recalculate margin at the stressed price.
       </p>
     </>
-  );
-}
-
-// ---------- trade ticket ----------
-function TradeTicket({ cls = "", pf, settings, view, fills, goSettings }) {
-  const brokers = settings.brokers;
-  const [brokerId, setBrokerId] = useState(view !== "all" ? view : brokers[0]?.id);
-  const broker = brokers.find((b) => b.id === brokerId) || brokers[0];
-  const products = Object.keys(broker?.products || {}).sort();
-  const [f, setF] = useState({ product: products[0] || "", side: "Buy", lots: 1, price: "", stop: "" });
-  useEffect(() => { if (!products.includes(f.product)) setF((x) => ({ ...x, product: products[0] || "" })); }, [brokerId, products.join()]);
-  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
-  const valid = broker && f.product && n(f.lots) > 0 && has(f.price);
-  const acc = pf.acct(broker?.id);
-
-  const hyp = valid ? { ts: new Date().toISOString(), broker: broker.id, product: f.product, side: f.side, qty: n(f.lots), price: n(f.price), ref: "hyp" } : null;
-  const after = useMemo(() => (hyp ? portfolio([...fills, hyp], settings) : null), [fills, settings, broker?.id, f.product, f.side, f.lots, f.price]);
-  const accAfter = after?.acct(broker.id);
-  const spec = broker?.products?.[f.product] || {};
-  const size = n(spec.size) || 1000;
-  const lev = n(spec.lev) || n(broker?.leverage) || 1;
-  const dir = f.side === "Buy" ? 1 : -1;
-  const risk = has(f.stop) && has(f.price) ? Math.max(0, dir * (n(f.price) - n(f.stop))) * size * n(f.lots) : null;
-  const imDelta = accAfter && acc ? accAfter.IM - acc.IM : 0;
-  const perLotIM = broker?.method === "leverage" ? (Math.abs(n(f.price)) * size) / lev : n(spec.margin);
-  const lotsByMargin = perLotIM > 0 && acc ? Math.floor(Math.max(0, acc.freeIM) / perLotIM * 100) / 100 : Infinity;
-  const riskPerLot = risk !== null && n(f.lots) > 0 ? risk / n(f.lots) : 0;
-  const lotsByRisk = riskPerLot > 0 && acc ? Math.floor(acc.riskCap / riskPerLot * 100) / 100 : Infinity;
-  const maxLots = Math.min(lotsByMargin, lotsByRisk);
-  const existing = pf.rows.find((r) => r.broker === broker?.id && r.product === f.product);
-  const reduces = existing && ((existing.side === "Long" && f.side === "Sell") || (existing.side === "Short" && f.side === "Buy"));
-
-  const issues = [];
-  if (accAfter) {
-    if (!reduces && after.rows.length > n(settings.limits.maxTrades)) issues.push(["bad", "Exceeds your maximum open positions."]);
-    if (imDelta > 0 && accAfter.ratio < pf.minR) issues.push(["bad", `${broker.name} TNE/IM would fall to ${ratioTxt(accAfter.ratio)}, under your ${settings.limits.minRatio}% minimum.`]);
-    if (!reduces && risk !== null && risk > acc.riskCap) issues.push(["bad", `Risk ${money(risk)} exceeds per-trade limit ${money(acc.riskCap)}.`]);
-    if (!reduces && has(f.stop) && dir * (n(f.price) - n(f.stop)) <= 0) issues.push(["bad", "Stop is on the wrong side of the price."]);
-    if (!reduces && pf.dailyCap > 0 && pf.total.todayPnl <= -pf.dailyCap) issues.push(["bad", "Daily loss limit already hit."]);
-    if (broker.method === "fixed" && !n(spec.margin)) issues.push(["warn", `Set ${broker.name}'s margin per lot for ${f.product} in Settings.`]);
-    if (!reduces && !has(f.stop)) issues.push(["warn", "Add a stop to measure risk."]);
-  }
-  const blocked = issues.some((i) => i[0] === "bad");
-  const ast = accAfter ? statusOf(accAfter.ratio, accAfter, pf.minR) : null;
-
-  return (
-    <section className={`panel ${cls}`}>
-      <div className="ph"><h2>Check a trade<span className="dim">before you place it</span></h2>{existing && <span className="dim" style={{ fontSize: 11 }}>Holding {existing.side.toLowerCase()} {qty(existing.lots)} @ {px(existing.avg)}</span>}</div>
-      <div className="pb fg">
-        <div className="seg" role="group" aria-label="Side">
-          <button className={f.side === "Buy" ? "on-buy" : ""} aria-pressed={f.side === "Buy"} onClick={() => set("side", "Buy")}>Buy</button>
-          <button className={f.side === "Sell" ? "on-sell" : ""} aria-pressed={f.side === "Sell"} onClick={() => set("side", "Sell")}>Sell</button>
-        </div>
-        <div className="fg c2">
-          <F label="Broker" hint={broker ? basis(broker) : null}>
-            <select className="in" value={broker?.id || ""} onChange={(e) => setBrokerId(e.target.value)}>{brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select>
-          </F>
-          <F label="Product">
-            {products.length ? <select className="in" value={f.product} onChange={(e) => set("product", e.target.value)}>{products.map((p) => <option key={p}>{p}</option>)}</select>
-              : <button className="btn ghost" style={{ padding: "7px" }} onClick={goSettings}>Add a product</button>}
-          </F>
-          <F label="Lots"><input className="in" type="number" step="0.01" min="0" value={f.lots} onChange={(e) => set("lots", e.target.value)} /></F>
-          <F label="Price"><input className="in" type="number" step="0.01" value={f.price} onChange={(e) => set("price", e.target.value)} /></F>
-          <F label="Stop"><input className="in" type="number" step="0.01" value={f.stop} onChange={(e) => set("stop", e.target.value)} disabled={reduces} /></F>
-          <F label={broker?.method === "leverage" ? "Margin / lot" : "Broker margin / lot"}>
-            <div className="in num" style={{ background: "var(--panel2)" }} title={broker?.method === "leverage" ? `${size} × price ÷ ${lev}` : ""}>{perLotIM ? money(perLotIM) : "—"}</div>
-          </F>
-        </div>
-        {accAfter && (
-          <>
-            <div className="preview" style={{ marginTop: 0 }}>
-              {reduces && <><span>Effect</span><span style={{ color: "var(--accent)" }}>Reduces position</span></>}
-              <span>Margin change</span><span>{imDelta >= 0 ? "+" : ""}{money(imDelta)}</span>
-              {!reduces && <><span>Risk to stop</span><span>{risk === null ? "—" : money(risk)}</span></>}
-              <span>{broker.name} TNE/IM after</span><span className={ast.cls}>{ratioTxt(accAfter.ratio)}</span>
-              {!reduces && <><span>Max lots allowed</span><span className={maxLots < n(f.lots) ? "bad" : "ok"}>{isFinite(maxLots) ? qty(maxLots) : "—"}</span></>}
-              {existing && !reduces && <><span>New average</span><span>{px(after.rows.find((r) => r.broker === broker.id && r.product === f.product)?.avg)}</span></>}
-            </div>
-            {issues.length > 0 && <div className="msgs">{issues.map(([l, m], i) => <div key={i} className={l}>{m}</div>)}</div>}
-          </>
-        )}
-        <div className={`verdict ${!valid ? "idle" : blocked ? "bad" : "ok"}`}>
-          {!valid ? "Fill in a product, lots and price to check a trade."
-            : blocked ? `This ${f.side.toLowerCase()} breaks a limit — see above.`
-            : `${f.side} ${f.lots} ${f.product} is within your limits.`}
-        </div>
-        <div className="faint" style={{ fontSize: 11, lineHeight: 1.5 }}>
-          Nothing here is recorded. Place the trade with your broker, then bring it in from their
-          fills file — so every number in Nexus comes from the broker's own record.
-        </div>
-      </div>
-    </section>
   );
 }
 
