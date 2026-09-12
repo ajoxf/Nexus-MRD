@@ -227,18 +227,20 @@ tr.clickable:hover td { background: var(--accent-soft) !important; }
 tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid var(--line); }
 
 /* ---------- sign in ---------- */
-/* The sign-in screen wears NordStar Pro's colours — near-black surfaces, an
-   acid-lime accent — because that is where people arrive from. Past the
-   sign-in the desk goes back to its white institutional theme: a trading
-   screen read all day wants paper, not a dark room. These tokens are scoped
-   to .signin for exactly that reason and are used nowhere else. */
+/* Nexus wears its own colours now.
+   This screen used to be black with an acid-lime accent, borrowed from NordStar
+   Pro because that was where everyone arrived from. Nexus is its own product with
+   its own front door, so it wears the palette the application itself has always
+   used: navy and paper, the institutional look a trading screen read all day
+   actually wants. The tokens stay scoped here so the brand half can be navy while
+   the form half is white, without either leaking into the desk beyond. */
 .signin {
-  --ns-bg: #000000;
-  --ns-panel: #0B0B0B;
-  --ns-line: #1F1F1F;
-  --ns-ink: #FFFFFF;
-  --ns-dim: #A3A3A3;
-  --ns-accent: #D0F53C;
+  --ns-bg: #FFFFFF;
+  --ns-panel: #FFFFFF;
+  --ns-line: var(--line);
+  --ns-ink: var(--text);
+  --ns-dim: var(--dim);
+  --ns-accent: var(--accent);
   min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
   background: var(--ns-bg); color: var(--ns-ink);
 }
@@ -250,15 +252,15 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
 .signin-brand {
   position: relative; overflow: hidden;
   background:
-    radial-gradient(120% 90% at 10% 0%, rgba(208,245,60,.10), transparent 58%),
-    linear-gradient(168deg, #0B0B0B 0%, #050505 60%, #000000 100%);
-  border-right: 1px solid var(--ns-line);
-  color: var(--ns-dim); padding: 52px 46px; display: flex; flex-direction: column;
+    radial-gradient(120% 90% at 10% 0%, rgba(127,167,219,.18), transparent 58%),
+    linear-gradient(168deg, #1B3150 0%, #16283F 60%, #12233B 100%);
+  border-right: 1px solid var(--navy);
+  color: #A9B6C8; padding: 52px 46px; display: flex; flex-direction: column;
 }
 .signin-brand::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background-image: linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px);
   background-size: 46px 46px;
   mask-image: radial-gradient(120% 80% at 18% 8%, #000 8%, transparent 70%);
   -webkit-mask-image: radial-gradient(120% 80% at 18% 8%, #000 8%, transparent 70%);
@@ -268,33 +270,33 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
 .signin-brand .brand-top { display: flex; align-items: center; gap: 13px; }
 .signin-brand .mark {
   width: 42px; height: 42px; border-radius: 8px; flex: none;
-  background: var(--ns-accent); color: #000;
+  background: #FFFFFF; color: var(--navy);
   display: grid; place-items: center; font-weight: 700; font-size: 23px; letter-spacing: -1px;
 }
-.signin-brand h1 { margin: 0; font-size: 21px; font-weight: 600; color: var(--ns-ink); letter-spacing: -.4px; }
+.signin-brand h1 { margin: 0; font-size: 21px; font-weight: 600; color: #FFFFFF; letter-spacing: -.4px; }
 /* The half after the dot is set in the mono face, the way NordStar Pro sets
    the "Pro" in its own wordmark. */
 .signin-brand h1 span {
   font-family: var(--mono); font-size: 13px; font-weight: 500;
-  text-transform: uppercase; letter-spacing: .22em; color: var(--ns-accent);
+  text-transform: uppercase; letter-spacing: .22em; color: #7FA7DB;
 }
 .signin-brand .desk {
   margin: 3px 0 0; font-family: var(--mono); font-size: 10px; font-weight: 500;
-  letter-spacing: .18em; text-transform: uppercase; color: var(--ns-dim);
+  letter-spacing: .18em; text-transform: uppercase; color: #8FA2BC;
 }
 
 /* The tagline carries the panel, so it sits on the optical centre. */
 .signin-brand .tagline {
   margin: auto 0; font-size: 30px; line-height: 1.25; font-weight: 600;
-  color: var(--ns-ink); letter-spacing: -.03em; max-width: 12.5em;
+  color: #FFFFFF; letter-spacing: -.03em; max-width: 12.5em;
 }
 .signin-brand .rule { height: 1px; margin: 0;
-  background: linear-gradient(90deg, var(--ns-line), transparent); }
-.signin-brand .foot { margin: 16px 0 0; font-size: 12px; line-height: 1.6; color: #6E6E6E; max-width: 30em; }
-.signin-brand .foot a { color: var(--ns-dim); text-decoration: underline; text-underline-offset: 3px; }
-.signin-brand .foot a:hover { color: var(--ns-accent); }
+  background: linear-gradient(90deg, rgba(255,255,255,.18), transparent); }
+.signin-brand .foot { margin: 16px 0 0; font-size: 12px; line-height: 1.6; color: #8FA2BC; max-width: 30em; }
+.signin-brand .foot a { color: #C6D4E6; text-decoration: underline; text-underline-offset: 3px; }
+.signin-brand .foot a:hover { color: #FFFFFF; }
 
-.signin-form { display: grid; place-items: center; padding: 32px 24px; background: var(--ns-bg); }
+.signin-form { display: grid; place-items: center; padding: 32px 24px; background: var(--bg); }
 .signin-card {
   width: 100%; max-width: 372px; background: var(--ns-panel);
   border: 1px solid var(--ns-line); border-radius: 12px;
@@ -302,29 +304,32 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
 }
 .signin-card h2 { margin: 0; font-size: 22px; font-weight: 600; color: var(--ns-ink); letter-spacing: -.02em; }
 .signin-card .lede { margin: -7px 0 6px; font-size: 13px; color: var(--ns-dim); line-height: 1.55; }
-.signin-card .note { margin: -4px 0 2px; font-size: 12px; color: #6E6E6E; line-height: 1.5; }
+.signin-card .note { margin: -4px 0 2px; font-size: 12px; color: var(--faint); line-height: 1.5; }
 .signin-card .f { color: var(--ns-dim); }
+/* A black field on a white card was the last of the borrowed skin — legible only
+   by accident, and the first thing the eye lands on. Paper, like the desk. */
 .signin-card .in {
-  height: 40px; background: #000; border: 1px solid var(--ns-line);
-  border-radius: 8px; color: var(--ns-ink);
+  height: 40px; background: var(--panel); border: 1px solid var(--line2);
+  border-radius: 6px; color: var(--ns-ink);
 }
-.signin-card .in::placeholder { color: #5A5A5A; }
-.signin-card .in:focus { border-color: var(--ns-accent); box-shadow: 0 0 0 3px rgba(208,245,60,.14); }
-/* Flat lime fill with a black label, in a pill — NordStar Pro's primary action. */
+.signin-card .in::placeholder { color: var(--faint); }
+.signin-card .in:focus { border-color: var(--ns-accent); box-shadow: 0 0 0 3px rgba(31,78,140,.14); }
+/* Solid navy with a white label — the application's own primary action, so the
+   button somebody presses to get in matches every button they press afterwards. */
 .signin-card .btn.full {
   margin-top: 6px; height: 42px; font-size: 14px; font-weight: 600;
-  background: var(--ns-accent); border: 0; border-radius: 999px; color: #000;
+  background: var(--ns-accent); border: 0; border-radius: 6px; color: #FFFFFF;
 }
-.signin-card .btn.full:hover:not(:disabled) { background: #DDFF63; }
+.signin-card .btn.full:hover:not(:disabled) { background: #1A4279; }
 .signin-card .btn.full:disabled { opacity: .5; }
-.signin-err { font-size: 12px; color: #FF4D5E; background: rgba(255,77,94,.10); border: 1px solid rgba(255,77,94,.35); border-radius: 8px; padding: 8px 10px; }
-.signin-err.warn { color: #E7C14B; background: rgba(231,193,75,.10); border-color: rgba(231,193,75,.35); }
+.signin-err { font-size: 12px; color: var(--bad); background: var(--bad-soft); border: 1px solid rgba(192,49,58,.28); border-radius: 6px; padding: 8px 10px; }
+.signin-err.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(168,106,12,.30); }
 .linklike { background: none; border: 0; padding: 0; font-size: 13px; color: var(--ns-accent); cursor: pointer; text-align: center; }
 .linklike:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 @media (max-width: 860px) {
   .signin { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
-  .signin-brand { padding: 26px 22px 30px; border-right: 0; border-bottom: 1px solid var(--ns-line); }
+  .signin-brand { padding: 26px 22px 30px; border-right: 0; border-bottom: 0; }
   .signin-brand .tagline { margin: 18px 0 0; font-size: 22px; max-width: none; }
   .signin-brand .rule, .signin-brand .foot { display: none; }
   .signin-form { padding: 24px 16px 40px; align-items: start; }
