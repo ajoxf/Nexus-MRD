@@ -3,6 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, METRICS, valueOf } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -23,6 +24,8 @@ const DEFAULT_SETTINGS = {
   scenario: { target: "min", defV: 5, defUnit: "%", moves: {}, openOnly: true },
   cash: [],
   statement: {},
+  // One row per broker account per day, written live. See lib/history.js.
+  history: [],
 };
 const LEVERAGES = [10, 20, 25, 30, 50, 100, 200, 300, 400, 500];
 
@@ -30,7 +33,7 @@ const LEVERAGES = [10, 20, 25, 30, 50, 100, 200, 300, 400, 500];
 function migrate(s) {
   const D = DEFAULT_SETTINGS;
   if (!s) return JSON.parse(JSON.stringify(D));
-  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: s.brokers, marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, cash: s.cash || [], statement: s.statement || {} };
+  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: s.brokers, marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
   const A = s.account || {};
   return {
     limits: { ...D.limits, ...Object.fromEntries(Object.entries(A).filter(([k]) => k in D.limits)) },
@@ -40,6 +43,7 @@ function migrate(s) {
     scenario: { ...D.scenario },
     cash: [],
     statement: {},
+    history: [],
   };
 }
 
@@ -106,21 +110,21 @@ function monthsCharged(c, now = new Date()) {
   if (e < s) return 0;
   return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + (e.getDate() >= s.getDate() ? 1 : 0);
 }
-const chargeTotal = (c) => n(c.amount) * (c.recurring === "monthly" ? monthsCharged(c) : 1);
+const chargeTotal = (c, now = new Date()) => n(c.amount) * (c.recurring === "monthly" ? monthsCharged(c, now) : 1);
 
 // Funding per account: deposits − withdrawals is the equity base once the ledger has entries
 // (otherwise the Capital typed in Settings). Charges (market data, platform…) reduce equity separately.
-function funding(settings, brokerId) {
+function funding(settings, brokerId, now = new Date()) {
   const list = (settings.cash || []).filter((c) => c.broker === brokerId);
   const dep = sum(list.filter((c) => c.type === "deposit"), (c) => n(c.amount));
   const wd = sum(list.filter((c) => c.type === "withdrawal"), (c) => n(c.amount));
-  const charges = sum(list.filter((c) => c.type === "charge"), chargeTotal);
+  const charges = sum(list.filter((c) => c.type === "charge"), (c) => chargeTotal(c, now));
   const moneyMoves = list.filter((c) => c.type !== "charge").length > 0;
   const b = settings.brokers.find((x) => x.id === brokerId);
   return { list, dep, wd, charges, net: dep - wd, fromLedger: moneyMoves, base: moneyMoves ? dep - wd : n(b?.capital) };
 }
 
-function portfolio(fills, settings) {
+function portfolio(fills, settings, now = new Date()) {
   const { limits: L, brokers: B, marks: M } = settings;
   const byId = Object.fromEntries(B.map((b) => [b.id, b]));
   const book = computeBook(withCommission(fills, byId), (b, p) => n(byId[b]?.products?.[p]?.size) || 1000, (b) => matchOf(byId[b]));
@@ -146,7 +150,7 @@ function portfolio(fills, settings) {
     const real = book.realized.filter((r) => r.broker === b.id);
     const IM = sum(rs, (r) => r.im), upnl = sum(rs, (r) => r.upnl);
     const realizedAll = sum(real, (r) => r.pnl), realizedToday = sum(real.filter((r) => isToday(r.ts)), (r) => r.pnl);
-    const fund = funding(settings, b.id);
+    const fund = funding(settings, b.id, now);
     const TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
     return {
@@ -160,7 +164,7 @@ function portfolio(fills, settings) {
     };
   });
   const acct = (id) => accounts.find((a) => a.id === id);
-  const capital = sum(B, (b) => funding(settings, b.id).base);
+  const capital = sum(B, (b) => funding(settings, b.id, now).base);
   const withPos = accounts.filter((a) => a.IM > 0);
   const weakest = withPos.length ? withPos.reduce((w, a) => (a.ratio < w.ratio ? a : w)) : null;
   const realizedToday = sum(accounts, (a) => a.realizedToday), upnl = sum(accounts, (a) => a.upnl);
@@ -806,6 +810,25 @@ function Tracker({ user }) {
 
   const pf = useMemo(() => (settings ? portfolio(fills, settings) : null), [fills, settings]);
 
+  /*
+   * Writes today's equity, margin and lots for each account into settings, so
+   * that tomorrow the chart can show what today actually looked like rather
+   * than a rebuild of it.
+   *
+   * This deliberately runs on every recompute, not once a day: the figure that
+   * matters is where the account ended up, so a later change today overwrites
+   * this morning's row. mergeSnapshot hands back the same array when nothing
+   * moved, which is what stops the write → recompute → write circle.
+   */
+  useEffect(() => {
+    if (!pf || !settings) return;
+    const rows = snapshotRows(pf);
+    setSettings((s) => {
+      const next = mergeSnapshot(s.history, rows);
+      return next === s.history ? s : { ...s, history: next };
+    });
+  }, [pf, settings]);
+
   if (loadErr) return <div className="auth"><div className="panel"><div className="ph"><h2 className="bad">Couldn't load your data</h2></div><div className="pb"><p>{loadErr}</p><p className="dim">Please reload the page.</p></div></div></div>;
   if (!settings || !pf) return <div className="auth dim">Loading your data…</div>;
 
@@ -900,7 +923,7 @@ function Tracker({ user }) {
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
-        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} />}
+        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} fills={fills} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
@@ -2352,7 +2375,177 @@ const BigTrade = ({ x }) => (
   </tr>
 );
 
-function AnalysisTab({ pf, settings, view }) {
+/*
+ * Re-runs the book as it stood at the close of each day in `days`.
+ *
+ * Two deliberate substitutions, both of them about prices nobody wrote down:
+ *   marks: {} — an open position is carried at its entry price, so equity here
+ *     is funding plus realized money and carries no open profit or loss.
+ *   cash filtered to the date — money that had not been paid in yet must not
+ *     be counted as if it had.
+ * Everything else is the live margin engine, so a reconstructed margin figure
+ * is worked out exactly the way today's is.
+ */
+function reconstruct(fills, settings, days) {
+  if (!days.length) return [];
+  const traded = [...fills].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  const cash = settings.cash || [];
+  return days.map((d) => {
+    const at = endOfDay(d);
+    const scoped = { ...settings, marks: {}, cash: cash.filter((c) => new Date(c.ts) <= at) };
+    const pf = portfolio(traded.filter((f) => new Date(f.ts) <= at), scoped, at);
+    return {
+      d,
+      byBroker: Object.fromEntries(pf.accounts.map((a) => [a.id, {
+        tne: Math.round(a.TNE),
+        im: Math.round(a.IM),
+        lots: Math.round(a.rows.reduce((t, r) => t + Math.abs(r.lots), 0) * 1e4) / 1e4,
+      }])),
+    };
+  });
+}
+
+// Enough hues to tell four or five accounts apart, all of them at home next to
+// navy. Colour is never the only cue: every line is named in the legend and
+// again in the tooltip.
+const LINE_COLOURS = ["#1F4E8C", "#0E7A53", "#A86A0C", "#6B4FA8", "#C0313A"];
+
+function MarginHistory({ fills, settings, view, history }) {
+  const [metric, setMetric] = useState("ratio");
+  const [hover, setHover] = useState(null);
+
+  const days = useMemo(() => reconstructionDays(fills, history), [fills, history]);
+  const rebuilt = useMemo(() => reconstruct(fills, settings, days), [fills, settings, days]);
+  const brokers = settings.brokers.filter((b) => view === "all" || b.id === view);
+  const { days: axis, lines, join } = useMemo(
+    () => buildSeries({ reconstructed: rebuilt, history, brokers }),
+    [rebuilt, history, brokers],
+  );
+
+  const M = METRICS.find((m) => m.key === metric);
+  const fmt = (v) => v === null || v === undefined || !isFinite(v) ? "—"
+    : M.fmt === "money" ? money(v) : M.fmt === "ratio" ? ratioTxt(v) : qty(v);
+
+  // A line only counts once it has two points to join.
+  const drawn = lines
+    .map((l) => ({ ...l, vals: l.points.map((p) => ({ ...p, v: valueOf(p, metric) })).filter((p) => p.v !== null) }))
+    .filter((l) => l.vals.length > 1);
+
+  if (axis.length < 2 || !drawn.length) return (
+    <div className="empty">
+      Not enough history yet. This chart needs at least two days with positions on the book —
+      either from fills you have already loaded, or from the daily record, which starts today.
+    </div>
+  );
+
+  const W = 760, H = 230, pad = { l: 54, r: 12, t: 14, b: 26 };
+  const all = drawn.flatMap((l) => l.vals.map((p) => p.v));
+  let lo = Math.min(...all, metric === "ratio" ? Math.min(...all) : 0);
+  let hi = Math.max(...all);
+  if (hi === lo) { hi = lo + 1; lo -= 1; }
+  const span = hi - lo;
+  const xi = Object.fromEntries(axis.map((d, i) => [d, i]));
+  const x = (d) => pad.l + (xi[d] * (W - pad.l - pad.r)) / (axis.length - 1);
+  const y = (v) => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / span);
+  const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${x(p.d).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const ticks = [lo, lo + span / 2, hi];
+
+  const pick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / (axis.length - 1)));
+    setHover(axis[Math.max(0, Math.min(axis.length - 1, i))]);
+  };
+  const dayLabel = (d) => new Date(endOfDay(d)).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
+
+  return (
+    <div>
+      <div className="hist-head">
+        <div className="hist-metrics" role="tablist" aria-label="What to plot">
+          {METRICS.map((m) => (
+            <button key={m.key} type="button" role="tab" aria-selected={m.key === metric}
+              className={m.key === metric ? "on" : undefined} onClick={() => setMetric(m.key)}>{m.label}</button>
+          ))}
+        </div>
+        <div className="hist-legend">
+          {drawn.map((l, i) => (
+            <span key={l.id}><i style={{ background: LINE_COLOURS[i % LINE_COLOURS.length] }} />{l.name}</span>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+          aria-label={`${M.label} per broker account, from ${dayLabel(axis[0])} to ${dayLabel(axis[axis.length - 1])}`}
+          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+          {ticks.map((t, i) => (
+            <g key={i}>
+              <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" />
+              <text x={pad.l - 7} y={y(t) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{fmt(t)}</text>
+            </g>
+          ))}
+
+          {/* The join, drawn rather than smoothed over: the two sides of it are
+              worked out differently and a step here is the method changing, not
+              the account. */}
+          {join && xi[join] !== undefined && (
+            <g>
+              <line x1={x(join)} x2={x(join)} y1={pad.t - 4} y2={H - pad.b} stroke="var(--warn)" strokeWidth="1" strokeDasharray="3 3" />
+              <text x={x(join) + 4} y={pad.t + 4} fontSize="10" fill="var(--warn)">Daily record starts</text>
+            </g>
+          )}
+
+          {drawn.map((l, i) => {
+            const c = LINE_COLOURS[i % LINE_COLOURS.length];
+            const back = l.vals.filter((p) => !p.recorded);
+            const fwd = l.vals.filter((p) => p.recorded);
+            // One point of overlap so the halves meet instead of leaving a gap.
+            const bridge = back.length && fwd.length ? [back[back.length - 1], fwd[0]] : [];
+            return (
+              <g key={l.id}>
+                {back.length > 1 && <path d={path(back)} fill="none" stroke={c} strokeWidth="1.6" strokeDasharray="5 4" opacity=".75" strokeLinejoin="round" />}
+                {bridge.length === 2 && <path d={path(bridge)} fill="none" stroke={c} strokeWidth="1.6" strokeDasharray="5 4" opacity=".75" />}
+                {fwd.length > 1 && <path d={path(fwd)} fill="none" stroke={c} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
+                {fwd.length === 1 && <circle cx={x(fwd[0].d)} cy={y(fwd[0].v)} r="3" fill={c} />}
+              </g>
+            );
+          })}
+
+          {hover && (
+            <g>
+              <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={H - pad.b} stroke="var(--line2)" strokeWidth="1" />
+              {drawn.map((l, i) => {
+                const p = l.vals.find((q) => q.d === hover);
+                return p ? <circle key={l.id} cx={x(hover)} cy={y(p.v)} r="3.5" fill={LINE_COLOURS[i % LINE_COLOURS.length]} stroke="#fff" strokeWidth="1.5" /> : null;
+              })}
+            </g>
+          )}
+
+          <text x={pad.l} y={H - 8} fontSize="10" fill="var(--faint)">{dayLabel(axis[0])}</text>
+          <text x={W - pad.r} y={H - 8} fontSize="10" textAnchor="end" fill="var(--faint)">{dayLabel(axis[axis.length - 1])}</text>
+        </svg>
+
+        {hover && (
+          <div className="chart-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
+            <b>{dayLabel(hover)}</b>
+            {drawn.map((l) => {
+              const p = l.vals.find((q) => q.d === hover);
+              return p ? <span key={l.id}>{l.name} {fmt(p.v)}{p.recorded ? "" : " · rebuilt"}</span> : null;
+            })}
+          </div>
+        )}
+      </div>
+
+      <p className="hist-note">
+        <b>Solid</b> is the daily record, written from your live figures, equity included.
+        {" "}<b>Dashed</b> is rebuilt from your fills: lots and margin come out exact, but equity there
+        is funding plus realized money only — nobody saved the prices you were marking open positions
+        at, so RAMP will not invent them. A step at the marker is the method changing, not the account.
+      </p>
+    </div>
+  );
+}
+
+function AnalysisTab({ pf, settings, view, fills }) {
   const brokers = settings.brokers;
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
@@ -2360,10 +2553,25 @@ function AnalysisTab({ pf, settings, view }) {
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
 
-  if (!a.n) return (
-    <section className="panel"><div className="ph"><h2>Analysis</h2></div>
-      <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
+  // Worth drawing before a single trade is closed: it answers "how much margin
+  // was I carrying then", which is a question about open positions.
+  const history = (
+    <section className="panel">
+      <div className="ph">
+        <h2>Equity, margin and lots<span className="dim">day by day, per account</span></h2>
+        <span className="faint" style={{ fontSize: 11 }}>Recorded daily from today; earlier days rebuilt from your fills</span>
+      </div>
+      <div className="pb"><MarginHistory fills={fills} settings={settings} view={view} history={settings.history} /></div>
     </section>
+  );
+
+  if (!a.n) return (
+    <>
+      {history}
+      <section className="panel"><div className="ph"><h2>Analysis</h2></div>
+        <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
+      </section>
+    </>
   );
 
   return (
@@ -2385,6 +2593,8 @@ function AnalysisTab({ pf, settings, view }) {
           <div className="kpi hide-m"><label>Longest streak</label><b><span className="ok">{a.winStreak}W</span> <span className="faint">/</span> <span className="bad">{a.lossStreak}L</span></b></div>
         </div>
       </section>
+
+      {history}
 
       <section className="panel">
         <div className="ph"><h2>Cumulative realized P&amp;L<span className="dim">trade by trade</span></h2>
