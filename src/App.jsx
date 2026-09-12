@@ -293,7 +293,10 @@ function SignInPage({ children }) {
         <p className="tagline">Know what a move against you costs before you put the trade on.</p>
         <div className="rule" />
         <p className="foot">
-          Access is by invitation. Speak to your desk administrator.<br />
+          {/* "By invitation" and "start a free trial" cannot both be true on the
+              same screen, so the invitation line stands down while the offer is
+              open. Both are driven by the one variable. */}
+          {!TRIAL_URL && <>Access is by invitation. Speak to your desk administrator.<br /></>}
           A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product.
         </p>
       </aside>
@@ -372,6 +375,29 @@ function SignIn() {
       <button type="button" className="linklike" onClick={() => { setMode(mode === "in" ? "forgot" : "in"); setErr(null); }}>
         {mode === "in" ? "Forgotten your password?" : "Back to sign in"}
       </button>
+
+      {/*
+        The trial is opened at the portal, not here.
+        -------------------------------------------
+        Subscriptions, payment and the trial clock all live on NordStar Pro,
+        and RAMP has no sign-up of its own by design — an account here is
+        created for you once you hold the product. So this is a link out, and
+        the portal remains the one place that decides who gets a trial.
+
+        Shown only when TRIAL_URL is configured, which is also the switch:
+        unset the variable when the offer closes. RAMP cannot ask the portal
+        whether trials are open — different app, different origin — so the
+        offer is only as current as that variable. An offer on screen that the
+        portal then refuses is worse than no offer, so if you close trials,
+        clear the variable in the same sitting.
+      */}
+      {mode === "in" && TRIAL_URL && (
+        <p className="signin-trial">
+          New to Nexus RAMP?{" "}
+          <a href={TRIAL_URL} target="_blank" rel="noopener noreferrer">Start a 14-day free trial</a>
+          {" "}— no card required.
+        </p>
+      )}
     </form>
   );
 }
@@ -379,6 +405,9 @@ function SignIn() {
 // Where the portal hands out sessions. Unset in a build that has no portal, which is why
 // every use of it is guarded rather than assumed.
 const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || "";
+
+// Where the portal opens a trial. Unset means no offer is shown at all.
+const TRIAL_URL = import.meta.env.VITE_TRIAL_URL || "";
 
 // Shown after following a reset link.
 function NewPassword({ onDone }) {

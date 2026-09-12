@@ -509,3 +509,8 @@ td.faded { opacity: .35; }
 .hist-legend i { width: 10px; height: 3px; border-radius: 2px; flex: none; }
 .hist-note { margin: 10px 0 0; font-size: 11px; line-height: 1.6; color: var(--faint); }
 .hist-note b { color: var(--dim); font-weight: 600; }
+
+/* One line under the sign-in box, so the page still fits a single window. */
+.signin-trial { margin: 2px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ns-dim); text-align: center; }
+.signin-trial a { color: var(--ns-accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.signin-trial a:hover { color: var(--navy); }
