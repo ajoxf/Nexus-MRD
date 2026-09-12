@@ -268,13 +268,16 @@ function SignInPage({ children }) {
         <div className="brand-top">
           <div className="mark">N</div>
           <div>
-            <h1>Nexus <span>· MRD</span></h1>
-            <p className="desk">Margin &amp; Risk Desk</p>
+            <h1>Nexus <span>RAMP</span></h1>
+            <p className="desk">Risk and Margin Desk</p>
           </div>
         </div>
         <p className="tagline">Know what a move against you costs before you put the trade on.</p>
         <div className="rule" />
-        <p className="foot">Access is by invitation. Speak to your desk administrator.</p>
+        <p className="foot">
+          Access is by invitation. Speak to your desk administrator.<br />
+          A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product.
+        </p>
       </aside>
       <main className="signin-form">{children}</main>
     </div>
