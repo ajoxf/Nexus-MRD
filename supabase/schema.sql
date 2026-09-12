@@ -1,4 +1,4 @@
--- Margin & Risk Tracker — database schema
+-- Nexus RAMP (Risk and Margin Platform) — database schema
 -- Run once in Supabase: Dashboard → SQL Editor → New query → paste → Run.
 
 -- One row per trader: account settings, broker terms, product specs, current prices and stops.

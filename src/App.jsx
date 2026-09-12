@@ -269,7 +269,7 @@ function SignInPage({ children }) {
           <div className="mark">N</div>
           <div>
             <h1>Nexus <span>RAMP</span></h1>
-            <p className="desk">Risk and Margin Desk</p>
+            <p className="desk">Risk and Margin Platform</p>
           </div>
         </div>
         <p className="tagline">Know what a move against you costs before you put the trade on.</p>
@@ -597,7 +597,7 @@ function Tracker({ user }) {
     <DirtyCtx.Provider value={dirtyApi}>
     <div className="app">
       <nav className="rail" aria-label="Main">
-        <div className="logo" title="Nexus: MRD - Margin & Risk Desk">N</div>
+        <div className="logo" title="Nexus RAMP - Risk and Margin Platform">N</div>
         {nav.map(([key, l, c]) => (
           <button key={key} aria-current={tab === key ? "page" : undefined} onClick={() => goTab(key)}>
             {ICONS[key]}{l}{c ? <span className="badge">{c > 999 ? "999+" : c}</span> : null}
@@ -607,7 +607,7 @@ function Tracker({ user }) {
       </nav>
 
       <header className="top">
-        <div className="brand"><b>Nexus</b><span>MRD · Margin &amp; Risk Desk</span></div>
+        <div className="brand"><b>Nexus</b><span>RAMP · Risk and Margin Platform</span></div>
         <div className="scope">
           <label className="f" style={{ gap: 2 }}>Account
             <select className="in" value={view} onChange={(e) => setView(e.target.value)} aria-label="Account shown">

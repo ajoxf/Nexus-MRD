@@ -1,4 +1,4 @@
-# Nexus: MRD - Margin & Risk Desk
+# Nexus RAMP - Risk and Margin Platform
 
 Margin, risk and P&L tracker for multi-broker commodity trading (Orient futures spreads, MT5 accounts).
 
