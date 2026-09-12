@@ -496,3 +496,125 @@ td.faded { opacity: .35; }
   height: 1px;
   background: var(--line, #1f1f1f);
 }
+
+/* ---------- front page ----------
+   RAMP's own address, so RAMP gets its own front page. Same tokens as the desk
+   — navy, paper, one blue accent — set larger and with more air, because this
+   is read from across the room rather than worked in all day. */
+.home { background: var(--panel); color: var(--text); font-size: 15px; line-height: 1.6; }
+.home .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+.home h1, .home h2, .home h3 { letter-spacing: -.02em; margin: 0; }
+.home a { color: inherit; }
+.home a, .home button { cursor: pointer; }
+
+.home-top { position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,.92);
+  backdrop-filter: saturate(140%) blur(8px); border-bottom: 1px solid var(--line); }
+.home-top-in { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 64px; }
+.home-brand { display: flex; align-items: center; gap: 11px; text-decoration: none; }
+.home-brand .mark { width: 34px; height: 34px; flex: none; border-radius: 7px; background: var(--navy);
+  color: #FFFFFF; display: grid; place-items: center; font-weight: 700; font-size: 19px; letter-spacing: -1px; }
+.home-brand b { display: block; font-size: 16px; font-weight: 600; color: var(--navy); }
+.home-brand b i { font-style: normal; font-family: var(--mono); font-size: 11px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .2em; color: var(--accent); }
+.home-brand small { display: block; font-size: 11px; color: var(--dim); line-height: 1.3; }
+.home-nav { display: flex; align-items: center; gap: 22px; font-size: 14px; }
+.home-nav a { color: var(--dim); text-decoration: none; }
+.home-nav a:hover { color: var(--text); }
+.home-nav .home-cta { background: var(--accent); color: #FFFFFF; border-radius: 6px;
+  padding: 9px 18px; font-weight: 600; }
+.home-nav .home-cta:hover { background: #1A4279; color: #FFFFFF; }
+
+.home-hero { padding: 84px 0 72px; background:
+  radial-gradient(90% 70% at 12% 0%, var(--accent-soft), transparent 62%), var(--panel); }
+.home-hero .eyebrow { margin: 0 0 18px; font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .2em; text-transform: uppercase; color: var(--accent); }
+.home-hero h1 { font-size: clamp(30px, 4.6vw, 50px); line-height: 1.12; font-weight: 600;
+  color: var(--navy); max-width: 17em; text-wrap: balance; }
+.home-hero .lede { margin: 22px 0 0; font-size: 17px; color: var(--dim); max-width: 42em; }
+.home-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+.home-btn { display: inline-block; border-radius: 6px; padding: 12px 24px; font-size: 15px;
+  font-weight: 600; text-decoration: none; border: 1px solid transparent; transition: background .15s, border-color .15s; }
+.home-btn.primary { background: var(--accent); color: #FFFFFF; }
+.home-btn.primary:hover { background: #1A4279; }
+.home-btn.ghost { border-color: var(--line2); color: var(--navy); background: var(--panel); }
+.home-btn.ghost:hover { background: var(--hover); border-color: var(--accent); }
+.home-btn.light { background: #FFFFFF; color: var(--navy); }
+.home-btn.light:hover { background: #E6EEF8; }
+.home-btn.outline { border-color: rgba(255,255,255,.4); color: #FFFFFF; }
+.home-btn.outline:hover { border-color: #FFFFFF; background: rgba(255,255,255,.08); }
+
+.home-facts { list-style: none; margin: 48px 0 0; padding: 0; display: grid; gap: 1px;
+  grid-template-columns: repeat(3, minmax(0, 1fr)); background: var(--line);
+  border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.home-facts li { background: var(--panel); padding: 16px 18px; }
+.home-facts b { display: block; font-size: 14px; font-weight: 600; color: var(--navy); }
+.home-facts span { display: block; font-size: 13px; color: var(--dim); margin-top: 2px; }
+
+.home-band { padding: 76px 0; border-top: 1px solid var(--line); background: var(--bg); }
+.home-band h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 600; color: var(--navy); margin-bottom: 32px; }
+.home-grid { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.home-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px 20px 24px;
+  box-shadow: 0 1px 2px rgba(18,35,59,.04); }
+.home-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 8px;
+  background: var(--accent-soft); color: var(--accent); margin-bottom: 16px; }
+.home-card h3 { font-size: 16px; font-weight: 600; color: var(--navy); }
+.home-card p { margin: 8px 0 0; font-size: 14px; color: var(--dim); }
+
+.home-shots { padding: 76px 0; border-top: 1px solid var(--line); background: var(--panel); }
+.home-shots h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 600; color: var(--navy); margin-bottom: 22px; }
+.home-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.home-tabs button { background: var(--panel); border: 1px solid var(--line2); border-radius: 20px;
+  padding: 8px 18px; font-size: 14px; font-weight: 500; color: var(--dim); }
+.home-tabs button:hover { border-color: var(--accent); color: var(--navy); }
+.home-tabs button.on { background: var(--navy); border-color: var(--navy); color: #FFFFFF; font-weight: 600; }
+.home-shot { border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; background: var(--bg);
+  box-shadow: 0 8px 26px rgba(18,35,59,.09); }
+.home-shot img { display: block; width: 100%; height: auto; }
+.home-shot-cap { margin: 14px 0 0; font-size: 14px; color: var(--dim); max-width: 60em; }
+
+.home-cta-band { padding: 74px 0; color: #FFFFFF; background:
+  radial-gradient(120% 90% at 8% 0%, rgba(127,167,219,.20), transparent 60%),
+  linear-gradient(168deg, #1B3150 0%, #16283F 60%, #12233B 100%); }
+.home-cta-band h2 { font-size: clamp(24px, 3.2vw, 34px); font-weight: 600; color: #FFFFFF; }
+.home-cta-band p { margin: 14px 0 0; font-size: 16px; color: #A9B6C8; max-width: 40em; }
+
+.home-steps { list-style: none; counter-reset: step; margin: 0; padding: 0;
+  display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.home-steps li { counter-increment: step; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 22px 20px 24px; }
+.home-steps li::before { content: counter(step, decimal-leading-zero); display: block;
+  font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: .16em; color: var(--accent); margin-bottom: 12px; }
+.home-steps b { font-size: 16px; font-weight: 600; color: var(--navy); }
+.home-steps p { margin: 8px 0 0; font-size: 14px; color: var(--dim); }
+
+.home-foot { border-top: 1px solid var(--line); background: var(--panel); padding: 26px 0; }
+.home-foot-in { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between;
+  font-size: 13px; color: var(--faint); }
+.home-foot a { color: var(--dim); text-decoration: underline; text-underline-offset: 3px; }
+.home-foot a:hover { color: var(--accent); }
+
+@media (max-width: 980px) {
+  .home-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-steps { grid-template-columns: minmax(0, 1fr); }
+  .home-facts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 620px) {
+  .home { font-size: 14px; }
+  .home .wrap { padding: 0 16px; }
+  .home-brand small { display: none; }
+  .home-nav { gap: 14px; }
+  .home-nav a:not(.home-cta) { display: none; }
+  .home-hero { padding: 48px 0 44px; }
+  .home-hero .lede { font-size: 15px; }
+  .home-band, .home-shots, .home-cta-band { padding: 48px 0; }
+  .home-grid { grid-template-columns: minmax(0, 1fr); }
+  .home-btn { padding: 11px 18px; font-size: 14px; }
+  /* The screens are 1560px wide: shown at phone width they are a grey smear, so
+     they scroll sideways at a size somebody can actually read instead. */
+  .home-shot { overflow-x: auto; }
+  .home-shot img { width: 900px; max-width: none; }
+}
+
+/* Only worth saying where the screen is wider than the phone showing it. */
+.home-swipe { display: none; }
+@media (max-width: 620px) { .home-swipe { display: inline; color: var(--accent); font-weight: 600; } }

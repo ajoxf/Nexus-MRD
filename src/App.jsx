@@ -270,12 +270,210 @@ export default function App() {
 
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
-  if (!user) return <SignInPage><SignIn /></SignInPage>;
+  if (!user) return <Front />;
   return <ConfirmHost><Tracker key={user.id} user={user} /></ConfirmHost>;
 }
 
+/*
+ * The front door for people who are not signed in.
+ * ------------------------------------------------
+ * RAMP now has its own address and its own front page, so it explains itself
+ * rather than opening on a password box. The sign-in form still lives at
+ * #signin, which keeps the browser's back button working without a router.
+ */
+function Front() {
+  const [hash, setHash] = useState(() => window.location.hash);
+  useEffect(() => {
+    const on = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  if (hash === "#signin") return <SignInPage back><SignIn /></SignInPage>;
+  return <Home />;
+}
+
+// Every claim below describes something the application actually does. Nothing
+// here is a testimonial, a customer count or a performance figure: the numbers
+// on the screenshots are demonstration data and say so.
+const SHOTS = [
+  { key: "fills", tab: "Load fills", src: "/shots/import.png",
+    caption: "Map the broker's columns once. Spread orders and their two legs arrive as one trade, not three.",
+    alt: "The Fills screen: a broker CSV mapped column by column, with 33 rows previewed before import." },
+  { key: "dash", tab: "Positions", src: "/shots/positions.png",
+    caption: "The open book by product, the margin each position uses, and how far the weakest account is from a call.",
+    alt: "The Positions screen: open and closed trades by product, broker accounts, and open positions with margin." },
+  { key: "scen", tab: "Scenarios", src: "/shots/scenarios.png",
+    caption: "Move every product against you and read equity after, margin after, and the lots you could still add.",
+    alt: "The Scenarios screen: a 5% adverse move applied per product, with stressed prices and capacity." },
+  { key: "analysis", tab: "Analysis", src: "/shots/analysis.png",
+    caption: "Realized money only — trade by trade, by product and by month, with the drawdown spelled out.",
+    alt: "The Analysis screen: cumulative realized P&L, win rate, profit factor and a breakdown by product." },
+];
+
+const FEATURES = [
+  { key: "dash", title: "One book, every broker",
+    body: "Calendar spreads held at more than one broker sit in a single table. Switch to one account when you need its own margin picture." },
+  { key: "scen", title: "The question before the trade",
+    body: "Set the move you fear, per product. RAMP prices it through and tells you what stops you first — the margin call, the stop-out, or your own daily limit." },
+  { key: "fills", title: "Your broker's own file",
+    body: "Upload the CSV the broker gives you. Column mapping is remembered, re-uploads are de-duplicated by fill ID, and spread fills stay one trade." },
+  { key: "analysis", title: "Honest performance",
+    body: "Realized money only, so an open winner cannot flatter the record. Win rate, profit factor, expectancy and largest drawdown, per product and per month." },
+];
+
+function Home() {
+  return (
+    <div className="home">
+      <header className="home-top">
+        <div className="wrap home-top-in">
+          <a className="home-brand" href="#top">
+            <span className="mark">N</span>
+            <span>
+              <b>Nexus <i>RAMP</i></b>
+              <small>Risk and Margin Platform</small>
+            </span>
+          </a>
+          <nav className="home-nav" aria-label="Sections">
+            <a href="#platform">The platform</a>
+            <a href="#how">How it works</a>
+            <a className="home-cta" href="#signin">Sign in</a>
+          </nav>
+        </div>
+      </header>
+
+      <main id="top">
+        <section className="home-hero">
+          <div className="wrap">
+            <p className="eyebrow">For commodity spread desks</p>
+            <h1>Know what a move against you costs before you put the trade on.</h1>
+            <p className="lede">
+              Nexus RAMP reads your broker's fill file, rebuilds your calendar spread book, and
+              shows the margin it uses, the room left to a call, and the loss on a move you choose —
+              per broker and across all of them.
+            </p>
+            <div className="home-actions">
+              <a className="home-btn primary" href="#signin">Sign in</a>
+              <a className="home-btn ghost" href="#platform">See the platform</a>
+            </div>
+            <ul className="home-facts">
+              <li><b>Margin per lot or leverage</b><span>Whichever basis your broker charges on</span></li>
+              <li><b>Spreads kept whole</b><span>One trade, not two loose legs</span></li>
+              <li><b>Nothing is placed for you</b><span>RAMP reads files; it never trades</span></li>
+            </ul>
+          </div>
+        </section>
+
+        <section className="home-band" id="platform">
+          <div className="wrap">
+            <h2>What you get</h2>
+            <div className="home-grid">
+              {FEATURES.map((f) => (
+                <article className="home-card" key={f.key}>
+                  <span className="home-icon">{ICONS[f.key]}</span>
+                  <h3>{f.title}</h3>
+                  <p>{f.body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <Gallery />
+
+        <section className="home-band" id="how">
+          <div className="wrap">
+            <h2>How it works</h2>
+            <ol className="home-steps">
+              <li>
+                <b>Set the account up</b>
+                <p>
+                  Capital, the basis your broker charges margin on, and your own per-trade and daily
+                  loss limits. Set each product's contract size here too — a fill file rarely carries
+                  it, and a wrong size is a wrong P&amp;L.
+                </p>
+              </li>
+              <li>
+                <b>Load the fills</b>
+                <p>
+                  Upload the broker's file and map its columns once. Upload again tomorrow and only
+                  the new fills are taken; the book, the open positions and the closed trades follow
+                  from them.
+                </p>
+              </li>
+              <li>
+                <b>Ask the hard question</b>
+                <p>
+                  Move every product against you and read the answer: equity after, margin after,
+                  whether a call is even reachable, and how many more lots the account could carry
+                  and still stay above the level you set.
+                </p>
+              </li>
+            </ol>
+          </div>
+        </section>
+
+        <section className="home-cta-band">
+          <div className="wrap">
+            <h2>Access is by invitation.</h2>
+            <p>
+              Subscriptions are managed on NordStar Pro. If your desk already has a seat, sign in
+              with the email the account was opened with.
+            </p>
+            <div className="home-actions">
+              <a className="home-btn light" href="#signin">Sign in</a>
+              <a className="home-btn outline" href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">
+                NordStar Pro
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="home-foot">
+        <div className="wrap home-foot-in">
+          <span>Nexus RAMP — Risk and Margin Platform</span>
+          <span>
+            A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product
+            {" · "}Screens show demonstration data
+          </span>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+// Tabs rather than four stacked images: the screens are wide, and a phone can
+// only show one of them at a readable size anyway.
+function Gallery() {
+  const [at, setAt] = useState(0);
+  const shot = SHOTS[at];
+  return (
+    <section className="home-shots" aria-labelledby="shots-h">
+      <div className="wrap">
+        <h2 id="shots-h">The screens</h2>
+        <div className="home-tabs" role="tablist" aria-label="Screens">
+          {SHOTS.map((s, i) => (
+            <button key={s.key} role="tab" type="button"
+              aria-selected={i === at} aria-controls="shot-panel"
+              className={i === at ? "on" : undefined} onClick={() => setAt(i)}>
+              {s.tab}
+            </button>
+          ))}
+        </div>
+        <div className="home-shot" id="shot-panel" role="tabpanel">
+          <img src={shot.src} alt={shot.alt} width="1560" height="1020" decoding="async" />
+        </div>
+        <p className="home-shot-cap">
+          <span className="home-swipe">Scroll the screen sideways to read it. </span>
+          {shot.caption}
+        </p>
+      </div>
+    </section>
+  );
+}
+
 // The desk's front door: navy brand panel beside the form, stacking on a phone.
-function SignInPage({ children }) {
+function SignInPage({ children, back }) {
   return (
     <div className="signin">
       <aside className="signin-brand">
@@ -291,6 +489,9 @@ function SignInPage({ children }) {
         <p className="foot">
           Access is by invitation. Speak to your desk administrator.<br />
           A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product.
+          {/* Only offered when we arrived from the front page, so the reset screen
+              does not invite somebody to wander off mid-way. */}
+          {back && <><br /><a href="#">Back to the Nexus RAMP home page</a></>}
         </p>
       </aside>
       <main className="signin-form">{children}</main>
