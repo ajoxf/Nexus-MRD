@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
+import { isOptionSymbol } from "./lib/options.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -194,14 +195,20 @@ function scenarioFor(pf, settings, b) {
     const picked = Array.isArray(S.pick) ? S.pick : null;
     const considered = picked ? picked.includes(key) : !!pos;
     const plan = !pos && considered && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
-    return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots };
+    return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots, isOption: isOptionSymbol(product) };
   });
-  const res = runScenario(b, acc, prods, target);
+  // An option's premium does not move with the underlying one for one, so
+  // stressing it the way a future is stressed gives an answer that is not
+  // just imprecise but an order of magnitude out. Until it can be repriced
+  // properly, options are left out of the stress and named instead.
+  const optionsOn = prods.filter((p) => p.isOption && (p.pos || n(p.planLots) > 0));
+  const stressed = prods.filter((p) => !p.isOption);
+  const res = runScenario(b, acc, stressed, target);
   const st = statusOf(res.ratio, acc, pf.minR);
-  return { acc, target, res, st,
-    minMove: breakingMove(b, acc, prods, pf.minR),
-    callMove: breakingMove(b, acc, prods, acc.callR),
-    stopMove: breakingMove(b, acc, prods, acc.stopR) };
+  return { acc, target, res, st, optionsOn,
+    minMove: breakingMove(b, acc, stressed, pf.minR),
+    callMove: breakingMove(b, acc, stressed, acc.callR),
+    stopMove: breakingMove(b, acc, stressed, acc.stopR) };
 }
 const moveTxt = (x) => (x === null ? "No open positions"
   : Number.isNaN(x) ? "Enter a current price"
@@ -778,6 +785,10 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   if (pf.dailyCap > 0 && pf.total.todayPnl <= -pf.dailyCap) warnings.push(["bad", `Daily loss limit hit (${money(pf.total.todayPnl)} across all brokers). Stop trading today.`]);
   else if (pf.dailyCap > 0 && pf.total.todayPnl <= -0.7 * pf.dailyCap) warnings.push(["warn", `Today's loss is ${pct(-pf.total.todayPnl / pf.dailyCap)} of your daily limit.`]);
   if (pf.rows.length >= n(L.maxTrades)) warnings.push(["bad", `Maximum of ${L.maxTrades} open positions reached.`]);
+  // Say it on the dashboard too: a scenario that quietly leaves something out
+  // is worse than one that admits it.
+  const optsOn = [...new Set(scen.flatMap((x) => x.optionsOn.map((o) => o.product)))];
+  if (optsOn.length) warnings.push(["warn", `${optsOn.join(", ")}: an option isn't stressed by the scenario yet, so its risk isn't in these figures. P&L and positions are unaffected.`]);
   accts.forEach((a) => { if (!n(a.capital) && a.rows.length) warnings.unshift(["warn", `${a.name}: no funds recorded. Add its deposits in Funds, or TNE/IM and the scenario are wrong.`]); });
   rows.forEach((r) => {
     const nm = all ? `${r.brokerName} ${r.product}` : r.product;
@@ -957,7 +968,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
       </section>
 
       {brokers.map((b) => {
-        const { acc, target, res, st, minMove, callMove, stopMove } = scenarioFor(pf, settings, b);
+        const { acc, target, res, st, minMove, callMove, stopMove, optionsOn } = scenarioFor(pf, settings, b);
         const verdict = !isFinite(res.ratio) ? ["dim", "No open positions. Capacity shows what you could put on under this scenario."]
           : res.ratio <= acc.stopR ? ["bad", "This scenario takes the account to stop-out. Positions would be liquidated."]
           : res.ratio <= acc.callR ? ["bad", "This scenario triggers a margin call. Reduce positions or add funds."]
@@ -1086,6 +1097,18 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                 </tbody>
               </table>
             </div>
+            {optionsOn.length > 0 && (
+              <div className="pb" style={{ fontSize: 11, paddingBottom: 0 }}>
+                <div className="warn" style={{ background: "var(--warn-soft)", border: "1px solid #E8CD99", borderRadius: 3, padding: "7px 9px", lineHeight: 1.5 }}>
+                  <b>{optionsOn.length === 1 ? "An option is" : `${optionsOn.length} options are`} not stressed here:</b>{" "}
+                  {optionsOn.map((o) => o.product).join(", ")}.{" "}
+                  An option's premium doesn't move with the underlying one for one, so moving it like a
+                  future would be badly wrong — a long call can lose ten times what that arithmetic
+                  suggests. Its risk is not in the figures above. Positions, margin and realized P&L
+                  are unaffected; only this stress leaves it out.
+                </div>
+              </div>
+            )}
             {res.lines.some((l) => l.effPos) && (
               <div className="pb faint" style={{ fontSize: 11 }}>
                 <b className="dim">What stops you first.</b>{" "}
