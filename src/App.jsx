@@ -615,7 +615,7 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
-        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
+        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
@@ -725,8 +725,7 @@ function Book({ pf, settings, view }) {
   );
 }
 
-function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFills, goSettings, goScen }) {
-  const ask = useConfirm();
+function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSettings, goScen }) {
   const L = settings.limits;
   const all = view === "all";
   const rows = all ? pf.rows : pf.rows.filter((r) => r.broker === view);
@@ -764,17 +763,6 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFi
   const bad = warnings.some((w) => w[0] === "bad");
 
   // stress: same adverse move on every position in scope; report the worst account afterwards
-  const closeAtMark = async (r) => {
-    const isSell = r.side === "Long";
-    const { ok } = await ask({
-      title: "Record a closing trade",
-      body: `${isSell ? "Sell" : "Buy"} ${qty(r.lots)} ${r.product} at ${px(r.mark)} on ${r.brokerName}.`,
-      detail: "This books the trade in Nexus only. It does not place an order with your broker.",
-      confirmLabel: `Record the ${isSell ? "sell" : "buy"}`,
-    });
-    if (!ok) return;
-    await addFills([{ ts: new Date().toISOString(), broker: r.broker, product: r.product, side: r.side === "Long" ? "Sell" : "Buy", qty: r.lots, price: r.mark, ref: `m:${crypto.randomUUID()}`, source: "manual" }]);
-  };
   const recent = pf.book.closed.filter((c) => all || c.broker === view).slice(0, 6);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
 
@@ -814,11 +802,11 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFi
             <div className="actions"><span className="faint hide-m" style={{ fontSize: 11 }}>Edit current price and stop in the table</span></div>
           </div>
           {rows.length === 0 ? (
-            <div className="empty">No open positions{all ? "" : ` at ${bname(view)}`}. <button className="btn ghost" onClick={goFills}>Upload fills</button> or use the trade ticket.</div>
+            <div className="empty">No open positions{all ? "" : ` at ${bname(view)}`}. <button className="btn ghost" onClick={goFills}>Upload fills</button> to bring in your trades.</div>
           ) : (
             <div className="tw">
               <table>
-                <thead><tr>{all && <th className="txt">Broker</th>}<th className="txt">Product</th><th>Side</th><th>Lots</th><th>Avg price</th><th>Current</th><th>Stop</th><th>Open P&L</th><th>Init. margin</th><th>Risk to stop</th><th>Opened</th><th></th></tr></thead>
+                <thead><tr>{all && <th className="txt">Broker</th>}<th className="txt">Product</th><th>Side</th><th>Lots</th><th>Avg price</th><th>Current</th><th>Stop</th><th>Open P&L</th><th>Init. margin</th><th>Risk to stop</th><th>Opened</th></tr></thead>
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.key}>
@@ -833,12 +821,11 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFi
                       <td className={r.noMargin ? "warn" : ""} title={r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
                       <td className={!r.hasStop || r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity) ? "bad" : ""}>{r.hasStop ? money(r.risk) : "—"}</td>
                       <td className="dim">{dt(r.openTs)}</td>
-                      <td><button className="btn ghost" onClick={() => closeAtMark(r)} title="Record an offsetting fill at the current price">Close</button></td>
                     </tr>
                   ))}
                   <tr className="total">
                     <td className="txt" colSpan={all ? 2 : 1}>Total</td><td colSpan={5}></td>
-                    <td className={pc(sum(rows, (r) => r.upnl))}>{signed(sum(rows, (r) => r.upnl))}</td><td>{money(sum(rows, (r) => r.im))}</td><td>{money(sum(rows, (r) => r.risk || 0))}</td><td colSpan={2}></td>
+                    <td className={pc(sum(rows, (r) => r.upnl))}>{signed(sum(rows, (r) => r.upnl))}</td><td>{money(sum(rows, (r) => r.im))}</td><td>{money(sum(rows, (r) => r.risk || 0))}</td><td></td>
                   </tr>
                 </tbody>
               </table>
@@ -869,7 +856,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFi
           {warnings.length > 0 && <ul className="warns">{warnings.map(([lvl, m], i) => <li key={i}><span className="dot" style={{ background: `var(--${lvl})` }} />{m}</li>)}</ul>}
         </section>
 
-        <TradeTicket key={view} cls="o3" pf={pf} settings={settings} view={view} fills={fills} addFills={addFills} setMark={setMark} goSettings={goSettings} />
+        <TradeTicket key={view} cls="o3" pf={pf} settings={settings} view={view} fills={fills} goSettings={goSettings} />
 
         <section className="panel o4">
           <div className="ph"><h2>Scenario check</h2><button className="btn ghost" onClick={goScen}>Open analysis</button></div>
@@ -1113,15 +1100,14 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
 }
 
 // ---------- trade ticket ----------
-function TradeTicket({ cls = "", pf, settings, view, fills, addFills, setMark, goSettings }) {
+function TradeTicket({ cls = "", pf, settings, view, fills, goSettings }) {
   const brokers = settings.brokers;
   const [brokerId, setBrokerId] = useState(view !== "all" ? view : brokers[0]?.id);
   const broker = brokers.find((b) => b.id === brokerId) || brokers[0];
   const products = Object.keys(broker?.products || {}).sort();
   const [f, setF] = useState({ product: products[0] || "", side: "Buy", lots: 1, price: "", stop: "" });
-  const [msg, setMsg] = useState(null);
   useEffect(() => { if (!products.includes(f.product)) setF((x) => ({ ...x, product: products[0] || "" })); }, [brokerId, products.join()]);
-  const set = (k, v) => { setF((x) => ({ ...x, [k]: v })); setMsg(null); };
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
   const valid = broker && f.product && n(f.lots) > 0 && has(f.price);
   const acc = pf.acct(broker?.id);
 
@@ -1155,18 +1141,9 @@ function TradeTicket({ cls = "", pf, settings, view, fills, addFills, setMark, g
   const blocked = issues.some((i) => i[0] === "bad");
   const ast = accAfter ? statusOf(accAfter.ratio, accAfter, pf.minR) : null;
 
-  const record = async () => {
-    try {
-      await addFills([{ ...hyp, ts: new Date().toISOString(), ref: `m:${crypto.randomUUID()}`, source: "manual" }]);
-      if (has(f.stop) && !reduces) setMark(`${broker.id}|${f.product}`, "stop", f.stop);
-      setMsg(["ok", `Recorded ${f.side.toLowerCase()} ${f.lots} ${f.product} @ ${f.price} on ${broker.name}`]);
-      setF((x) => ({ ...x, price: "" }));
-    } catch (e) { setMsg(["bad", e.message]); }
-  };
-
   return (
     <section className={`panel ${cls}`}>
-      <div className="ph"><h2>Trade ticket</h2>{existing && <span className="dim" style={{ fontSize: 11 }}>Holding {existing.side.toLowerCase()} {qty(existing.lots)} @ {px(existing.avg)}</span>}</div>
+      <div className="ph"><h2>Check a trade<span className="dim">before you place it</span></h2>{existing && <span className="dim" style={{ fontSize: 11 }}>Holding {existing.side.toLowerCase()} {qty(existing.lots)} @ {px(existing.avg)}</span>}</div>
       <div className="pb fg">
         <div className="seg" role="group" aria-label="Side">
           <button className={f.side === "Buy" ? "on-buy" : ""} aria-pressed={f.side === "Buy"} onClick={() => set("side", "Buy")}>Buy</button>
@@ -1174,7 +1151,7 @@ function TradeTicket({ cls = "", pf, settings, view, fills, addFills, setMark, g
         </div>
         <div className="fg c2">
           <F label="Broker" hint={broker ? basis(broker) : null}>
-            <select className="in" value={broker?.id || ""} onChange={(e) => { setBrokerId(e.target.value); setMsg(null); }}>{brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select>
+            <select className="in" value={broker?.id || ""} onChange={(e) => setBrokerId(e.target.value)}>{brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select>
           </F>
           <F label="Product">
             {products.length ? <select className="in" value={f.product} onChange={(e) => set("product", e.target.value)}>{products.map((p) => <option key={p}>{p}</option>)}</select>
@@ -1200,10 +1177,15 @@ function TradeTicket({ cls = "", pf, settings, view, fills, addFills, setMark, g
             {issues.length > 0 && <div className="msgs">{issues.map(([l, m], i) => <div key={i} className={l}>{m}</div>)}</div>}
           </>
         )}
-        <button className={`btn full ${blocked ? "danger" : f.side === "Buy" ? "buy" : "sell"}`} disabled={!valid} onClick={record}>
-          {blocked ? "Record anyway — breaks a limit" : `Record ${f.side.toLowerCase()}${valid ? ` ${f.lots} ${f.product}` : ""}`}
-        </button>
-        {msg && <div className={msg[0]} style={{ fontSize: 12 }}>{msg[1]}</div>}
+        <div className={`verdict ${!valid ? "idle" : blocked ? "bad" : "ok"}`}>
+          {!valid ? "Fill in a product, lots and price to check a trade."
+            : blocked ? `This ${f.side.toLowerCase()} breaks a limit — see above.`
+            : `${f.side} ${f.lots} ${f.product} is within your limits.`}
+        </div>
+        <div className="faint" style={{ fontSize: 11, lineHeight: 1.5 }}>
+          Nothing here is recorded. Place the trade with your broker, then bring it in from their
+          fills file — so every number in Nexus comes from the broker's own record.
+        </div>
       </div>
     </section>
   );

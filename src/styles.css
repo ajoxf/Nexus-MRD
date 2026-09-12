@@ -354,3 +354,10 @@ td.faded { opacity: .35; }
 @media (max-width: 520px) {
   .savebar .btn { flex: 1; }
 }
+
+/* ---------- pre-trade verdict ---------- */
+/* The ticket books nothing, so it ends with an answer rather than a button. */
+.verdict { border-radius: 4px; padding: 9px 11px; font-size: 12.5px; line-height: 1.45; font-weight: 600; border: 1px solid; }
+.verdict.ok { color: var(--ok); background: var(--ok-soft); border-color: #B6DFCC; }
+.verdict.bad { color: var(--bad); background: var(--bad-soft); border-color: #F0CDD0; }
+.verdict.idle { color: var(--dim); background: var(--panel2); border-color: var(--line); font-weight: 400; }
