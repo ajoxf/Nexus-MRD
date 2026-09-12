@@ -38,55 +38,62 @@ it returns the reader to whichever origin asked for the reset.
 
 ### Body
 
+The same shell the portal's own emails use — `shell()` in
+`northstar-research/src/lib/notifications/templates.ts` — so a reset from the platform and
+a welcome from the portal look like they came from the same desk, because they did. Same
+black ground, same panel and hairline, same mono eyebrow in the accent green, same pill
+button. Only two things differ, deliberately: the eyebrow reads Nexus RAMP rather than
+NordStar Pro, and the research disclaimer is dropped, because a password email is not
+research and a disclaimer that does not apply teaches people to skip the footer where the
+warning that does apply is sitting.
+
+`{{ .ConfirmationURL }}` is Supabase's variable for the link. It returns the reader to
+whichever origin asked for the reset.
+
 ```html
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#000000;margin:0;padding:32px 0">
-  <tr>
-    <td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#0B0B0B;border:1px solid #1F1F1F;border-radius:8px;padding:32px">
-        <tr>
-          <td style="font-family:Helvetica,Arial,sans-serif;color:#FFFFFF;font-size:20px;font-weight:600;padding-bottom:4px">
-            Nexus <span style="color:#D0F53C">RAMP</span>
-          </td>
-        </tr>
-        <tr>
-          <td style="font-family:Helvetica,Arial,sans-serif;color:#A3A3A3;font-size:12px;letter-spacing:1px;text-transform:uppercase;padding-bottom:24px">
-            Risk and Margin Platform
-          </td>
-        </tr>
-        <tr>
-          <td style="font-family:Helvetica,Arial,sans-serif;color:#FFFFFF;font-size:17px;padding-bottom:12px">
-            Reset your password
-          </td>
-        </tr>
-        <tr>
-          <td style="font-family:Helvetica,Arial,sans-serif;color:#A3A3A3;font-size:15px;line-height:1.6;padding-bottom:24px">
-            Someone asked to reset the password for this address. Follow the link below to
-            choose a new one. It expires shortly and can only be used once.
-          </td>
-        </tr>
-        <tr>
-          <td style="padding-bottom:24px">
-            <a href="{{ .ConfirmationURL }}" style="display:inline-block;background:#D0F53C;color:#000000;font-family:Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;text-decoration:none;padding:12px 24px;border-radius:999px">
-              Choose a new password
-            </a>
-          </td>
-        </tr>
-        <tr>
-          <td style="font-family:Helvetica,Arial,sans-serif;color:#A3A3A3;font-size:13px;line-height:1.6;border-top:1px solid #1F1F1F;padding-top:20px">
-            If you did not ask for this, nothing has changed and you can ignore this email.
-            Your password stays as it is.
-          </td>
-        </tr>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Reset your password</title>
+</head>
+<body style="margin:0;padding:0;background:#000000;color:#FFFFFF;font-family:Inter,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#000000;padding:24px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#0B0B0B;border:1px solid #1F1F1F;border-radius:12px;overflow:hidden;">
+        <tr><td style="padding:24px 28px 8px;border-bottom:1px solid #1F1F1F;">
+          <div style="font-family:'IBM Plex Mono',Consolas,monospace;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:#D0F53C;">Nexus &middot; RAMP</div>
+        </td></tr>
+        <tr><td style="padding:28px;">
+          <p style="margin:0 0 18px;color:#A3A3A3;font-size:14px;">Hello,</p>
+
+          <h1 style="margin:0 0 12px;font-family:Inter,Helvetica,Arial,sans-serif;letter-spacing:-0.02em;font-size:25px;line-height:1.25;font-weight:500;color:#FFFFFF;">Reset your password</h1>
+
+          <p style="margin:16px 0 0;color:#FFFFFF;font-size:15px;line-height:1.65;">Somebody asked to reset the password for this address on Nexus RAMP. Follow the link below to choose a new one. It expires shortly and can only be used once.</p>
+
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;"><tr><td style="background:#D0F53C;border-radius:999px;">
+            <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:13px 24px;font-weight:600;font-size:14px;color:#000000;text-decoration:none;">Choose a new password</a>
+          </td></tr></table>
+
+          <p style="margin:14px 0 0;color:#A3A3A3;font-size:12px;line-height:1.6;">If you did not ask for this, nothing has changed and you can ignore this email &mdash; your password stays as it is.</p>
+        </td></tr>
+        <tr><td style="padding:18px 28px 26px;border-top:1px solid #1F1F1F;color:#A3A3A3;font-size:11px;line-height:1.6;">
+          <p style="margin:0 0 10px;">Nexus RAMP is a NordStar Pro product. If you reach the platform from your NordStar Pro portal you are signed in automatically and do not need this password at all.</p>
+          <p style="margin:0;">NordStar Pro will never contact you privately to request money or offer account management via WhatsApp, Telegram, Discord or social media DMs.</p>
+        </td></tr>
       </table>
-    </td>
-  </tr>
-</table>
+    </td></tr>
+  </table>
+</body>
+</html>
 ```
 
-Inline styles and a table layout rather than a stylesheet, because email clients strip
-`<style>` blocks and ignore most of what a browser would honour. The dark panel sits on an
-explicit black background for the same reason: a client that ignores the outer background
-still renders a readable card rather than white text on white.
+Inline styles and a table layout throughout, because email clients strip `<style>` blocks
+and ignore most of what a browser would honour. The dark panel sits on an explicit black
+background for the same reason: a client that ignores the outer background still renders a
+readable card rather than white text on white.
 
 ## Who this actually reaches
 
