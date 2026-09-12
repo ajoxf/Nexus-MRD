@@ -3,3 +3,10 @@ dist/
 .DS_Store
 *.log
 .env.local
+
+# Demo builds. `vite build --mode demo` reads .env.demo instead of .env.production, which
+# is how the marketing screenshots are taken: with no Supabase URL or key the app falls
+# back to browser storage, so a throwaway book can be loaded without touching anyone's
+# real data. The file only holds empty values, but an env file in the repo is how a build
+# quietly picks up the wrong configuration later.
+.env.demo
