@@ -310,3 +310,47 @@ td.faded { opacity: .35; }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .chip-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; opacity: .75; }
+
+/* ---------- dialogs ---------- */
+.modal-back {
+  position: fixed; inset: 0; z-index: 50; background: rgba(14,25,42,.48);
+  display: grid; place-items: center; padding: 20px;
+  animation: modal-in .12s ease-out;
+}
+@keyframes modal-in { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: 100%; max-width: 440px; background: var(--panel);
+  border-radius: 7px; overflow: hidden;
+  box-shadow: 0 18px 48px -12px rgba(14,25,42,.45), 0 2px 6px rgba(14,25,42,.18);
+}
+.modal-h { padding: 16px 22px 14px; border-bottom: 1px solid var(--line); }
+.modal-h h3 { margin: 0; font-size: 16px; font-weight: 600; color: var(--navy); letter-spacing: -.1px; }
+/* A destructive question is marked by a red edge, not a red heading: the wording
+   should carry the weight, and a red title reads as an error that has happened. */
+.modal-h.danger { box-shadow: inset 3px 0 0 var(--bad); }
+.modal-b { padding: 16px 22px; display: grid; gap: 10px; }
+.modal-b p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); }
+.modal-b p.detail { font-size: 12px; color: var(--dim); }
+.modal-b .check { margin-top: 2px; }
+.modal-f { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 22px; background: var(--panel2); border-top: 1px solid var(--line); }
+.modal-f .btn { min-width: 88px; }
+@media (max-width: 520px) {
+  .modal-f { flex-direction: column-reverse; }
+  .modal-f .btn { width: 100%; }
+}
+
+/* ---------- unsaved-changes bar ---------- */
+/* Panels you type into hold their edits until you press Save, so a half-typed
+   margin never reaches the risk figures. */
+.savebar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 16px; border-top: 1px solid var(--line); background: var(--panel2);
+}
+.savebar .gap { flex: 1; min-width: 4px; }
+.savebar .state { font-size: 12px; color: var(--dim); }
+.savebar.dirty { background: #FFFBF2; border-top-color: #E8CD99; }
+.savebar.dirty .state { color: #8A6414; font-weight: 600; }
+.savebar .btn { min-width: 92px; }
+@media (max-width: 520px) {
+  .savebar .btn { flex: 1; }
+}

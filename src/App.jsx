@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -71,11 +71,20 @@ function downloadBackup(fills, brokers, label = "all") {
   a.download = `nexus_backup_${label}_${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
 }
-// Asks for a backup, then confirmation, then runs the delete.
-async function safeDelete({ fills, brokers, label, what, run }) {
+// Asks once — offering the backup in the same breath — then runs the delete.
+async function safeDelete({ fills, brokers, label, what, run, ask }) {
   if (!fills.length) return false;
-  if (window.confirm(`Download a backup of the ${fills.length} fill${fills.length === 1 ? "" : "s"} first?\n\nOK = download backup, Cancel = skip`)) downloadBackup(fills, brokers, label);
-  if (!window.confirm(`Delete ${what}? This can't be undone (except by re-uploading the backup).`)) return false;
+  const n = fills.length;
+  const { ok, checked } = await ask({
+    title: `Delete ${what}?`,
+    body: `${n} fill${n === 1 ? "" : "s"} will be removed. Positions, closed trades and P&L are worked out from these fills, so they will change.`,
+    detail: "This cannot be undone from inside Nexus. The backup is a CSV you can import again.",
+    checkbox: { label: "Download a CSV backup first", defaultChecked: true },
+    confirmLabel: `Delete ${n} fill${n === 1 ? "" : "s"}`,
+    tone: "danger",
+  });
+  if (!ok) return false;
+  if (checked) downloadBackup(fills, brokers, label);
   await run();
   return true;
 }
@@ -234,7 +243,7 @@ export default function App() {
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
   if (!user) return <SignInPage><SignIn /></SignInPage>;
-  return <Tracker key={user.id} user={user} />;
+  return <ConfirmHost><Tracker key={user.id} user={user} /></ConfirmHost>;
 }
 
 // The desk's front door: navy brand panel beside the form, stacking on a phone.
@@ -351,10 +360,123 @@ function NewPassword({ onDone }) {
   );
 }
 
+// ---------- edit, then save ----------
+// Settings panels hold what you type until you press Save. A margin on its way
+// to 3000 passes through "3", and a figure like that reaching the risk engine
+// would show a margin call that isn't real. Save also gives you something to
+// press when you are done, and Discard a way back.
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function useDraft(source) {
+  const [draft, setDraft] = useState(source);
+  const dirty = !same(draft, source);
+  const dirtyNow = useRef(dirty);
+  dirtyNow.current = dirty;
+  // Adopt changes made elsewhere (an import adding products) only while this
+  // panel has nothing unsaved of its own.
+  useEffect(() => { if (!dirtyNow.current) setDraft(source); }, [source]);
+  return [draft, setDraft, dirty, () => setDraft(source)];
+}
+
+// Panels with unsaved edits register here so leaving the tab can warn first.
+const DirtyCtx = createContext({ mark: () => {} });
+function useDirtyFlag(id, dirty) {
+  const { mark } = useContext(DirtyCtx);
+  useEffect(() => { mark(id, dirty); return () => mark(id, false); }, [id, dirty, mark]);
+}
+
+function SaveBar({ dirty, onSave, onDiscard, savedNote }) {
+  return (
+    <div className={`savebar ${dirty ? "dirty" : ""}`}>
+      <span className="state">{dirty ? "Unsaved changes" : savedNote || "No changes to save"}</span>
+      <span className="gap" />
+      <button type="button" className="btn ghost" disabled={!dirty} onClick={onDiscard}>Discard</button>
+      <button type="button" className="btn" disabled={!dirty} onClick={onSave}>Save changes</button>
+    </div>
+  );
+}
+
+// ---------- dialogs ----------
+// One place for "are you sure". The browser's own confirm box can't show what is
+// about to go, can't offer the backup alongside the question, and looks like a
+// script error; this asks properly and returns { ok, checked }.
+const ConfirmCtx = createContext(async () => ({ ok: false, checked: false }));
+const useConfirm = () => useContext(ConfirmCtx);
+
+function ConfirmHost({ children }) {
+  const [q, setQ] = useState(null);
+  const ask = useCallback((opts) => new Promise((resolve) => setQ({ ...opts, resolve })), []);
+  const close = useCallback((val) => setQ((cur) => { cur?.resolve(val); return null; }), []);
+  return (
+    <ConfirmCtx.Provider value={ask}>
+      {children}
+      {q && <ConfirmDialog q={q} close={close} />}
+    </ConfirmCtx.Provider>
+  );
+}
+
+function ConfirmDialog({ q, close }) {
+  const [checked, setChecked] = useState(!!q.checkbox?.defaultChecked);
+  const go = useRef(null);
+  const cancel = () => close({ ok: false, checked: false });
+  useEffect(() => { go.current?.focus(); }, []);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close({ ok: false, checked: false }); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [close]);
+  return (
+    <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) cancel(); }}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+        <div className={`modal-h ${q.tone === "danger" ? "danger" : ""}`}>
+          <h3 id="dlg-title">{q.title}</h3>
+        </div>
+        <div className="modal-b">
+          {q.body && <p>{q.body}</p>}
+          {q.detail && <p className="detail">{q.detail}</p>}
+          {q.checkbox && (
+            <label className="check">
+              <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+              <span>{q.checkbox.label}</span>
+            </label>
+          )}
+        </div>
+        <div className="modal-f">
+          <button type="button" className="btn ghost" onClick={cancel}>{q.cancelLabel || "Cancel"}</button>
+          <button type="button" ref={go} className={`btn ${q.tone === "danger" ? "danger" : ""}`}
+            onClick={() => close({ ok: true, checked })}>{q.confirmLabel || "Confirm"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Tracker({ user }) {
   const [settings, setSettings] = useState(null);
   const [fills, setFills] = useState([]);
   const [tab, setTab] = useState("dash");
+  const ask = useConfirm();
+  // Which settings panels have edits that haven't been saved.
+  const unsaved = useRef(new Set());
+  const mark = useCallback((id, on) => { if (on) unsaved.current.add(id); else unsaved.current.delete(id); }, []);
+  const dirtyApi = useMemo(() => ({ mark }), [mark]);
+  // Switching tabs unmounts the panel, so ask before the edits go with it.
+  const goTab = async (next) => {
+    if (next !== tab && unsaved.current.size) {
+      const n2 = unsaved.current.size;
+      const { ok } = await ask({
+        title: "Leave without saving?",
+        body: `${n2} panel${n2 === 1 ? " has" : "s have"} changes you haven't saved. Leaving this tab discards ${n2 === 1 ? "them" : "them all"}.`,
+        detail: "Nothing has reached your positions or risk figures yet.",
+        confirmLabel: "Discard and leave", tone: "danger",
+      });
+      if (!ok) return;
+      unsaved.current.clear();
+    }
+    setTab(next);
+  };
   const [saveState, setSaveState] = useState("saved");
   const [loadErr, setLoadErr] = useState(null);
   const firstSave = useRef(true);
@@ -402,9 +524,7 @@ function Tracker({ user }) {
   const L = settings.limits;
   const view = settings.brokers.some((b) => b.id === settings.view) ? settings.view : "all";
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
-  const setLimit = (k, v) => setSettings((s) => ({ ...s, limits: { ...s.limits, [k]: v } }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
-  const setProduct = (id, p, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, products: { ...b.products, [p]: { ...b.products?.[p], [k]: v } } } : b)) }));
   const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
   const addFills = async (rows) => { const added = await db.addFills(rows); await reloadFills(); return added; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
@@ -425,11 +545,12 @@ function Tracker({ user }) {
   const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
 
   return (
+    <DirtyCtx.Provider value={dirtyApi}>
     <div className="app">
       <nav className="rail" aria-label="Main">
         <div className="logo" title="Nexus: MRD - Margin & Risk Desk">N</div>
         {nav.map(([key, l, c]) => (
-          <button key={key} aria-current={tab === key ? "page" : undefined} onClick={() => setTab(key)}>
+          <button key={key} aria-current={tab === key ? "page" : undefined} onClick={() => goTab(key)}>
             {ICONS[key]}{l}{c ? <span className="badge">{c > 999 ? "999+" : c}</span> : null}
           </button>
         ))}
@@ -487,15 +608,16 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
-        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} goFills={() => setTab("fills")} goSettings={() => setTab("settings")} goScen={() => setTab("scen")} />}
+        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
-        {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} setLimit={setLimit} setBroker={setBroker} setProduct={setProduct} pf={pf} fills={fills} reloadFills={reloadFills} />}
+        {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
+    </DirtyCtx.Provider>
   );
 }
 
@@ -597,6 +719,7 @@ function Book({ pf, settings, view }) {
 }
 
 function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFills, goSettings, goScen }) {
+  const ask = useConfirm();
   const L = settings.limits;
   const all = view === "all";
   const rows = all ? pf.rows : pf.rows.filter((r) => r.broker === view);
@@ -635,7 +758,14 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, goFi
 
   // stress: same adverse move on every position in scope; report the worst account afterwards
   const closeAtMark = async (r) => {
-    if (!window.confirm(`Record a ${r.side === "Long" ? "sell" : "buy"} of ${qty(r.lots)} ${r.product} at ${px(r.mark)} on ${r.brokerName} to close this position?`)) return;
+    const isSell = r.side === "Long";
+    const { ok } = await ask({
+      title: "Record a closing trade",
+      body: `${isSell ? "Sell" : "Buy"} ${qty(r.lots)} ${r.product} at ${px(r.mark)} on ${r.brokerName}.`,
+      detail: "This books the trade in Nexus only. It does not place an order with your broker.",
+      confirmLabel: `Record the ${isSell ? "sell" : "buy"}`,
+    });
+    if (!ok) return;
     await addFills([{ ts: new Date().toISOString(), broker: r.broker, product: r.product, side: r.side === "Long" ? "Sell" : "Buy", qty: r.lots, price: r.mark, ref: `m:${crypto.randomUUID()}`, source: "manual" }]);
   };
   const recent = pf.book.closed.filter((c) => all || c.broker === view).slice(0, 6);
@@ -1074,6 +1204,7 @@ function TradeTicket({ cls = "", pf, settings, view, fills, addFills, setMark, g
 
 // ---------- fills ----------
 function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, setBroker }) {
+  const ask = useConfirm();
   const brokers = settings.brokers;
   const [target, setTarget] = useState(view !== "all" ? view : brokers[0]?.id);
   const [csv, setCsv] = useState(null);
@@ -1393,7 +1524,16 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
                     <td><Side s={x.side} /></td><td>{qty(x.qty)}</td><td>{px(x.price)}</td>
                     <td className={+x.fee ? "bad" : "faint"}>{+x.fee ? (+x.fee).toFixed(2) : "—"}</td>
                     <td className="faint">{shortRef(x.ref)}</td><td className="faint txt">{x.source === "csv" ? "CSV" : "Manual"}</td>
-                    <td><button className="btn ghost" onClick={async (e) => { e.stopPropagation(); if (window.confirm("Delete this fill?")) { await db.deleteFill(x.id); await reloadFills(); } }} aria-label="Delete fill">✕</button></td>
+                    <td><button className="btn ghost" onClick={async (e) => {
+                      e.stopPropagation();
+                      const { ok } = await ask({
+                        title: "Delete this fill?",
+                        body: `${x.side} ${qty(x.qty)} ${x.product} at ${px(x.price)} on ${dt(x.ts)}.`,
+                        detail: "Positions and P&L are worked out from the fills, so they will change. Re-importing the file will bring it back.",
+                        confirmLabel: "Delete fill", tone: "danger",
+                      });
+                      if (ok) { await db.deleteFill(x.id); await reloadFills(); }
+                    }} aria-label="Delete fill">✕</button></td>
                   </tr>
                   {open && legs.map((g) => (
                     <tr key={g.id} className="leg">
@@ -1507,57 +1647,97 @@ function ClosedTab({ pf, settings, view, fills }) {
 }
 
 // ---------- settings ----------
-function SettingsTab({ settings, setSettings, setLimit, setBroker, setProduct, pf, fills, reloadFills }) {
-  const L = settings.limits;
-  const lnum = (k, props = {}) => <input className="in" type="number" value={L[k]} onChange={(e) => setLimit(k, e.target.value)} {...props} />;
+function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
   const addBroker = () => {
     const id = `b${Date.now().toString(36)}`;
     setSettings((s) => ({ ...s, brokers: [...s.brokers, { ...NEW_BROKER, id, name: `Broker ${s.brokers.length + 1}` }] }));
   };
   return (
     <div className="grid-settings">
-      <section className="panel">
-        <div className="ph"><h2>Your limits</h2><span className="faint" style={{ fontSize: 11 }}>Apply to every broker</span></div>
-        <div className="pb">
-          <div className="fg c2">
-            <F label="Minimum TNE/IM (%)" hint="Per broker account; new trades below it are flagged">{lnum("minRatio")}</F>
-            <F label="Max open positions" hint="Across all brokers">{lnum("maxTrades")}</F>
-            <F label="Max risk per trade (% of that broker's capital)">{lnum("maxRiskPct", { step: 0.1 })}</F>
-            <F label="Daily loss limit (% of total capital)" hint={money(pf.dailyCap)}>{lnum("dailyLossPct", { step: 0.1 })}</F>
-          </div>
-          <div className="sep" />
-          <label className="check">
-            <input type="checkbox" checked={!!L.includeRealized} onChange={(e) => setLimit("includeRealized", e.target.checked)} />
-            <span>Add realized P&L (after fees) to each account's equity (<span className={`num ${pc(pf.total.realizedAll)}`}>{signed(pf.total.realizedAll)}</span> in total)<br /><span className="faint">Untick if you update each broker's capital yourself after closing trades.</span></span>
-          </label>
-          <div className="sep" />
-          <button className="btn full" onClick={addBroker}>Add broker account</button>
-        </div>
-      </section>
+      <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} />
 
       <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
 
       {settings.brokers.map((b) => (
-        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={L.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
-          setBroker={setBroker} setProduct={setProduct} setSettings={setSettings} />
+        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
+          setSettings={setSettings} />
       ))}
     </div>
   );
 }
 
-function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings, minRatio }) {
+function LimitsPanel({ settings, setSettings, pf, addBroker }) {
+  const [d, setD, dirty, discard] = useDraft(settings.limits);
+  useDirtyFlag("limits", dirty);
+  const set = (k, v) => setD((x) => ({ ...x, [k]: v }));
+  const lnum = (k, props = {}) => <input className="in" type="number" value={d[k]} onChange={(e) => set(k, e.target.value)} {...props} />;
+  const save = () => setSettings((s) => ({ ...s, limits: { ...s.limits, ...d } }));
+  return (
+    <section className="panel">
+      <div className="ph"><h2>Your limits</h2><span className="faint" style={{ fontSize: 11 }}>Apply to every broker</span></div>
+      <div className="pb">
+        <div className="fg c2">
+          <F label="Minimum TNE/IM (%)" hint="Per broker account; new trades below it are flagged">{lnum("minRatio")}</F>
+          <F label="Max open positions" hint="Across all brokers">{lnum("maxTrades")}</F>
+          <F label="Max risk per trade (% of that broker's capital)">{lnum("maxRiskPct", { step: 0.1 })}</F>
+          <F label="Daily loss limit (% of total capital)" hint={dirty ? "Saved figure: " + money(pf.dailyCap) : money(pf.dailyCap)}>{lnum("dailyLossPct", { step: 0.1 })}</F>
+        </div>
+        <div className="sep" />
+        <label className="check">
+          <input type="checkbox" checked={!!d.includeRealized} onChange={(e) => set("includeRealized", e.target.checked)} />
+          <span>Add realized P&L (after fees) to each account's equity (<span className={`num ${pc(pf.total.realizedAll)}`}>{signed(pf.total.realizedAll)}</span> in total)<br /><span className="faint">Untick if you update each broker's capital yourself after closing trades.</span></span>
+        </label>
+      </div>
+      <SaveBar dirty={dirty} onSave={save} onDiscard={discard} savedNote="Limits are up to date" />
+      <div className="pb"><button className="btn full" onClick={addBroker}>Add broker account</button></div>
+    </section>
+  );
+}
+
+function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
+  const ask = useConfirm();
   const [newP, setNewP] = useState("");
-  const set = (k) => (e) => setBroker(b.id, k, e.target.value);
-  const lev = b.method === "leverage";
-  const addProduct = () => { const p = newP.trim(); if (!p || b.products?.[p]) return; setProduct(b.id, p, "size", lev ? 100 : 1000); setNewP(""); };
-  const remove = () => {
+  const [d, setD, dirty, discard] = useDraft(b);
+  useDirtyFlag(`broker:${b.id}`, dirty);
+  // Products the trader took out here, so an import re-adding them on save can't undo it.
+  const dropped = useRef(new Set());
+  const set = (k) => (e) => setD((x) => ({ ...x, [k]: e.target.value }));
+  const setP = (p, k, v) => setD((x) => ({ ...x, products: { ...x.products, [p]: { ...x.products?.[p], [k]: v } } }));
+  const lev = d.method === "leverage";
+  const addProduct = () => {
+    const p = newP.trim();
+    if (!p || d.products?.[p]) return;
+    dropped.current.delete(p);
+    setP(p, "size", lev ? 100 : 1000);
+    setNewP("");
+  };
+  const dropProduct = (p) => {
+    dropped.current.add(p);
+    setD((x) => { const { [p]: _gone, ...rest } = x.products || {}; return { ...x, products: rest }; });
+  };
+  const save = () => setSettings((s) => ({
+    ...s,
+    brokers: s.brokers.map((x) => {
+      if (x.id !== b.id) return x;
+      // A product an import added while this card was open is kept, unless it was removed here.
+      const added = Object.fromEntries(Object.entries(x.products || {}).filter(([p]) => !(p in (d.products || {})) && !dropped.current.has(p)));
+      return { ...d, products: { ...d.products, ...added } };
+    }),
+  }));
+  const remove = async () => {
     if (used) return;
-    if (window.confirm(`Remove ${b.name}?`)) setSettings((s) => ({ ...s, brokers: s.brokers.filter((x) => x.id !== b.id), view: s.view === b.id ? "all" : s.view }));
+    const { ok } = await ask({
+      title: `Remove ${b.name}?`,
+      body: "Its capital, margins, contract sizes and commission settings will be removed.",
+      detail: "It has no fills, so no trade history is lost. Uploading a file for this account again recreates it with default settings.",
+      confirmLabel: "Remove account", tone: "danger",
+    });
+    if (ok) setSettings((s) => ({ ...s, brokers: s.brokers.filter((x) => x.id !== b.id), view: s.view === b.id ? "all" : s.view }));
   };
   return (
     <section className="panel">
       <div className="ph">
-        <h2>{b.name}<span className="dim">{basis(b)}</span></h2>
+        <h2>{d.name}<span className="dim">{basis(d)}</span></h2>
         <div className="actions">
           {acc && isFinite(acc.ratio) && <span className="num" style={{ fontSize: 12 }}>TNE/IM <b>{ratioTxt(acc.ratio)}</b></span>}
           <button className="btn ghost" disabled={used} title={used ? "This broker has fills. Delete them first to remove it." : "Remove broker"} onClick={remove}>Remove</button>
@@ -1565,35 +1745,35 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings, m
       </div>
       <div className="pb">
         <div className="fg c2">
-          <F label="Broker / account name"><input className="in" value={b.name} onChange={set("name")} /></F>
+          <F label="Broker / account name"><input className="in" value={d.name} onChange={set("name")} /></F>
           {acc?.fund?.fromLedger
             ? <F label="Capital in this account ($)" hint="Net deposits from the Funds tab"><div className="in num" style={{ background: "var(--panel2)" }}>{money(acc.fund.net)}</div></F>
-            : <F label="Capital in this account ($)" hint="Or record deposits in the Funds tab"><input className="in" type="number" value={b.capital} onChange={set("capital")} /></F>}
+            : <F label="Capital in this account ($)" hint="Or record deposits in the Funds tab"><input className="in" type="number" value={d.capital} onChange={set("capital")} /></F>}
           <F label="How margin is set">
-            <select className="in" value={b.method} onChange={set("method")}>
+            <select className="in" value={d.method} onChange={set("method")}>
               <option value="fixed">Broker gives margin per lot (e.g. Orient)</option>
               <option value="leverage">Leverage, e.g. 1:100 (e.g. MT5)</option>
             </select>
           </F>
           {lev ? (
-            <F label="Account leverage (1 : X)" hint={`Margin = lots × contract size × price ÷ ${n(b.leverage) || "X"}`}>
-              <select className="in" value={LEVERAGES.includes(+b.leverage) ? b.leverage : "custom"} onChange={(e) => e.target.value !== "custom" && setBroker(b.id, "leverage", +e.target.value)}>
+            <F label="Account leverage (1 : X)" hint={`Margin = lots × contract size × price ÷ ${n(d.leverage) || "X"}`}>
+              <select className="in" value={LEVERAGES.includes(+d.leverage) ? d.leverage : "custom"} onChange={(e) => e.target.value !== "custom" && setD((x) => ({ ...x, leverage: +e.target.value }))}>
                 {LEVERAGES.map((l) => <option key={l} value={l}>1:{l}</option>)}
-                {!LEVERAGES.includes(+b.leverage) && <option value="custom">1:{b.leverage}</option>}
+                {!LEVERAGES.includes(+d.leverage) && <option value="custom">1:{d.leverage}</option>}
               </select>
             </F>
           ) : <F label="Margin per lot" hint="Set per product below"><div className="in dim" style={{ background: "var(--panel2)" }}>From broker</div></F>}
-          <F label="Closing trades are matched" hint={b.match ? null : "Default for this margin method"}>
-            <select className="in" value={matchOf(b)} onChange={set("match")}>
+          <F label="Closing trades are matched" hint={d.match ? null : "Default for this margin method"}>
+            <select className="in" value={matchOf(d)} onChange={set("match")}>
               <option value="fifo">FIFO: oldest lots first (e.g. Orient)</option>
               <option value="average">Average price (e.g. MT5 netting)</option>
             </select>
           </F>
           <F label="Commission per lot ($)" hint="Per side. Only used where the fill carries no commission of its own.">
-            <input className="in" type="number" step="0.01" placeholder="0" value={b.commission ?? ""} onChange={set("commission")} />
+            <input className="in" type="number" step="0.01" placeholder="0" value={d.commission ?? ""} onChange={set("commission")} />
           </F>
-          <F label="Margin call level (TNE/IM %)" hint={lev ? "MT5: 'Margin call' level" : null}><input className="in" type="number" value={b.callRatio} onChange={set("callRatio")} /></F>
-          <F label="Stop-out level (TNE/IM %)" hint={lev ? "MT5: 'Stop out' level" : null}><input className="in" type="number" value={b.stopRatio} onChange={set("stopRatio")} /></F>
+          <F label="Margin call level (TNE/IM %)" hint={lev ? "MT5: 'Margin call' level" : null}><input className="in" type="number" value={d.callRatio} onChange={set("callRatio")} /></F>
+          <F label="Stop-out level (TNE/IM %)" hint={lev ? "MT5: 'Stop out' level" : null}><input className="in" type="number" value={d.stopRatio} onChange={set("stopRatio")} /></F>
           <F label="Your own minimum (TNE/IM %)" hint="Set once in Your limits — it applies to every account">
             <div className="in dim" style={{ background: "var(--panel2)" }}>{minRatio}%</div>
           </F>
@@ -1603,18 +1783,18 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings, m
         <table>
           <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : "Margin / lot ($)"}</th><th>Commission / lot</th><th></th></tr></thead>
           <tbody>
-            {Object.keys(b.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
-            {Object.entries(b.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, s]) => (
+            {Object.keys(d.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
+            {Object.entries(d.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, sp]) => (
               <tr key={p}>
-                <td className="txt"><b>{p}</b>{s.note && <div className="faint" style={{ fontSize: 11 }}>{s.note}</div>}</td>
-                <td><input className="cell" type="number" value={s.size ?? ""} onChange={(e) => setProduct(b.id, p, "size", e.target.value)} aria-label={`${p} contract size`} /></td>
+                <td className="txt"><b>{p}</b>{sp.note && <div className="faint" style={{ fontSize: 11 }}>{sp.note}</div>}</td>
+                <td><input className="cell" type="number" value={sp.size ?? ""} onChange={(e) => setP(p, "size", e.target.value)} aria-label={`${p} contract size`} /></td>
                 <td>{lev
-                  ? <input className="cell" type="number" placeholder={`1:${b.leverage}`} value={s.lev ?? ""} onChange={(e) => setProduct(b.id, p, "lev", e.target.value)} aria-label={`${p} leverage override`} />
-                  : <input className={`cell ${n(s.margin) ? "" : "need"}`} style={{ width: 96 }} type="number" placeholder="Set" value={s.margin ?? ""} onChange={(e) => setProduct(b.id, p, "margin", e.target.value)} aria-label={`${p} margin per lot`} />}</td>
-                <td><input className="cell" type="number" step="0.01" placeholder={n(b.commission) ? money(n(b.commission)) : "0"}
-                  value={s.comm ?? ""} onChange={(e) => setProduct(b.id, p, "comm", e.target.value)}
+                  ? <input className="cell" type="number" placeholder={`1:${d.leverage}`} value={sp.lev ?? ""} onChange={(e) => setP(p, "lev", e.target.value)} aria-label={`${p} leverage override`} />
+                  : <input className={`cell ${n(sp.margin) ? "" : "need"}`} style={{ width: 96 }} type="number" placeholder="Set" value={sp.margin ?? ""} onChange={(e) => setP(p, "margin", e.target.value)} aria-label={`${p} margin per lot`} />}</td>
+                <td><input className="cell" type="number" step="0.01" placeholder={n(d.commission) ? money(n(d.commission)) : "0"}
+                  value={sp.comm ?? ""} onChange={(e) => setP(p, "comm", e.target.value)}
                   aria-label={`${p} commission per lot`} title="Overrides the account rate. A spread billed per leg costs twice the leg rate." /></td>
-                <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => setSettings((st) => ({ ...st, brokers: st.brokers.map((x) => { if (x.id !== b.id) return x; const { [p]: _, ...rest } = x.products; return { ...x, products: rest }; }) }))}>✕</button>}</td>
+                <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => dropProduct(p)}>✕</button>}</td>
               </tr>
             ))}
           </tbody>
@@ -1622,21 +1802,23 @@ function BrokerCard({ b, acc, used, inUse, setBroker, setProduct, setSettings, m
       </div>
       <div className="pb faint" style={{ fontSize: 11, paddingBottom: 0 }}>
         Products appear here on their own when you import fills. Add one by hand only to trade something
-        before its first fill — and spell it exactly as {b.name} does, or the import will treat it as a
+        before its first fill — and spell it exactly as {d.name} does, or the import will treat it as a
         second product and split the position.
       </div>
       <div className="pb" style={{ display: "flex", gap: 8 }}>
         <input className="in" placeholder={lev ? "Add symbol, e.g. XBRUSD" : "Add product, e.g. CL Dec26 - BZ Dec26 Inter-Product"}
           value={newP} onChange={(e) => setNewP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addProduct()}
-          aria-label={`Add a product to ${b.name}`} />
-        <button className="btn" disabled={!newP.trim() || !!b.products?.[newP.trim()]} onClick={addProduct}>Add</button>
+          aria-label={`Add a product to ${d.name}`} />
+        <button className="btn" disabled={!newP.trim() || !!d.products?.[newP.trim()]} onClick={addProduct}>Add</button>
       </div>
+      <SaveBar dirty={dirty} onSave={save} onDiscard={discard} savedNote="This account is up to date" />
     </section>
   );
 }
 
 // ---------- reset / delete data ----------
 function ResetPanel({ settings, setSettings, fills, reloadFills }) {
+  const ask = useConfirm();
   const brokers = settings.brokers;
   const [bid, setBid] = useState(brokers[0]?.id || "");
   const [msg, setMsg] = useState(null);
@@ -1644,14 +1826,20 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
   const mine = fills.filter((f) => f.broker === bid);
   const done = (t) => setMsg(["ok", t]);
   const delBroker = async () => {
-    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid) })) { await reloadFills(); done(`Deleted ${b?.name}'s fills. Its settings are kept, so you can re-upload.`); }
+    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid), ask })) { await reloadFills(); done(`Deleted ${b?.name}'s fills. Its settings are kept, so you can re-upload.`); }
   };
   const delAll = async () => {
-    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills() })) { await reloadFills(); done("Deleted all fills. Broker settings are kept."); }
+    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills(), ask })) { await reloadFills(); done("Deleted all fills. Broker settings are kept."); }
   };
-  const resetSettings = () => {
+  const resetSettings = async () => {
     if (fills.length) { setMsg(["bad", "Delete the fills first. Otherwise accounts would be recreated from them with default settings."]); return; }
-    if (!window.confirm("Reset all settings (brokers, capital, margins, limits, prices, scenario moves, funds ledger) to the defaults?")) return;
+    const { ok } = await ask({
+      title: "Reset every setting to the defaults?",
+      body: "Broker accounts, capital, margins per lot, contract sizes, your limits, prices, scenario moves and the funds ledger all go back to how they started.",
+      detail: "There are no fills stored, so no trade history is affected. This cannot be undone.",
+      confirmLabel: "Reset everything", tone: "danger",
+    });
+    if (!ok) return;
     setSettings(migrate(null)); done("Settings reset to defaults.");
   };
   return (
@@ -1675,6 +1863,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
 function FundsTab({ pf, settings, setSettings, view }) {
+  const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
   const [f, setF] = useState({ broker: view !== "all" ? view : brokers[0]?.id, type: "deposit", amount: "", date: today.toISOString().slice(0, 10), note: "", category: CHARGE_TYPES[0], monthly: false });
@@ -1690,8 +1879,25 @@ function FundsTab({ pf, settings, setSettings, view }) {
     setMsg(["ok", f.type === "charge" ? `Recorded ${f.category} charge of ${money(entry.amount)}${f.monthly ? " a month" : ""} for ${bname(f.broker)}.` : `Recorded ${f.type} of ${money(entry.amount)} for ${bname(f.broker)}.`]);
     setF((x) => ({ ...x, amount: "", note: "" }));
   };
-  const remove = (id) => { if (window.confirm("Delete this entry?")) setSettings((s) => ({ ...s, cash: s.cash.filter((c) => c.id !== id) })); };
-  const stopMonthly = (id) => { if (window.confirm("Stop this monthly charge from today? Months already charged stay.")) setSettings((s) => ({ ...s, cash: s.cash.map((c) => (c.id === id ? { ...c, endTs: new Date().toISOString() } : c)) })); };
+  const remove = async (id) => {
+    const c = (settings.cash || []).find((x) => x.id === id);
+    const { ok } = await ask({
+      title: "Delete this entry?",
+      body: c ? `${c.type === "charge" ? c.category || "Charge" : c.type === "deposit" ? "Deposit" : "Withdrawal"} of ${money(n(c.amount))} on ${new Date(c.ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}.` : null,
+      detail: "Account equity is worked out from this ledger, so your capital and TNE/IM will change.",
+      confirmLabel: "Delete entry", tone: "danger",
+    });
+    if (ok) setSettings((s) => ({ ...s, cash: s.cash.filter((c2) => c2.id !== id) }));
+  };
+  const stopMonthly = async (id) => {
+    const { ok } = await ask({
+      title: "Stop this monthly charge?",
+      body: "It stops from today. The months already charged stay on the ledger.",
+      detail: "Use this when a subscription ends — it keeps the history honest rather than deleting the charge.",
+      confirmLabel: "Stop from today",
+    });
+    if (ok) setSettings((s) => ({ ...s, cash: s.cash.map((c) => (c.id === id ? { ...c, endTs: new Date().toISOString() } : c)) }));
+  };
   const setStmt = (id, v) => setSettings((s) => ({ ...s, statement: { ...(s.statement || {}), [id]: v } }));
   const accts = pf.accounts.filter((a) => view === "all" || a.id === view);
 
