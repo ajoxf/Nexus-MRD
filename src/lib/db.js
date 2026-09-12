@@ -97,6 +97,34 @@ export const auth = isRemote
         const { error } = await supabase.auth.updateUser({ password });
         if (error) throw error;
       },
+      /*
+       * Adopt a session handed over by the portal.
+       *
+       * The portal signs people in and redirects here with the session in the URL
+       * fragment — the same shape Supabase's own sign-in redirects use. It has to be
+       * claimed explicitly: `detectSessionInUrl` only reads the fragment under the
+       * implicit flow, and this client is on the default PKCE flow, which looks for a
+       * `code` in the query string instead. Measured, not assumed — without this the
+       * handoff lands on the sign-in page with a perfectly good session in the address
+       * bar and no idea what to do with it.
+       *
+       * Returns true when a session was adopted, so the caller knows to clear the URL.
+       */
+      async adoptSessionFromUrl() {
+        if (typeof window === "undefined") return false;
+        const hash = window.location.hash.replace(/^#/, "");
+        if (!hash.includes("access_token")) return false;
+
+        const params = new URLSearchParams(hash);
+        const access_token = params.get("access_token");
+        const refresh_token = params.get("refresh_token");
+        if (!access_token || !refresh_token) return false;
+
+        const { error } = await supabase.auth.setSession({ access_token, refresh_token });
+        if (error) { console.error("[auth] portal handover refused", error.message); return false; }
+        return true;
+      },
+
       // Calls back with the current user (or null) whenever the session changes.
       onAuthChange(cb) {
         const { data } = supabase.auth.onAuthStateChange((event, session) => {
@@ -105,7 +133,7 @@ export const auth = isRemote
         return () => data.subscription.unsubscribe();
       },
     }
-  : { enabled: false, onAuthChange: () => () => {} };
+  : { enabled: false, onAuthChange: () => () => {}, adoptSessionFromUrl: async () => false };
 
 // ---------- Browser storage (used until a database is connected) ----------
 const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills";

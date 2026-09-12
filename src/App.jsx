@@ -247,11 +247,25 @@ export default function App() {
   const [recovering, setRecovering] = useState(false);
 
   useEffect(() => {
-    db.getUser().then(setUser);
-    return auth.onAuthChange((u, event) => {
+    /*
+     * A session arriving from the portal is claimed before we ask who is signed in —
+     * otherwise the first answer is "nobody" and the sign-in page flashes up over a
+     * session that was already valid.
+     */
+    let cancelled = false;
+    auth.adoptSessionFromUrl().then((adopted) => {
+      if (adopted && !cancelled) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+      if (!cancelled) db.getUser().then(setUser);
+    });
+
+    const stop = auth.onAuthChange((u, event) => {
       setUser(u);
       if (event === "PASSWORD_RECOVERY") setRecovering(true);
     });
+
+    return () => { cancelled = true; stop(); };
   }, []);
 
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
@@ -317,6 +331,26 @@ function SignIn() {
     <form className="signin-card" onSubmit={submit}>
       <h2>{mode === "in" ? "Sign in" : "Reset your password"}</h2>
       <p className="lede">{mode === "in" ? "Use the email address your desk account was opened with." : "We'll email you a link to set a new password."}</p>
+
+      {/*
+        One sign-in, at the portal.
+        ---------------------------
+        Subscriptions live on NordStar Pro, so that is where somebody signs in; this hands
+        them straight through with a real session, no second password to keep in step. The
+        return trip needs nothing here — the Supabase client is already created with
+        detectSessionInUrl, which is what picks the session out of the URL and tidies it
+        away, so the code below is a link and not a mechanism.
+
+        Rendered only when the portal URL is configured. Unset, this page is exactly what
+        it was: a button that leads nowhere is worse than no button.
+      */}
+      {mode === "in" && PORTAL_SSO_URL && (
+        <>
+          <a className="btn full portal-sso" href={PORTAL_SSO_URL}>Continue with NordStar Pro</a>
+          <div className="signin-or"><span>or sign in directly</span></div>
+        </>
+      )}
+
       <F label="Email">
         <input className="in" type="email" autoComplete="username" required autoFocus
           placeholder="you@firm.com" value={email} onChange={(e) => setEmail(e.target.value)} />
@@ -337,6 +371,10 @@ function SignIn() {
     </form>
   );
 }
+
+// Where the portal hands out sessions. Unset in a build that has no portal, which is why
+// every use of it is guarded rather than assumed.
+const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || "";
 
 // Shown after following a reset link.
 function NewPassword({ onDone }) {

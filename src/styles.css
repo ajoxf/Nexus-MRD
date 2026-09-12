@@ -452,3 +452,32 @@ td.faded { opacity: .35; }
   .tw td .cell { width: 96px; }
   .tw .lots table { width: 100%; }
 }
+
+/* --- Portal sign-in handoff (sign-in card only) ------------------------------
+   The portal button leads and the direct form follows, but neither is demoted:
+   most people arrive already signed into the portal, while the desk's own accounts
+   predate it and are used daily on this screen. A divider separates the two paths
+   rather than a hierarchy ranking them. */
+.portal-sso {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  margin-bottom: 4px;
+}
+.signin-or {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 4px;
+  color: var(--ink-dim, #8a8a8a);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.signin-or::before,
+.signin-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line, #1f1f1f);
+}
