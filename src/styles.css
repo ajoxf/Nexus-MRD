@@ -69,23 +69,11 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- tables ---------- */
 .tw { overflow: auto; }
 .tw.tall { max-height: calc(100dvh - 180px); }
-/* Tables size to their content rather than stretching to fill the panel. A
-   stretched table has to put the spare width somewhere, and wherever it goes —
-   spread between every column, or all into the product name — it pushes the
-   figures away from what they describe. Any leftover is plain space at the
-   right instead. Wider-than-the-panel tables still scroll inside .tw. */
-table { width: auto; min-width: 0; border-collapse: collapse; }
-th, td { padding: 5px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
 th:first-child, td:first-child { text-align: left; padding-left: 12px; }
 th:last-child, td:last-child { padding-right: 12px; }
-/* A total row spans the table, so it needs the full width even though the
-   table itself is only as wide as its columns. */
-tr.total td:first-child { white-space: nowrap; }
 th { position: sticky; top: 0; background: var(--panel); z-index: 1; font-size: 11px; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--line2); }
-/* A two-word heading like "Risk to stop" was setting the width of a column of
-   five-character numbers. Let headings wrap; the figures underneath never do. */
-th { white-space: normal; line-height: 1.25; min-width: 48px; }
-th.txt { white-space: nowrap; }
 td { font-family: var(--num); font-size: 14px; font-variant-numeric: tabular-nums; }
 td.txt { font-family: var(--sans); font-size: 13px; text-align: left; }
 th.txt { text-align: left; }
@@ -97,10 +85,9 @@ td b { font-weight: 600; }
 .side { border-radius: 3px; } .side.long { color: var(--ok); background: var(--ok-soft); } .side.short { color: var(--bad); background: var(--bad-soft); }
 
 /* inline editable cell */
-.cell { width: 68px; text-align: right; background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 6px; font-family: var(--num); font-size: 14px; font-variant-numeric: tabular-nums; }
+.cell { width: 78px; text-align: right; background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 6px; font-family: var(--num); font-size: 14px; font-variant-numeric: tabular-nums; }
 .cell:hover { border-color: var(--line2); }
 .cell { background: #fff; border-color: var(--line); }
-.cell { padding: 3px 5px; }
 .cell:focus { border-color: var(--accent); background: #fff; outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 .cell::placeholder { color: var(--faint); }
 .cell.need { border-color: #E2B866; background: #FFFBF2; }
