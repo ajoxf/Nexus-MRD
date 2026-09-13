@@ -694,10 +694,21 @@ function Locked({ user, sub, onChanged }) {
             {busy ? "Setting it up…" : "Start my 14-day free trial"}
           </button>
         )}
-        <a className={`btn full ${offerTrial ? "portal-sso" : ""}`} href="/subscribe"
-          style={offerTrial ? { marginTop: 8 } : undefined}>
-          {offerTrial ? "Or subscribe now" : "Subscribe"}
-        </a>
+        {/*
+          No checkout yet, so no button pretending there is one.
+          ----------------------------------------------------
+          A "Subscribe" button that leads to a page nobody has written is worse than an
+          address to write to: the first wastes somebody's time and teaches them the
+          product is half-built, the second gets them what they want. This becomes a
+          checkout the day Stripe is wired up, and not a day before.
+        */}
+        <p className="note" style={{ marginTop: offerTrial ? 10 : 0 }}>
+          {offerTrial ? "Or, to subscribe straight away, email " : "To subscribe, email "}
+          <a href={`mailto:team@fincoursa.com?subject=${encodeURIComponent("Nexus RAMP subscription")}&body=${encodeURIComponent(`My account is ${user.email}.`)}`}>
+            team@fincoursa.com
+          </a>
+          {" "}and we will set you up.
+        </p>
 
         <p className="note">
           Signed in as {user.email}. Your data is safe either way — nothing here deletes anything.
@@ -723,7 +734,6 @@ async function authHeader() {
 
 // The desk's front door: navy brand panel beside the form, stacking on a phone.
 function SignInPage({ children }) {
-  const trial = useTrialOffer();
   return (
     <div className="signin">
       <aside className="signin-brand">
@@ -740,8 +750,9 @@ function SignInPage({ children }) {
           {/* "By invitation" and "start a free trial" cannot both be true on the
               same screen, so the invitation line stands down while the offer is
               open. Both are driven by the one variable. */}
-          {!trial && <>Access is by invitation. Speak to your desk administrator.<br /></>}
-          A <a href="https://nordstarpro.com" target="_blank" rel="noopener noreferrer">NordStar Pro</a> product.
+          {/* Fincoursa, not NordStar Pro. They are two products of one company, not one
+              product inside the other — which is the whole point of the split. */}
+          A Fincoursa product.
         </p>
       </aside>
       <main className="signin-form">{children}</main>
@@ -751,71 +762,63 @@ function SignInPage({ children }) {
 
 // Sign-in only: accounts are created by invitation, so there is no sign-up here.
 function SignIn() {
-  const trial = useTrialOffer();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState("in");     // "in" | "forgot"
+  const [mode, setMode] = useState("in");     // "in" | "up" | "forgot"
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
-  // Whether to point a failed sign-in at the portal, where their password may live.
-  const [handover, setHandover] = useState(false);
   const [sent, setSent] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
-    setBusy(true); setErr(null); setHandover(false);
+    setBusy(true); setErr(null);
     try {
       if (mode === "forgot") { await auth.sendReset(email); setSent(true); }
+      else if (mode === "up") { await auth.signUp(email, password); setSent("up"); }
       else await auth.signIn(email, password);
     } catch (e2) {
-      /*
-       * "Wrong password" is true and useless to the person most likely to see it.
-       *
-       * An account opened through NordStar Pro — a trial, or a subscription — is
-       * created here with a password generated on the spot, which nobody is ever
-       * shown. Its owner has no password to type and no way to know that, so they
-       * try the one they use at the portal, are told it does not match, and try
-       * it again. The way in is the button at the top of this card, so say so.
-       */
-      const wrong = e2.message === "Invalid login credentials";
-      setErr(wrong ? "That email and password don't match." : e2.message);
-      setHandover(wrong && !!PORTAL_SSO_URL);
+      setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
     } finally { setBusy(false); }
+  };
+
+  const withGoogle = async () => {
+    setBusy(true); setErr(null);
+    try { await auth.signInWithGoogle(); }
+    catch (e2) { setErr(e2.message); setBusy(false); }
   };
 
   if (sent) return (
     <form className="signin-card" onSubmit={(e) => e.preventDefault()}>
       <h2>Check your email</h2>
-      <p className="lede">If an account exists for <b>{email}</b>, a reset link is on its way.</p>
-      <p className="note">The link signs you in and asks for a new password. Look in spam if it doesn't arrive within a few minutes.</p>
+      <p className="lede">
+        {sent === "up"
+          ? <>We've sent a confirmation link to <b>{email}</b>. Open it and you're in.</>
+          : <>If an account exists for <b>{email}</b>, a reset link is on its way.</>}
+      </p>
+      <p className="note">Look in spam if it doesn't arrive within a few minutes.</p>
       <button type="button" className="btn full" onClick={() => { setSent(false); setMode("in"); }}>Back to sign in</button>
     </form>
   );
 
   return (
     <form className="signin-card" onSubmit={submit}>
-      <h2>{mode === "in" ? "Sign in" : "Reset your password"}</h2>
-      <p className="lede">{mode === "in" ? "Use the email address your desk account was opened with." : "We'll email you a link to set a new password."}</p>
+      <h2>{mode === "in" ? "Sign in" : mode === "up" ? "Create your account" : "Reset your password"}</h2>
+      <p className="lede">
+        {mode === "in" ? "Your Nexus RAMP account — nothing else needed."
+          : mode === "up" ? "Fourteen days free. No card, and nothing to cancel."
+          : "We'll email you a link to set a new password."}
+      </p>
 
-      {/*
-        One sign-in, at the portal.
-        ---------------------------
-        Subscriptions live on NordStar Pro, so that is where somebody signs in; this hands
-        them straight through with a real session, no second password to keep in step. The
-        return trip needs nothing here — the Supabase client is already created with
-        detectSessionInUrl, which is what picks the session out of the URL and tidies it
-        away, so the code below is a link and not a mechanism.
-
-        Rendered only when the portal URL is configured. Unset, this page is exactly what
-        it was: a button that leads nowhere is worse than no button.
-      */}
-      {mode === "in" && PORTAL_SSO_URL && (
+      {/* On sign-up as well as sign-in: with Google there is no difference between the
+          two — the first time you use it, it makes the account. Offering it only to
+          people who already have one is offering it only to people who do not need it.
+          Google through Supabase, incidentally, not a hop through another product. */}
+      {mode !== "forgot" && (
         <>
-          <a className="btn full google-sso" href={PORTAL_GOOGLE_URL}>
+          <button type="button" className="btn full google-sso" onClick={withGoogle} disabled={busy}>
             <GoogleMark />Continue with Google
-          </a>
-          <a className="btn full portal-sso" href={PORTAL_SSO_URL}>Continue with NordStar Pro</a>
-          <div className="signin-or"><span>or sign in directly</span></div>
+          </button>
+          <div className="signin-or"><span>or use your email</span></div>
         </>
       )}
 
@@ -823,140 +826,60 @@ function SignIn() {
         <input className="in" type="email" autoComplete="username" required autoFocus
           placeholder="you@firm.com" value={email} onChange={(e) => setEmail(e.target.value)} />
       </F>
-      {mode === "in" && (
-        <F label="Password">
-          <PasswordField autoComplete="current-password"
+      {mode !== "forgot" && (
+        <F label={mode === "up" ? "Choose a password" : "Password"} hint={mode === "up" ? "At least 8 characters." : null}>
+          <PasswordField autoComplete={mode === "up" ? "new-password" : "current-password"}
             value={password} onChange={(e) => setPassword(e.target.value)} />
         </F>
       )}
-      {err && (
-        <div className="signin-err">
-          {err}
-          {handover && (
-            <span className="signin-err-hint">
-              If your account came from NordStar Pro you may never have set a password here —
-              use <b>Continue with NordStar Pro</b> above.
-            </span>
-          )}
-        </div>
-      )}
+      {err && <div className="signin-err">{err}</div>}
       <button className="btn full" disabled={busy}>
-        {busy ? "Please wait…" : mode === "in" ? "Sign in" : "Email me a reset link"}
+        {busy ? "Please wait…" : mode === "in" ? "Sign in" : mode === "up" ? "Create my account" : "Email me a reset link"}
       </button>
-      <button type="button" className="linklike" onClick={() => { setMode(mode === "in" ? "forgot" : "in"); setErr(null); }}>
-        {mode === "in" ? "Forgotten your password?" : "Back to sign in"}
-      </button>
+      {mode !== "up" && (
+        <button type="button" className="linklike" onClick={() => { setMode(mode === "in" ? "forgot" : "in"); setErr(null); }}>
+          {mode === "in" ? "Forgotten your password?" : "Back to sign in"}
+        </button>
+      )}
 
       {/*
-        The trial is opened at the portal, not here.
-        -------------------------------------------
-        Subscriptions, payment and the trial clock all live on NordStar Pro,
-        and RAMP has no sign-up of its own by design — an account here is
-        created for you once you hold the product. So this is a link out, and
-        the portal remains the one place that decides who gets a trial.
-
-        Shown only when the portal says a trial is open AND that it grants this
-        product. RAMP asks on every load rather than trusting a setting of its
-        own, so closing the offer at the portal closes it here with nothing for
-        anybody to remember.
+        Sign-up is here now, not somewhere else.
+        ---------------------------------------
+        An account used to be something NordStar Pro created for you once you held the
+        product, which is why this screen had no way to make one. Nexus owns its own
+        accounts, so the door is on the door.
       */}
-      {mode === "in" && trial && (
+      {mode === "in" && (
         <p className="signin-trial">
           New to Nexus RAMP?{" "}
-          <a href={trial.url} target="_blank" rel="noopener noreferrer">
-            Start a {trial.days}-day free trial
-          </a>
-          {" "}— no card required.
+          <button type="button" className="linklike signin-inline" onClick={() => { setMode("up"); setErr(null); }}>
+            Create an account
+          </button>
+          {" "}— 14 days free, no card.
+        </p>
+      )}
+      {mode === "up" && (
+        <p className="signin-trial">
+          Already have one?{" "}
+          <button type="button" className="linklike signin-inline" onClick={() => { setMode("in"); setErr(null); }}>
+            Sign in instead
+          </button>
         </p>
       )}
     </form>
   );
 }
 
-// Where the portal hands out sessions. Unset in a build that has no portal, which is why
-// every use of it is guarded rather than assumed.
 /*
- * Where the portal lives.
+ * Nexus signs its own people in.
  *
- * Hard-wired rather than configured, the same way the portal hard-wires this
- * application's address in its own header. A build-time variable put the truth
- * in two places and failed silently in both: set it wrongly, or forget to set
- * it at all, and the sign-in screen simply drops the button with nothing to
- * say why. That is exactly what happened. Override it only if the portal
- * genuinely moves.
+ * What used to be here: the portal's address, a "Continue with NordStar Pro" button, a
+ * Google button that went to NordStar Pro's Google flow rather than ours, and a fetch
+ * asking the portal whether a trial was open. All of it existed because identity lived
+ * somewhere else and had to be carried across. It does not any more.
+ *
+ * Nothing on this screen now knows NordStar Pro exists.
  */
-const PORTAL_URL = (import.meta.env.VITE_PORTAL_URL || "https://nordstarpro.com").replace(/\/+$/, "");
-const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || `${PORTAL_URL}/api/sso/ramp`;
-
-/*
- * Google, the long way round — which is the only safe way round.
- *
- * RAMP's own database could be wired to Google directly, and that is exactly
- * what must not happen. Signing in with Google proves who somebody is; it
- * proves nothing about whether they hold this product. A Google button wired
- * straight into RAMP would mint an account for anyone with a Google address,
- * which is the hole that was deliberately closed when self-signup was turned
- * off.
- *
- * So this hands off to the portal's Google flow and asks it to come back
- * through the handover route. The portal establishes identity, the handover
- * route checks the entitlement, and only then is a session issued here. One
- * click less than going via the portal's own page, and not one check skipped.
- */
-const PORTAL_GOOGLE_URL =
-  `${PORTAL_URL}/api/auth/google/start?next=${encodeURIComponent("/api/sso/ramp")}`;
-
-// The item a trial has to grant before this screen will mention one. An
-// operator can point the portal's trial at a research section instead; saying
-// "start a 14-day free trial" here while it in fact hands over research would
-// be a straight misrepresentation, so the slug is checked, not assumed.
-const RAMP_ITEM_SLUG = "nexus-ramp";
-
-/*
- * Asks the portal whether a trial is open.
- *
- * The portal decides. Nothing here caches the answer beyond the life of the
- * page, so closing the offer there closes it here on the next load, with
- * nothing for anybody to remember to change.
- *
- * Every failure is treated as "no offer": unreachable, slow, malformed, or
- * granting something other than this product. An offer that is not really open
- * is worse than no offer, so silence is the safe direction to fail in.
- */
-function useTrialOffer() {
-  const [offer, setOffer] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    const stop = new AbortController();
-    const timer = setTimeout(() => stop.abort(), 6000);
-    /*
-     * Asks about THIS product by name.
-     *
-     * The portal can have several trials open at once, so "is a trial open" is no longer
-     * a question with one answer. Naming the item also removes the check that used to sit
-     * below — the portal cannot hand back an offer for something else when it was asked
-     * about this.
-     */
-    fetch(`${PORTAL_URL}/api/trial/status?item=${encodeURIComponent(RAMP_ITEM_SLUG)}`, {
-      signal: stop.signal,
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        // Belt and braces: a portal that ignored the parameter must not get a free pass.
-        if (cancelled || !d?.open || d.slug !== RAMP_ITEM_SLUG) return;
-        const days = Number(d.days);
-        if (!Number.isFinite(days) || days < 1) return;
-        const url =
-          typeof d.url === "string" && d.url.startsWith(`${PORTAL_URL}/`)
-            ? d.url
-            : `${PORTAL_URL}/trial?item=${encodeURIComponent(RAMP_ITEM_SLUG)}`;
-        setOffer({ days: Math.round(days), url });
-      })
-      .catch(() => {});
-    return () => { cancelled = true; clearTimeout(timer); stop.abort(); };
-  }, []);
-  return offer;
-}
 
 // Shown after following a reset link.
 function NewPassword({ onDone }) {
