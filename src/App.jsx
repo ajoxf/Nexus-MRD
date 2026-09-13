@@ -600,11 +600,45 @@ function AdminPage({ user, path }) {
 
       {err && <div className="signin-err" style={{ margin: "0 0 12px" }}>{err}</div>}
 
+      {/*
+        * A failed load is not a slow one.
+        *
+        * The tab bodies below read `rows === null` as "still loading" and say so. That is
+        * right until a load FAILS, at which point rows stays null for good and the screen
+        * shows a red error above the word "Loading…" — telling somebody it is broken and
+        * still working in the same breath. The tabs stand down while there is nothing to
+        * show and something to say instead.
+        */}
+      {err && !rows ? (
+        <section className="panel">
+          <div className="pb">
+            <p className="dim" style={{ marginTop: 0 }}>
+              Nothing could be loaded, so there is nothing to show here. The tabs will fill in
+              once the problem above is fixed.
+            </p>
+            {/* "Server is not configured" has exactly one cause and it is worth naming, because
+                the fix is in a dashboard rather than anywhere a person would think to look. */}
+            {err.includes("not configured") && (
+              <p className="dim" style={{ fontSize: 12 }}>
+                This one means the server is missing <b>SUPABASE_URL</b> and{" "}
+                <b>SUPABASE_SERVICE_ROLE_KEY</b>. They are set in the hosting dashboard, not in
+                this application, and a deploy has to follow before they take effect. Neither
+                may carry a <b>VITE_</b> prefix — that would publish the service key to every
+                browser.
+              </p>
+            )}
+            <button className="btn" onClick={load}>Try again</button>
+          </div>
+        </section>
+      ) : (
+        <>
       {tab.path === "/admin" && <AdminOverview rows={rows} onRefresh={load} />}
       {tab.path === "/admin/customers" && <AdminCustomers rows={rows} busy={busy} onSet={setSub} onSaved={load} onRefresh={load} />}
       {tab.path === "/admin/usage" && <AdminUsage rows={rows} />}
       {tab.path === "/admin/codes" && <AdminCodes />}
       {tab.path === "/admin/affiliates" && <AdminAffiliates />}
+        </>
+      )}
     </div>
   );
 }
