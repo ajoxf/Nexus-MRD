@@ -581,9 +581,14 @@ function AdminPage({ user, path }) {
   return (
     <div className="admin">
       <header className="admin-top">
-        <div>
-          <h1>Nexus admin</h1>
-          <p className="dim">Subscriptions, codes and usage. No customer's trading is shown here.</p>
+        <div className="admin-brand">
+          {/* The same mark as the sign-in page. An operator moving between the two should
+              not have to check which product they are looking at. */}
+          <div className="admin-mark" aria-hidden="true">N</div>
+          <div className="admin-titles">
+            <h1>Nexus admin</h1>
+            <p className="dim">Subscriptions, payments, codes and usage. No customer's trading is shown here.</p>
+          </div>
         </div>
         <div className="admin-who">
           <span className="dim">{user.email}</span>
@@ -672,14 +677,25 @@ function AdminOverview({ rows, onRefresh }) {
           <h2>Where things stand</h2>
           <button className="btn ghost" onClick={onRefresh}>Refresh</button>
         </div>
-        <div className="strip">
-          <div className="kpi"><label>Accounts</label><b>{rows.length}</b></div>
-          <div className="kpi"><label>With access</label><b className="ok">{live.length}</b></div>
-          <div className="kpi"><label>Paying</label><b>{paying.length}</b></div>
-          <div className="kpi"><label>On trial</label><b>{trialing.length}</b>
-            {cold.length > 0 && <span className="faint" style={{ fontSize: 11 }}>{cold.length} imported nothing</span>}</div>
-          <div className="kpi"><label>Lapsed</label><b className={lapsed.length ? "bad" : ""}>{lapsed.length}</b></div>
-          <div className="kpi"><label>Signed up, nothing held</label><b>{nothing.length}</b></div>
+        {/*
+          * The desk's dense KPI strip is right where screen space is contested. Here there
+          * is space, and these figures are the reason somebody opened the page — so they
+          * get room, a consistent label, and a line of context underneath where the bare
+          * number would otherwise need explaining.
+          */}
+        <div className="admin-metrics">
+          <div className="metric"><label>Accounts</label><b>{rows.length}</b>
+            <span className="sub">Every sign-up, ever</span></div>
+          <div className="metric"><label>With access</label><b className={live.length ? "ok" : "faint"}>{live.length}</b>
+            <span className="sub">Trialing, paying or comped</span></div>
+          <div className="metric"><label>Paying</label><b className={paying.length ? "ok" : "faint"}>{paying.length}</b>
+            <span className="sub">On a live subscription</span></div>
+          <div className="metric"><label>On trial</label><b>{trialing.length}</b>
+            <span className="sub">{cold.length > 0 ? `${cold.length} imported nothing yet` : "All have imported fills"}</span></div>
+          <div className="metric"><label>Lapsed</label><b className={lapsed.length ? "bad" : "faint"}>{lapsed.length}</b>
+            <span className="sub">Had access, no longer do</span></div>
+          <div className="metric"><label>Never held</label><b className="faint">{nothing.length}</b>
+            <span className="sub">Signed up, took nothing</span></div>
         </div>
       </section>
 
@@ -701,21 +717,32 @@ function AdminOverview({ rows, onRefresh }) {
       )}
 
       <section className="panel">
-        <div className="ph"><h2>Running out next</h2></div>
+        <div className="ph"><h2>Running out next</h2><span className="sub">Soonest first</span></div>
+        {/* Outside the table for the same reason as the invoices one: .tw scrolls, and a
+            centred cell inside it centres on the table rather than the screen. */}
+        {ending.length === 0 ? (
+          <div className="admin-empty">
+            <b>Nothing is running out</b>
+            No account has an end date — open-ended access does not appear here.
+          </div>
+        ) : (
         <div className="tw"><table>
           <thead><tr><th className="txt">Customer</th><th className="txt">Holds</th><th>Runs until</th><th>Days left</th></tr></thead>
           <tbody>
-            {ending.length === 0 && <tr><td colSpan={4} className="dim">Nothing with an end date.</td></tr>}
             {ending.map((r) => (
               <tr key={r.id}>
                 <td className="txt">{r.crm?.full_name || r.email}</td>
-                <td className="txt"><span className="pill ok">{accessState(r.sub)}</span></td>
+                {/* Trialing and active both mean "has access", but only one of them is
+                    revenue. Colouring them the same makes a page of trials read like a
+                    page of customers. */}
+                <td className="txt"><span className={`pill ${accessState(r.sub) === "active" ? "ok" : "dim"}`}>{accessState(r.sub)}</span></td>
                 <td className="num">{day(r.sub.current_period_end)}</td>
                 <td className="num">{daysLeft(r.sub) ?? "—"}</td>
               </tr>
             ))}
           </tbody>
         </table></div>
+        )}
       </section>
     </>
   );
