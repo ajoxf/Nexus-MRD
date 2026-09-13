@@ -32,9 +32,14 @@ purpose.
 
 ### 1. Your account
 
-Your email address, and — if you sign in with Google — the fact that you used Google and
-the account identifier it gives us. If you set a password, we never see it: it is hashed by
-our authentication provider and is not readable by us or by anyone working here.
+Your **first and last name**, your email address, and — if you sign in with Google — the
+fact that you used Google and the account identifier it gives us. If you set a password, we
+never see it: it is hashed by our authentication provider and is not readable by us or by
+anyone working here.
+
+Optionally, a **WhatsApp number**. It is never required, we ask for it only to send you
+updates about your own account, and we do not use it for marketing. You can remove it at any
+time, and it is deleted with your account like everything else in this section.
 
 We need this to let you sign in and to tell you about your account. Without it there is no
 account.
@@ -91,6 +96,9 @@ Worth stating plainly, because it is unusual:
 - **We run no tracking pixels, advertising tags or session recording.** None. There is no
   third-party script on any page of this product.
 - **We do not profile you or make automated decisions about you.**
+- **We do not send your trades to any AI service.** The one place Nexus uses an AI model is
+  reading the column layout of an unfamiliar statement, it is off unless you turn it on, and
+  it receives headings and three sample rows rather than your book. See the table below.
 - **We do not sell, rent or share your data with anyone for their own purposes.**
 - **We serve our own fonts.** Loading fonts from a third party would send your IP address
   to them before you had signed in. We stopped doing that.
@@ -117,6 +125,24 @@ data reaches them in the course of doing their job:
 | Stripe | Payments | Your name, email and payment details | US / global |
 | Resend | Sending our emails | Your email address and the message | US |
 | Google | Sign-in, only if you choose it | That you signed in | US / global |
+| Anthropic | Interpreting an unfamiliar statement layout, **only if you tick the box** | The column headings and up to three sample rows from that one file | US |
+
+**About the column-reading feature.** When you import a statement Nexus does not recognise,
+you may tick *"Help AI understand the schema or format"*. Only then, and only for that file,
+we send the **column headings and up to three sample rows** to Anthropic's API so it can
+work out which column holds the price, which holds the quantity, and so on. What comes back
+is a mapping of columns, which you review before anything is imported.
+
+**Your fills are not sent.** Not the file, not your positions, not your prices, not your
+history. The trades are read here, on our own servers, by the same code that reads a
+recognised format. The box is off unless you tick it, and everything works without it.
+
+> **[DECIDE] — zero data retention.** Anthropic offers zero-retention processing on request
+> for API customers. **You said to ask for it before launch — this line stays open until it
+> is confirmed in writing**, because the sentence this policy can then carry ("the sample is
+> processed and not retained") is materially stronger than the one it can carry now. If the
+> request is refused or delayed, this section has to say what retention actually applies
+> rather than implying none.
 
 > **[DECIDE] — transfer safeguards.** Stripe and Resend involve transferring personal data
 > outside the UK. This normally relies on the UK International Data Transfer Agreement or
@@ -151,9 +177,9 @@ You can delete your account yourself, from **Settings → Close your account**. 
 have to email anyone or wait for us.
 
 **Deleted immediately and permanently:** every fill, every broker account, your limits,
-prices, scenario settings and funds ledger, our internal notes about you, and the record of
-which emails we sent you. Your sign-in is disabled and your email address is removed from
-our systems.
+prices, scenario settings and funds ledger, your name and WhatsApp number, our internal notes
+about you, and the record of which emails we sent you. Your sign-in is disabled and your
+email address is removed from our systems.
 
 **Kept:** the record of payments you have made. We are required to hold this for tax
 purposes, and it is what lets us answer your bank if a charge is ever disputed. It contains
