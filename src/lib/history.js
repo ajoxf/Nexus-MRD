@@ -45,18 +45,44 @@ export function addDays(key, k) {
 const round0 = (v) => (isFinite(v) ? Math.round(v) : 0);
 const round4 = (v) => (isFinite(v) ? Math.round(v * 1e4) / 1e4 : 0);
 
-// One row per broker account, from the live portfolio.
+/*
+ * One row per broker account, from the live portfolio.
+ *
+ * `prod` breaks the lot count down by product, because "19 lots" answers a smaller
+ * question than "19 lots, of which 12 were the NG spread". Rows written before this
+ * existed have no `prod` and are drawn as one unattributed block rather than dropped —
+ * the total in them is still true.
+ */
 export function snapshotRows(pf, now = new Date()) {
   const d = dayKey(now);
-  return pf.accounts.map((a) => ({
-    d, b: a.id,
-    tne: round0(a.TNE),
-    im: round0(a.IM),
-    lots: round4(a.rows.reduce((t, r) => t + Math.abs(r.lots), 0)),
-  }));
+  return pf.accounts.map((a) => {
+    const prod = {};
+    for (const r of a.rows) {
+      const lots = Math.abs(r.lots);
+      // A row with no product name would otherwise be filed under the string
+      // "undefined" and drawn as a real segment with a real-looking label.
+      if (lots && r.product) prod[r.product] = round4((prod[r.product] || 0) + lots);
+    }
+    return {
+      d, b: a.id,
+      tne: round0(a.TNE),
+      im: round0(a.IM),
+      lots: round4(a.rows.reduce((t, r) => t + Math.abs(r.lots), 0)),
+      prod,
+    };
+  });
 }
 
-const same = (x, y) => x && y && x.tne === y.tne && x.im === y.im && x.lots === y.lots;
+// Deep-compares `prod` too: a day where the same total moved between products is a
+// different day, and must be written rather than recognised as unchanged.
+const sameProd = (x, y) => {
+  const a = x || {}, b = y || {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) if ((a[k] || 0) !== (b[k] || 0)) return false;
+  return true;
+};
+const same = (x, y) =>
+  x && y && x.tne === y.tne && x.im === y.im && x.lots === y.lots && sameProd(x.prod, y.prod);
 
 /*
  * Puts today's rows into the history, replacing today's previous rows.
@@ -125,7 +151,7 @@ export function buildSeries({ reconstructed, history, brokers }) {
     byDay.get(d).set(b, { ...v, recorded });
   };
   for (const p of reconstructed || []) for (const [b, v] of Object.entries(p.byBroker)) put(p.d, b, v, false);
-  for (const r of history || []) put(r.d, r.b, { tne: r.tne, im: r.im, lots: r.lots }, true);
+  for (const r of history || []) put(r.d, r.b, { tne: r.tne, im: r.im, lots: r.lots, prod: r.prod }, true);
 
   const days = [...byDay.keys()].sort();
   const lines = brokers.map((b) => ({
@@ -142,7 +168,14 @@ export const METRICS = [
   { key: "tne", label: "Total net equity", fmt: "money" },
   { key: "im", label: "Initial margin", fmt: "money" },
   { key: "ratio", label: "TNE / IM", fmt: "ratio" },
-  { key: "lots", label: "Lots held", fmt: "lots" },
+  /*
+   * Realized money is not stored and does not need to be. It follows from the closed
+   * trades, which are permanent — so unlike equity it reconstructs exactly for every day
+   * there has ever been, and its line is solid the whole way across.
+   */
+  { key: "realized", label: "Realized P&L", fmt: "money" },
+  // Drawn as bars broken down by product rather than as a line. See MarginHistory.
+  { key: "lots", label: "Lots held", fmt: "lots", stacked: true },
 ];
 
 // TNE/IM is not stored: it is the two stored numbers divided, and a flat
@@ -150,4 +183,49 @@ export const METRICS = [
 export function valueOf(point, metric) {
   if (metric !== "ratio") return point[metric];
   return point.im > 0 ? point.tne / point.im : null;
+}
+
+/*
+ * Cumulative realized P&L per broker at the close of each day.
+ *
+ * Exact everywhere. A closed trade carries the money it made and the moment it closed,
+ * and neither is ever restated, so there is nothing here to reconstruct approximately.
+ */
+export function realizedByDay(closed, days) {
+  const out = new Map(days.map((d) => [d, {}]));
+  const running = {};
+  const sorted = [...(closed || [])].sort((a, b) => new Date(a.closeTs) - new Date(b.closeTs));
+  let i = 0;
+  for (const d of days) {
+    const end = endOfDay(d).getTime();
+    while (i < sorted.length && new Date(sorted[i].closeTs).getTime() <= end) {
+      const t = sorted[i];
+      const b = t.broker || "default";
+      running[b] = (running[b] || 0) + t.pnl;
+      i += 1;
+    }
+    out.set(d, { ...running });
+  }
+  return out;
+}
+
+/*
+ * Winners and losers per day, by the day a trade CLOSED.
+ *
+ * A trade opened in March and closed in June is June's result: that is the day the money
+ * was decided, and the day somebody reviewing a bad week would look for it.
+ */
+export function winLossByDay(closed) {
+  const by = new Map();
+  for (const t of closed || []) {
+    if (!t.closeTs) continue;
+    const d = dayKey(t.closeTs);
+    const row = by.get(d) || { d, wins: 0, losses: 0, flat: 0, net: 0 };
+    if (t.pnl > 0) row.wins += 1;
+    else if (t.pnl < 0) row.losses += 1;
+    else row.flat += 1;
+    row.net += t.pnl;
+    by.set(d, row);
+  }
+  return [...by.values()].sort((a, b) => (a.d < b.d ? -1 : 1));
 }

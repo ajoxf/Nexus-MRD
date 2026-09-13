@@ -1,4 +1,4 @@
-import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf }
+import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay }
   from '../src/lib/history.js';
 let fail = 0;
 const eq = (name, got, want) => {
@@ -13,13 +13,30 @@ eq('addDays crosses a month', addDays('2026-02-27', 3), '2026-03-02');
 eq('addDays goes back over a year', addDays('2026-01-02', -3), '2025-12-30');
 
 const pf = { accounts: [
-  { id: 'orient', TNE: 606970.4, IM: 18900, rows: [{ lots: 3 }, { lots: 6 }, { lots: -3 }] },
+  { id: 'orient', TNE: 606970.4, IM: 18900, rows: [
+    { lots: 3, product: 'CL Dec26 - CL Jan27 Calendar' },
+    { lots: 6, product: 'NG Jan27 - NG Feb27 Calendar' },
+    // Short, so it contributes its size rather than cancelling the long above it.
+    { lots: -3, product: 'CL Dec26 - CL Jan27 Calendar' },
+  ] },
   { id: 'mt5',    TNE: 150000,   IM: 0,     rows: [] },
 ]};
 const rows = snapshotRows(pf, new Date(2026, 8, 12));
-eq('snapshot rounds and sums absolute lots', rows,
-   [{ d: '2026-09-12', b: 'orient', tne: 606970, im: 18900, lots: 12 },
-    { d: '2026-09-12', b: 'mt5',    tne: 150000, im: 0,     lots: 0 }]);
+eq('snapshot rounds and sums absolute lots, broken down by product', rows,
+   [{ d: '2026-09-12', b: 'orient', tne: 606970, im: 18900, lots: 12,
+      prod: { 'CL Dec26 - CL Jan27 Calendar': 6, 'NG Jan27 - NG Feb27 Calendar': 6 } },
+    { d: '2026-09-12', b: 'mt5',    tne: 150000, im: 0,     lots: 0, prod: {} }]);
+
+eq('a row with no product name is not filed under "undefined"',
+   snapshotRows({ accounts: [{ id: 'x', TNE: 1, IM: 0, rows: [{ lots: 5 }] }] }, new Date(2026, 8, 12))[0].prod,
+   {});
+
+// The same total moving between products is a different day and must be written.
+const reshuffled = rows.map((r) => (r.b === 'orient'
+  ? { ...r, prod: { 'CL Dec26 - CL Jan27 Calendar': 12 } } : r));
+eq('a reshuffle at the same total still counts as a change',
+   mergeSnapshot(mergeSnapshot([], rows), reshuffled).find((r) => r.b === 'orient').prod,
+   { 'CL Dec26 - CL Jan27 Calendar': 12 });
 
 // The loop guard: an unchanged day must come back as the very same array.
 const h1 = mergeSnapshot([], rows);
@@ -71,6 +88,34 @@ eq('rebuilt points are flagged', built.lines[0].points.map(p => p.recorded), [fa
 eq('an account with no data draws nothing', built.lines[1].points.length, 0);
 eq('ratio is derived, not stored', valueOf({ tne: 120, im: 60 }, 'ratio'), 2);
 eq('a flat account has no ratio at all', valueOf({ tne: 120, im: 0 }, 'ratio'), null);
+
+
+// ---- realized money, day by day ----
+const closed = [
+  { closeTs: '2026-09-01T10:00:00', broker: 'orient', pnl: 800, product: 'CL' },
+  { closeTs: '2026-09-01T15:00:00', broker: 'orient', pnl: -300, product: 'NG' },
+  { closeTs: '2026-09-03T11:00:00', broker: 'mt5', pnl: 250, product: 'CL' },
+  { closeTs: '2026-09-04T09:00:00', broker: 'orient', pnl: 200, product: 'CL' },
+];
+const days4 = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04'];
+const r = realizedByDay(closed, days4);
+eq('day one nets the two trades that closed on it', r.get('2026-09-01'), { orient: 500 });
+eq('a quiet day carries the running total forward', r.get('2026-09-02'), { orient: 500 });
+eq('a second broker appears only once it has closed something',
+   r.get('2026-09-03'), { orient: 500, mt5: 250 });
+eq('and the totals accumulate', r.get('2026-09-04'), { orient: 700, mt5: 250 });
+eq('nothing closed, nothing claimed', realizedByDay([], days4).get('2026-09-04'), {});
+
+// ---- winners and losers per day ----
+const wl = winLossByDay([
+  ...closed,
+  { closeTs: '2026-09-04T12:00:00', broker: 'orient', pnl: 0, product: 'CL' },
+]);
+eq('one row per day that had a close', wl.map((x) => x.d), ['2026-09-01', '2026-09-03', '2026-09-04']);
+eq('a day with one of each', wl[0], { d: '2026-09-01', wins: 1, losses: 1, flat: 0, net: 500 });
+eq('a scratch counts as neither a win nor a loss',
+   wl[2], { d: '2026-09-04', wins: 1, losses: 0, flat: 1, net: 200 });
+eq('a trade with no close date is not a day', winLossByDay([{ pnl: 5 }]).length, 0);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, METRICS, valueOf } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -2279,49 +2279,6 @@ function analyse(closed) {
 }
 
 // Cumulative realized P&L. One series, so it needs no legend — the title names it.
-function EquityCurve({ curve }) {
-  const [hover, setHover] = useState(null);
-  const W = 760, H = 200, pad = { l: 8, r: 8, t: 12, b: 18 };
-  if (curve.length < 2) return <div className="empty">At least two closed trades are needed to draw a curve.</div>;
-  const ys = curve.map((p) => p.equity).concat(0);
-  const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
-  const x = (i) => pad.l + (i * (W - pad.l - pad.r)) / (curve.length - 1);
-  const y = (v) => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / span);
-  const line = curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join(" ");
-  const area = `${line} L${x(curve.length - 1).toFixed(1)},${y(Math.max(lo, 0)).toFixed(1)} L${x(0).toFixed(1)},${y(Math.max(lo, 0)).toFixed(1)} Z`;
-  const pick = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / (curve.length - 1)));
-    setHover(Math.max(0, Math.min(curve.length - 1, i)));
-  };
-  const h = hover !== null ? curve[hover] : null;
-  return (
-    <div style={{ position: "relative" }}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
-        aria-label={`Cumulative realized P&L over ${curve.length} closed trades, ending at ${money(curve[curve.length - 1].equity)}`}
-        onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
-        <line x1={pad.l} x2={W - pad.r} y1={y(0)} y2={y(0)} stroke="var(--line2)" strokeWidth="1" />
-        <path d={area} fill="var(--accent-soft)" />
-        <path d={line} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        {h && <>
-          <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={H - pad.b} stroke="var(--line2)" strokeWidth="1" />
-          <circle cx={x(hover)} cy={y(h.equity)} r="4" fill="var(--accent)" stroke="#fff" strokeWidth="2" />
-        </>}
-      </svg>
-      {h && (
-        <div className="chart-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
-          <b>{money(h.equity)}</b>
-          <span>{h.product}</span>
-          <span className={pc(h.pnl)}>{signed(h.pnl)} · {dt(h.ts)}</span>
-        </div>
-      )}
-      <div className="chart-foot">
-        <span>Oldest closed trade</span><span>Most recent</span>
-      </div>
-    </div>
-  );
-}
-
 // Magnitude with polarity: bars run left for a loss and right for a profit, and
 // every bar is labelled with its signed value, so colour is never the only cue.
 function DivergingBars({ rows, label = "row" }) {
@@ -2380,21 +2337,59 @@ function reconstruct(fills, settings, days) {
     const pf = portfolio(traded.filter((f) => new Date(f.ts) <= at), scoped, at);
     return {
       d,
-      byBroker: Object.fromEntries(pf.accounts.map((a) => [a.id, {
-        tne: Math.round(a.TNE),
-        im: Math.round(a.IM),
-        lots: Math.round(a.rows.reduce((t, r) => t + Math.abs(r.lots), 0) * 1e4) / 1e4,
-      }])),
+      byBroker: Object.fromEntries(pf.accounts.map((a) => {
+        const prod = {};
+        for (const r of a.rows) {
+          const lots = Math.abs(r.lots);
+          if (lots && r.product) prod[r.product] = (prod[r.product] || 0) + lots;
+        }
+        return [a.id, {
+          tne: Math.round(a.TNE),
+          im: Math.round(a.IM),
+          lots: Math.round(a.rows.reduce((t, r) => t + Math.abs(r.lots), 0) * 1e4) / 1e4,
+          prod,
+        }];
+      })),
     };
   });
 }
+
+
+/*
+ * Evenly spaced date labels along the foot of a chart.
+ *
+ * Two dates at the ends told you the range and nothing about the middle — no way to read
+ * when a drawdown started without counting pixels. Six or so, thinned to whatever fits the
+ * width, and always including the last day so the right edge is dated.
+ */
+function dateTicks(days, want = 6) {
+  if (days.length <= want) return days;
+  const step = Math.ceil(days.length / want);
+  const out = [];
+  for (let i = 0; i < days.length; i += step) out.push(days[i]);
+  const last = days[days.length - 1];
+  if (out[out.length - 1] !== last) {
+    // Replace rather than append when the last tick would collide with the end.
+    if ((days.length - 1) - days.indexOf(out[out.length - 1]) < step / 2) out.pop();
+    out.push(last);
+  }
+  return out;
+}
+
+const shortDay = (d) =>
+  new Date(endOfDay(d)).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const longDay = (d) =>
+  new Date(endOfDay(d)).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
 
 // Enough hues to tell four or five accounts apart, all of them at home next to
 // navy. Colour is never the only cue: every line is named in the legend and
 // again in the tooltip.
 const LINE_COLOURS = ["#1F4E8C", "#0E7A53", "#A86A0C", "#6B4FA8", "#C0313A"];
+// For stacked products, which need more of them and no red — red reads as a loss
+// everywhere else on this screen and a product is not a loss.
+const STACK_COLOURS = ["#1F4E8C", "#0E7A53", "#A86A0C", "#6B4FA8", "#2B7C9E", "#7A6A2E", "#4A5568", "#8C4F7A"];
 
-function MarginHistory({ fills, settings, view, history }) {
+function MarginHistory({ pf, fills, settings, view, history }) {
   const [metric, setMetric] = useState("ratio");
   const [hover, setHover] = useState(null);
 
@@ -2406,83 +2401,222 @@ function MarginHistory({ fills, settings, view, history }) {
     [rebuilt, history, brokers],
   );
 
+  /*
+   * Realized money is worked out here rather than read off the record.
+   *
+   * Closed trades are permanent and carry both the money and the moment, so this is exact
+   * for every day there has ever been — no reconstruction, no join, no caveat. It is the
+   * one series on this chart with nothing to apologise for.
+   */
+  const closed = useMemo(
+    () => pf.book.closed.filter((c) => view === "all" || c.broker === view),
+    [pf.book.closed, view],
+  );
+  const realized = useMemo(() => realizedByDay(closed, axis), [closed, axis]);
+
   const M = METRICS.find((m) => m.key === metric);
   const fmt = (v) => v === null || v === undefined || !isFinite(v) ? "—"
     : M.fmt === "money" ? money(v) : M.fmt === "ratio" ? ratioTxt(v) : qty(v);
 
-  // A line only counts once it has two points to join.
-  const drawn = lines
-    .map((l) => ({ ...l, vals: l.points.map((p) => ({ ...p, v: valueOf(p, metric) })).filter((p) => p.v !== null) }))
-    .filter((l) => l.vals.length > 1);
+  const W = 760, H = 240, pad = { l: 56, r: 12, t: 14, b: 40 };
+  const ticks3 = (lo, hi) => [lo, lo + (hi - lo) / 2, hi];
+  const xOf = (d, i0) => pad.l + (i0 * (W - pad.l - pad.r)) / Math.max(1, axis.length - 1);
+  const xi = Object.fromEntries(axis.map((d, i) => [d, i]));
+  const x = (d) => xOf(d, xi[d]);
 
-  if (axis.length < 2 || !drawn.length) return (
-    <div className="empty">
-      Not enough history yet. This chart needs at least two days with positions on the book —
-      either from fills you have already loaded, or from the daily record, which starts today.
+  const pick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / Math.max(1, axis.length - 1)));
+    setHover(axis[Math.max(0, Math.min(axis.length - 1, i))]);
+  };
+
+  const controls = (
+    <div className="hist-head">
+      <div className="hist-metrics" role="tablist" aria-label="What to plot">
+        {METRICS.map((m) => (
+          <button key={m.key} type="button" role="tab" aria-selected={m.key === metric}
+            className={m.key === metric ? "on" : undefined} onClick={() => { setMetric(m.key); setHover(null); }}>{m.label}</button>
+        ))}
+      </div>
     </div>
   );
 
-  const W = 760, H = 230, pad = { l: 54, r: 12, t: 14, b: 26 };
+  if (axis.length < 2) return (
+    <div>
+      {controls}
+      <div className="empty">
+        Not enough history yet. This chart needs at least two days with something on the
+        book — either from fills you have already loaded, or from the daily record, which
+        starts the first time you open RAMP after today.
+      </div>
+    </div>
+  );
+
+  const axisFoot = (
+    <>
+      {dateTicks(axis).map((d) => (
+        <text key={d} x={x(d)} y={H - 22} fontSize="10" textAnchor="middle" fill="var(--faint)">
+          {shortDay(d)}
+        </text>
+      ))}
+      <text x={pad.l} y={H - 7} fontSize="9" fill="var(--faint)">{longDay(axis[0])}</text>
+      <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">{longDay(axis[axis.length - 1])}</text>
+    </>
+  );
+
+  const joinMark = join && xi[join] !== undefined ? (
+    <g>
+      <line x1={x(join)} x2={x(join)} y1={pad.t - 4} y2={H - pad.b} stroke="var(--warn)" strokeWidth="1" strokeDasharray="3 3" />
+      <text x={x(join) + 4} y={pad.t + 4} fontSize="10" fill="var(--warn)">Daily record starts</text>
+    </g>
+  ) : null;
+
+  // ---------- lots: stacked by product ----------
+  if (M.stacked) {
+    const lotsAt = (d) => {
+      const out = {};
+      for (const l of lines) {
+        const p = l.points.find((q) => q.d === d);
+        if (!p) continue;
+        const prod = p.prod && Object.keys(p.prod).length ? p.prod : null;
+        if (prod) for (const [k, v] of Object.entries(prod)) out[k] = (out[k] || 0) + v;
+        // A day recorded before products were broken out still knows its total, so it is
+        // drawn as one block and named for what it is rather than dropped.
+        else if (p.lots) out["Not broken down"] = (out["Not broken down"] || 0) + p.lots;
+      }
+      return out;
+    };
+    const perDay = axis.map((d) => ({ d, prod: lotsAt(d) }));
+    const products = [...new Set(perDay.flatMap((r) => Object.keys(r.prod)))].sort();
+    const totalAt = (r) => Object.values(r.prod).reduce((t, v) => t + v, 0);
+    const hi = Math.max(1, ...perDay.map(totalAt));
+    const y = (v) => pad.t + (H - pad.t - pad.b) * (1 - v / hi);
+    const bw = Math.max(1.5, ((W - pad.l - pad.r) / Math.max(1, axis.length)) * 0.75);
+    const h = hover ? perDay.find((r) => r.d === hover) : null;
+
+    if (!products.length) return (
+      <div>{controls}<div className="empty">No lots were held on any day in this range.</div></div>
+    );
+
+    return (
+      <div>
+        {controls}
+        <div className="hist-legend stack">
+          {products.map((name, i) => (
+            <span key={name}><i style={{ background: STACK_COLOURS[i % STACK_COLOURS.length] }} />{name}</span>
+          ))}
+        </div>
+        <div style={{ position: "relative" }}>
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+            aria-label={`Lots held per day by product, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
+            onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+            {ticks3(0, hi).map((t, i) => (
+              <g key={i}>
+                <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" />
+                <text x={pad.l - 7} y={y(t) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{qty(Math.round(t * 100) / 100)}</text>
+              </g>
+            ))}
+            {joinMark}
+            {perDay.map((r) => {
+              let acc = 0;
+              return (
+                <g key={r.d}>
+                  {products.map((name, i) => {
+                    const v = r.prod[name] || 0;
+                    if (!v) return null;
+                    const y0 = y(acc + v), y1 = y(acc);
+                    acc += v;
+                    return <rect key={name} x={x(r.d) - bw / 2} y={y0} width={bw} height={Math.max(0.5, y1 - y0)}
+                      fill={STACK_COLOURS[i % STACK_COLOURS.length]} opacity={hover && hover !== r.d ? 0.45 : 1} />;
+                  })}
+                </g>
+              );
+            })}
+            {axisFoot}
+          </svg>
+          {/* A flat day still answers the question. Showing nothing where the bar has no
+              height reads as the chart having stopped working. */}
+          {h && (
+            <div className="chart-tip" style={{ left: `${(x(h.d) / W) * 100}%` }}>
+              <b>{longDay(h.d)}</b>
+              {totalAt(h) > 0 ? (
+                <>
+                  {products.filter((n) => h.prod[n]).map((n) => <span key={n}>{n} {qty(h.prod[n])}</span>)}
+                  <span className="tip-total">Total {qty(totalAt(h))} lots</span>
+                </>
+              ) : (
+                <span>Flat — nothing on the book</span>
+              )}
+            </div>
+          )}
+        </div>
+        <p className="hist-note">
+          Lots held at the close of each day, stacked by product. Broken down exactly:
+          how many lots were on the book is a fact about your fills, not something that
+          depended on a price nobody saved.
+        </p>
+      </div>
+    );
+  }
+
+  // ---------- everything else: one line per broker ----------
+  const valueAt = (l, d) => {
+    if (metric === "realized") {
+      const r = realized.get(d);
+      return r && r[l.id] !== undefined ? r[l.id] : null;
+    }
+    const p = l.points.find((q) => q.d === d);
+    return p ? valueOf(p, metric) : null;
+  };
+  const recordedAt = (l, d) => {
+    if (metric === "realized") return true;   // exact everywhere; see realizedByDay
+    const p = l.points.find((q) => q.d === d);
+    return p ? p.recorded : false;
+  };
+
+  const drawn = lines
+    .map((l) => ({ ...l, vals: axis.map((d) => ({ d, v: valueAt(l, d), recorded: recordedAt(l, d) })).filter((p) => p.v !== null) }))
+    .filter((l) => l.vals.length > 1);
+
+  if (!drawn.length) return (
+    <div>{controls}<div className="empty">Nothing to plot for this yet.</div></div>
+  );
+
   const all = drawn.flatMap((l) => l.vals.map((p) => p.v));
   let lo = Math.min(...all, metric === "ratio" ? Math.min(...all) : 0);
   let hi = Math.max(...all);
   if (hi === lo) { hi = lo + 1; lo -= 1; }
   const span = hi - lo;
-  const xi = Object.fromEntries(axis.map((d, i) => [d, i]));
-  const x = (d) => pad.l + (xi[d] * (W - pad.l - pad.r)) / (axis.length - 1);
   const y = (v) => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / span);
   const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${x(p.d).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
-  const ticks = [lo, lo + span / 2, hi];
-
-  const pick = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / (axis.length - 1)));
-    setHover(axis[Math.max(0, Math.min(axis.length - 1, i))]);
-  };
-  const dayLabel = (d) => new Date(endOfDay(d)).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
 
   return (
     <div>
-      <div className="hist-head">
-        <div className="hist-metrics" role="tablist" aria-label="What to plot">
-          {METRICS.map((m) => (
-            <button key={m.key} type="button" role="tab" aria-selected={m.key === metric}
-              className={m.key === metric ? "on" : undefined} onClick={() => setMetric(m.key)}>{m.label}</button>
-          ))}
-        </div>
-        <div className="hist-legend">
-          {drawn.map((l, i) => (
-            <span key={l.id}><i style={{ background: LINE_COLOURS[i % LINE_COLOURS.length] }} />{l.name}</span>
-          ))}
-        </div>
+      {controls}
+      <div className="hist-legend">
+        {drawn.map((l, i) => (
+          <span key={l.id}><i style={{ background: LINE_COLOURS[i % LINE_COLOURS.length] }} />{l.name}</span>
+        ))}
       </div>
-
       <div style={{ position: "relative" }}>
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
-          aria-label={`${M.label} per broker account, from ${dayLabel(axis[0])} to ${dayLabel(axis[axis.length - 1])}`}
+          aria-label={`${M.label} per broker account, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
           onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
-          {ticks.map((t, i) => (
+          {ticks3(lo, hi).map((t, i) => (
             <g key={i}>
               <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" />
               <text x={pad.l - 7} y={y(t) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{fmt(t)}</text>
             </g>
           ))}
-
-          {/* The join, drawn rather than smoothed over: the two sides of it are
-              worked out differently and a step here is the method changing, not
-              the account. */}
-          {join && xi[join] !== undefined && (
-            <g>
-              <line x1={x(join)} x2={x(join)} y1={pad.t - 4} y2={H - pad.b} stroke="var(--warn)" strokeWidth="1" strokeDasharray="3 3" />
-              <text x={x(join) + 4} y={pad.t + 4} fontSize="10" fill="var(--warn)">Daily record starts</text>
-            </g>
+          {metric !== "ratio" && lo < 0 && hi > 0 && (
+            <line x1={pad.l} x2={W - pad.r} y1={y(0)} y2={y(0)} stroke="var(--line2)" strokeWidth="1" />
           )}
+          {metric !== "realized" && joinMark}
 
           {drawn.map((l, i) => {
             const c = LINE_COLOURS[i % LINE_COLOURS.length];
             const back = l.vals.filter((p) => !p.recorded);
             const fwd = l.vals.filter((p) => p.recorded);
-            // One point of overlap so the halves meet instead of leaving a gap.
             const bridge = back.length && fwd.length ? [back[back.length - 1], fwd[0]] : [];
             return (
               <g key={l.id}>
@@ -2503,14 +2637,12 @@ function MarginHistory({ fills, settings, view, history }) {
               })}
             </g>
           )}
-
-          <text x={pad.l} y={H - 8} fontSize="10" fill="var(--faint)">{dayLabel(axis[0])}</text>
-          <text x={W - pad.r} y={H - 8} fontSize="10" textAnchor="end" fill="var(--faint)">{dayLabel(axis[axis.length - 1])}</text>
+          {axisFoot}
         </svg>
 
         {hover && (
           <div className="chart-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
-            <b>{dayLabel(hover)}</b>
+            <b>{longDay(hover)}</b>
             {drawn.map((l) => {
               const p = l.vals.find((q) => q.d === hover);
               return p ? <span key={l.id}>{l.name} {fmt(p.v)}{p.recorded ? "" : " · rebuilt"}</span> : null;
@@ -2520,10 +2652,104 @@ function MarginHistory({ fills, settings, view, history }) {
       </div>
 
       <p className="hist-note">
-        <b>Solid</b> is the daily record, written from your live figures, equity included.
-        {" "}<b>Dashed</b> is rebuilt from your fills: lots and margin come out exact, but equity there
-        is funding plus realized money only — nobody saved the prices you were marking open positions
-        at, so RAMP will not invent them. A step at the marker is the method changing, not the account.
+        {metric === "realized" ? (
+          <>Money actually taken, running total, by the day each trade closed. Exact for
+          every day on the chart — a closed trade carries its result and its timestamp, so
+          there is nothing here that had to be reconstructed.</>
+        ) : (
+          <><b>Solid</b> is the daily record, written from your live figures, equity included.
+          {" "}<b>Dashed</b> is rebuilt from your fills: lots and margin come out exact, but equity
+          there is funding plus realized money only — nobody saved the prices you were marking
+          open positions at, so RAMP will not invent them. A step at the marker is the method
+          changing, not the account.</>
+        )}
+      </p>
+    </div>
+  );
+}
+
+/*
+ * Winners and losers, per day.
+ *
+ * Counts, not money — the money is on the chart above. This answers a different question:
+ * was that a day of one bad trade, or a day when nothing worked? Two days with the same
+ * loss read very differently depending on the answer, and only one of them is a reason to
+ * stop trading.
+ *
+ * Diverging rather than truly stacked: wins up, losses down, off a shared zero. Stacking
+ * them in one column would make a 3-1 day and a 1-3 day the same height, which is exactly
+ * the comparison somebody is here to make.
+ */
+function WinLossDays({ pf, view }) {
+  const [hover, setHover] = useState(null);
+  const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
+  const rows = useMemo(() => winLossByDay(closed), [closed]);
+
+  if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
+
+  const W = 760, H = 190, pad = { l: 34, r: 12, t: 14, b: 40 };
+  const maxW = Math.max(1, ...rows.map((r) => r.wins));
+  const maxL = Math.max(1, ...rows.map((r) => r.losses));
+  const top = pad.t, bottom = H - pad.b;
+  // Zero sits proportionally, so one bad day does not squash every winning one flat.
+  const zero = top + (bottom - top) * (maxW / (maxW + maxL));
+  const yUp = (n) => zero - (zero - top) * (n / maxW);
+  const yDn = (n) => zero + (bottom - zero) * (n / maxL);
+  const days = rows.map((r) => r.d);
+  const x = (d) => pad.l + (days.indexOf(d) * (W - pad.l - pad.r)) / Math.max(1, days.length - 1);
+  const bw = Math.max(2, ((W - pad.l - pad.r) / Math.max(1, days.length)) * 0.6);
+
+  const pick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.round((((e.clientX - r.left) / r.width) * W - pad.l) / ((W - pad.l - pad.r) / Math.max(1, days.length - 1)));
+    setHover(days[Math.max(0, Math.min(days.length - 1, i))]);
+  };
+  const h = hover ? rows.find((r) => r.d === hover) : null;
+
+  return (
+    <div>
+      <div className="hist-legend">
+        <span><i style={{ background: "var(--ok)" }} />Winners</span>
+        <span><i style={{ background: "var(--bad)" }} />Losers</span>
+      </div>
+      <div style={{ position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+          aria-label={`Winning and losing trades per day, ${longDay(days[0])} to ${longDay(days[days.length - 1])}`}
+          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+          <line x1={pad.l} x2={W - pad.r} y1={zero} y2={zero} stroke="var(--line2)" strokeWidth="1" />
+          <text x={pad.l - 7} y={yUp(maxW) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{maxW}</text>
+          <text x={pad.l - 7} y={zero + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">0</text>
+          <text x={pad.l - 7} y={yDn(maxL) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{maxL}</text>
+
+          {rows.map((r) => (
+            <g key={r.d} opacity={hover && hover !== r.d ? 0.45 : 1}>
+              {r.wins > 0 && <rect x={x(r.d) - bw / 2} y={yUp(r.wins)} width={bw} height={Math.max(1, zero - yUp(r.wins))} fill="var(--ok)" />}
+              {r.losses > 0 && <rect x={x(r.d) - bw / 2} y={zero} width={bw} height={Math.max(1, yDn(r.losses) - zero)} fill="var(--bad)" />}
+            </g>
+          ))}
+
+          {hover && <line x1={x(hover)} x2={x(hover)} y1={top} y2={bottom} stroke="var(--line2)" strokeWidth="1" />}
+
+          {dateTicks(days).map((d) => (
+            <text key={d} x={x(d)} y={H - 22} fontSize="10" textAnchor="middle" fill="var(--faint)">{shortDay(d)}</text>
+          ))}
+          <text x={pad.l} y={H - 7} fontSize="9" fill="var(--faint)">{longDay(days[0])}</text>
+          <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">{longDay(days[days.length - 1])}</text>
+        </svg>
+
+        {h && (
+          <div className="chart-tip" style={{ left: `${(x(h.d) / W) * 100}%` }}>
+            <b>{longDay(h.d)}</b>
+            <span className="ok">{h.wins} won</span>
+            <span className="bad">{h.losses} lost</span>
+            {h.flat > 0 && <span>{h.flat} scratched</span>}
+            <span className="tip-total">{signed(h.net)} on the day</span>
+          </div>
+        )}
+      </div>
+      <p className="hist-note">
+        Every trade counted on the day it closed — that is the day the money was decided.
+        Only closed trades appear; an open position is not yet a winner or a loser.
       </p>
     </div>
   );
@@ -2542,10 +2768,22 @@ function AnalysisTab({ pf, settings, view, fills }) {
   const history = (
     <section className="panel">
       <div className="ph">
-        <h2>Equity, margin and lots<span className="dim">day by day, per account</span></h2>
+        <h2>Day by day<span className="dim">equity, margin, realized money and lots</span></h2>
         <span className="faint" style={{ fontSize: 11 }}>Recorded daily from today; earlier days rebuilt from your fills</span>
       </div>
-      <div className="pb"><MarginHistory fills={fills} settings={settings} view={view} history={settings.history} /></div>
+      <div className="pb">
+        <MarginHistory pf={pf} fills={fills} settings={settings} view={view} history={settings.history} />
+      </div>
+    </section>
+  );
+
+  const winLoss = (
+    <section className="panel">
+      <div className="ph">
+        <h2>Winners and losers<span className="dim">per day</span></h2>
+        <span className="faint" style={{ fontSize: 11 }}>Counted on the day each trade closed</span>
+      </div>
+      <div className="pb"><WinLossDays pf={pf} view={view} /></div>
     </section>
   );
 
@@ -2578,13 +2816,17 @@ function AnalysisTab({ pf, settings, view, fills }) {
         </div>
       </section>
 
+      {/*
+        One chart, one date axis.
+        ------------------------
+        The cumulative realized curve used to be its own panel plotted trade by trade,
+        which meant two pictures of the same fortnight that could not be read against each
+        other: a drawdown on one and the margin that caused it on the other, with no shared
+        x to line them up. It is a metric on the chart above now, by date like everything
+        else, and the peak and drawdown it used to caption are in the strip at the top.
+      */}
       {history}
-
-      <section className="panel">
-        <div className="ph"><h2>Cumulative realized P&amp;L<span className="dim">trade by trade</span></h2>
-          <span className="faint" style={{ fontSize: 11 }}>Peak {money(a.peak)}{a.maxDD ? ` · deepest fall from a peak ${money(-a.maxDD)}` : ""}</span></div>
-        <div className="pb"><EquityCurve curve={a.curve} /></div>
-      </section>
+      {winLoss}
 
       <div className="grid-settings">
         <section className="panel">

@@ -540,3 +540,9 @@ td.faded { opacity: .35; }
 .pw-eye:hover { color: var(--dim); }
 .signin-err-hint { display: block; margin-top: 6px; color: var(--dim); }
 .signin-err-hint b { color: var(--text); font-weight: 600; }
+
+/* Product names run long, so the stacked legend wraps onto its own lines rather
+   than squeezing the metric buttons. */
+.hist-legend.stack { margin: 0 0 8px; max-width: 100%; }
+.chart-tip .tip-total { margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(255,255,255,.25); }
+.chart-tip .ok { color: #7FE0B4; } .chart-tip .bad { color: #FF9DA5; }
