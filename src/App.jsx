@@ -514,6 +514,7 @@ const ADMIN_TABS = [
   { path: "/admin/customers", label: "Customers" },
   { path: "/admin/usage", label: "Usage" },
   { path: "/admin/codes", label: "Codes" },
+  { path: "/admin/payments", label: "Payments" },
   { path: "/admin/affiliates", label: "Affiliates" },
 ];
 
@@ -641,6 +642,7 @@ function AdminPage({ user, path }) {
       {tab.path === "/admin/customers" && <AdminCustomers rows={rows} busy={busy} onSet={setSub} onSaved={load} onRefresh={load} />}
       {tab.path === "/admin/usage" && <AdminUsage rows={rows} />}
       {tab.path === "/admin/codes" && <AdminCodes />}
+      {tab.path === "/admin/payments" && <AdminPayments />}
       {tab.path === "/admin/affiliates" && <AdminAffiliates />}
         </>
       )}
@@ -1151,6 +1153,204 @@ function AdminAffiliates() {
             </tbody>
           </table>
         </div>
+      </section>
+    </>
+  );
+}
+
+/*
+ * Payments, and whether the machinery that takes them is switched on.
+ *
+ * Both, on one screen, on purpose. "No payments yet" and "nobody could have paid" look
+ * identical from an empty table and call for completely different mornings, so this screen
+ * refuses to show the table without also showing the wiring.
+ *
+ * Two sets of books are shown side by side: Stripe's, which is authoritative, and ours,
+ * written by the webhook. When they disagree the webhook is the reason, and that is worth
+ * being able to see rather than deduce.
+ */
+function AdminPayments() {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try {
+      const r = await fetch("/api/admin/payments", { headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not read the payments.");
+      setData(body);
+    } catch (e) { setErr(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+  const minor = (v, cur) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "—";
+    if (!cur) return (n / 100).toFixed(2);
+    try { return new Intl.NumberFormat(undefined, { style: "currency", currency: cur }).format(n / 100); }
+    catch { return `${cur} ${(n / 100).toFixed(2)}`; }
+  };
+
+  if (err) return (
+    <section className="panel"><div className="pb">
+      <div className="signin-err" style={{ marginBottom: 10 }}>{err}</div>
+      <button className="btn" onClick={load}>Try again</button>
+    </div></section>
+  );
+  if (!data) return <section className="panel"><div className="pb dim">Loading…</div></section>;
+
+  const { config, counts, price, payments, totals, stripeError } = data;
+  const sc = config.stripe;
+
+  /*
+   * The headline verdict, in one sentence, before any number.
+   *
+   * A secret key with no price id cannot start a checkout; a price id with no webhook
+   * secret takes the money and never writes it down. Both are "half configured" and both
+   * are worth naming exactly rather than lumping into a red cross.
+   */
+  const verdict =
+    !sc.secretKey && !sc.priceId ? ["off", "Stripe is not connected. Nobody can pay yet."]
+    : !sc.secretKey ? ["off", "No secret key. Checkout cannot start."]
+    : !sc.priceId ? ["off", "No price set. Checkout has nothing to sell."]
+    : !sc.webhookSecret ? ["warn", "Payments can be taken, but nothing will be recorded."]
+    : sc.mode === "test" ? ["test", "Connected to Stripe in test mode. No real money moves."]
+    : ["on", "Connected to Stripe and taking live payments."];
+
+  return (
+    <>
+      <section className="panel">
+        <div className="ph">
+          <h2>Payment setup</h2>
+          <div className="admin-set">
+            {sc.mode && <span className={`badge ${sc.mode === "live" ? "live" : sc.mode === "test" ? "test" : "neutral"}`}>{sc.mode}</span>}
+            {!sc.configured && <span className="badge off">not connected</span>}
+            <button className="btn ghost" onClick={load}>Refresh</button>
+          </div>
+        </div>
+        <div className="pb">
+          <p style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 600, color: `var(--${verdict[0] === "on" ? "ok" : verdict[0] === "warn" || verdict[0] === "test" ? "warn" : "bad"})` }}>
+            {verdict[1]}
+          </p>
+
+          <div className="admin-status">
+            <div className="row">
+              <span className={`dot ${sc.secretKey ? "on" : "off"}`} />
+              <div className="what">
+                <b>Secret key {sc.secretKey ? "set" : "missing"}</b>
+                <span><code>STRIPE_SECRET_KEY</code> — lets the server create a checkout and read what has been paid.</span>
+              </div>
+            </div>
+            <div className="row">
+              <span className={`dot ${sc.priceId ? "on" : "off"}`} />
+              <div className="what">
+                <b>Price {sc.priceId ? "set" : "missing"}</b>
+                <span>
+                  <code>STRIPE_PRICE_ID</code> — what a subscription costs.{" "}
+                  {price ? <>Currently <b>{minor(price.amount_minor, price.currency)}</b> per {price.intervalCount > 1 ? `${price.intervalCount} ` : ""}{price.interval}{price.product ? ` · ${price.product}` : ""}.</>
+                    : "Held on the server so a price cannot be sent from a browser."}
+                </span>
+              </div>
+            </div>
+            <div className="row">
+              <span className={`dot ${sc.webhookSecret ? "on" : "warn"}`} />
+              <div className="what">
+                <b>Webhook secret {sc.webhookSecret ? "set" : "missing"}</b>
+                <span>
+                  <code>STRIPE_WEBHOOK_SECRET</code> — how we verify Stripe is really Stripe.
+                  {!sc.webhookSecret && " Without it every delivery is refused, so a customer could pay and still not be given access."}
+                </span>
+              </div>
+            </div>
+            <div className="row">
+              <span className={`dot ${config.email.configured ? "on" : "warn"}`} />
+              <div className="what">
+                <b>Email {config.email.configured ? "set up" : "not set up"}</b>
+                <span>
+                  <code>RESEND_API_KEY</code> and <code>NEXUS_EMAIL_FROM</code> — receipts, trial reminders and payment-failure notices.
+                  {!config.email.configured && " Nothing is being sent."}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="ph"><h2>Money<span className="sub">Stripe's record, not ours</span></h2></div>
+        <div className="admin-metrics">
+          <div className="metric"><label>Recurring / month</label>
+            <b className={totals?.mrr_minor ? "ok" : "faint"}>{totals?.mrr_minor != null ? minor(totals.mrr_minor, totals.mrrCurrency) : "—"}</b>
+            <span className="sub">{counts.active} active × the plan price. Not a forecast.</span></div>
+          <div className="metric"><label>Collected</label>
+            <b className={totals?.collected_minor ? "" : "faint"}>
+              {totals?.mixedCurrencies ? "mixed" : totals?.collected_minor != null ? minor(totals.collected_minor, totals.collectedCurrency) : "—"}
+            </b>
+            <span className="sub">{totals?.shown ? `Across the last ${totals.shown} invoices` : "No invoices yet"}</span></div>
+          <div className="metric"><label>Active subs</label><b className={counts.active ? "ok" : "faint"}>{counts.active}</b>
+            <span className="sub">{counts.onStripe} linked to Stripe</span></div>
+          <div className="metric"><label>Past due</label><b className={counts.past_due ? "bad" : "faint"}>{counts.past_due}</b>
+            <span className="sub">Payment failed, still in retry</span></div>
+          <div className="metric"><label>Trialing</label><b>{counts.trialing}</b>
+            <span className="sub">Not yet paying</span></div>
+          <div className="metric"><label>Cancelled</label><b className="faint">{counts.canceled}</b>
+            <span className="sub">Were paying, stopped</span></div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="ph">
+          <h2>Recent invoices<span className="sub">{payments.length ? `${payments.length} most recent` : ""}</span></h2>
+        </div>
+        {stripeError && <div className="pb"><div className="signin-err" style={{ margin: 0 }}>{stripeError}</div></div>}
+
+        {/*
+          * The empty state sits OUTSIDE the table, not in a cell spanning it.
+          *
+          * .tw scrolls horizontally so a wide table survives a phone, and anything inside
+          * it inherits that width — a centred message in a colspan cell ends up centred on
+          * the TABLE and half off the screen. Measured at 390px, where it was clipped.
+          */}
+        {payments.length === 0 ? (
+          <div className="admin-empty">
+            {!sc.configured
+              ? <><b>No payments, because payment is not switched on</b>
+                  The code is all here — checkout, the billing portal and the webhook.
+                  It needs the keys above before anybody can pay.</>
+              : <><b>No invoices yet</b>
+                  Stripe is connected and working. Nobody has been billed so far.</>}
+          </div>
+        ) : (
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th>Date</th><th className="txt">Invoice</th><th className="txt">Customer</th>
+              <th>Amount</th><th>Paid</th><th className="txt">For</th><th className="txt">Status</th><th className="txt"></th>
+            </tr></thead>
+            <tbody>
+              {payments.map((r) => (
+                <tr key={r.id}>
+                  <td className="num">{day(r.created)}</td>
+                  <td className="txt num">{r.number || "—"}</td>
+                  <td className="txt">{r.email || <span className="faint">—</span>}</td>
+                  <td className="num">{minor(r.amount_due_minor, r.currency)}</td>
+                  <td className="num">{minor(r.amount_paid_minor, r.currency)}</td>
+                  <td className="txt faint">{r.reason === "subscription_create" ? "first payment" : r.reason === "subscription_cycle" ? "renewal" : r.reason || "—"}</td>
+                  <td className="txt">
+                    <span className={`pill ${r.status === "paid" ? "ok" : r.status === "open" ? "warn" : r.status === "uncollectible" || r.status === "void" ? "bad" : "dim"}`}>{r.status || "—"}</span>
+                  </td>
+                  <td className="txt">
+                    {/* Stripe's own hosted invoice. Opening the real thing beats reproducing it badly. */}
+                    {r.url ? <a href={r.url} target="_blank" rel="noreferrer noopener">View</a> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        )}
       </section>
     </>
   );
