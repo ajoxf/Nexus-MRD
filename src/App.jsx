@@ -963,24 +963,10 @@ function Locked({ user, sub, onChanged }) {
             {busy ? "Setting it up…" : "Start my 14-day free trial"}
           </button>
         )}
-        {/*
-          No checkout yet, so no button pretending there is one.
-          ----------------------------------------------------
-          A "Subscribe" button that leads to a page nobody has written is worse than an
-          address to write to: the first wastes somebody's time and teaches them the
-          product is half-built, the second gets them what they want. This becomes a
-          checkout the day Stripe is wired up, and not a day before.
-        */}
+        <Subscribe />
+
         <div className="signin-or"><span>or use a code</span></div>
         <RedeemCode onDone={onChanged} />
-
-        <p className="note" style={{ marginTop: 10 }}>
-          {"To subscribe, email "}
-          <a href={`mailto:team@fincoursa.com?subject=${encodeURIComponent("Nexus RAMP subscription")}&body=${encodeURIComponent(`My account is ${user.email}.`)}`}>
-            team@fincoursa.com
-          </a>
-          {" "}and we will set you up.
-        </p>
 
         <p className="note">
           Signed in as {user.email}. Your data is safe either way — nothing here deletes anything.
@@ -988,6 +974,38 @@ function Locked({ user, sub, onChanged }) {
         <button type="button" className="linklike" onClick={() => auth.signOut()}>Sign out</button>
       </div>
     </SignInPage>
+  );
+}
+
+/*
+ * Pay by card.
+ *
+ * Falls back to an address rather than a dead button: until Stripe is configured the
+ * endpoint says so, and somebody who wants to pay gets a way to, instead of a control that
+ * does nothing and teaches them the product is half-finished.
+ */
+function Subscribe() {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const go = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch("/api/checkout", { method: "POST", headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not start checkout.");
+      // Stripe's page, not ours. Card details never touch this application.
+      window.location.href = body.url;
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <>
+      <button type="button" className="btn full portal-sso" onClick={go} disabled={busy} style={{ marginTop: 8 }}>
+        {busy ? "Opening…" : "Subscribe by card"}
+      </button>
+      {err && <div className="signin-err">{err}</div>}
+    </>
   );
 }
 
