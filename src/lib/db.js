@@ -26,6 +26,21 @@ const myId = async () => {
 };
 
 const remote = {
+  /*
+   * This account's subscription, or null if it has none.
+   *
+   * Readable only by its owner and writable only by the server — both enforced in Postgres
+   * rather than here, so editing the client cannot grant anybody anything. A missing row is
+   * a real answer ("nothing on this account"), not an error.
+   */
+  async loadSubscription() {
+    const { data, error } = await supabase
+      .from("subscriptions")
+      .select("status, current_period_end, trial_started_at, cancel_at_period_end, provider")
+      .maybeSingle();
+    if (error) throw error;
+    return data ?? null;
+  },
   async getUser() {
     const { data } = await supabase.auth.getSession();
     const u = data?.session?.user;
@@ -79,7 +94,8 @@ const remote = {
 };
 
 // ---------- Signing in and out ----------
-// Accounts are created by invitation in Supabase; there is no sign-up here.
+// Nexus keeps its own accounts now. Signing up, signing in, resetting a password and
+// holding a subscription all happen here — NordStar Pro is no longer in the path.
 export const auth = isRemote
   ? {
       enabled: true,
@@ -88,6 +104,33 @@ export const auth = isRemote
         if (error) throw error;
       },
       async signOut() { await supabase.auth.signOut(); },
+      async signUp(email, password) {
+        const { error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          // Back to this site after confirming, where the gate decides what they hold.
+          options: { emailRedirectTo: window.location.origin },
+        });
+        if (error) throw error;
+      },
+      async signInWithGoogle() {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: window.location.origin },
+        });
+        if (error) throw error;
+      },
+      /*
+       * The current session's access token, for calls to our own endpoints.
+       *
+       * Sent as a bearer token so a serverless function can ask Supabase who this is
+       * before it writes anything. Nothing here is trusted on the client's word: the
+       * subscription row is not writable from the browser at all.
+       */
+      async accessToken() {
+        const { data } = await supabase.auth.getSession();
+        return data?.session?.access_token ?? null;
+      },
       // Sends a link back to this site, where onAuthChange reports "recovery".
       async sendReset(email) {
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
@@ -133,7 +176,13 @@ export const auth = isRemote
         return () => data.subscription.unsubscribe();
       },
     }
-  : { enabled: false, onAuthChange: () => () => {}, adoptSessionFromUrl: async () => false };
+  : {
+      enabled: false,
+      onAuthChange: () => () => {},
+      adoptSessionFromUrl: async () => false,
+      accessToken: async () => null,
+      signOut: async () => {},
+    };
 
 // ---------- Browser storage (used until a database is connected) ----------
 const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills";
@@ -141,6 +190,12 @@ const readFills = () => JSON.parse(localStorage.getItem(LS_FILLS) || "[]");
 const writeFills = (f) => localStorage.setItem(LS_FILLS, JSON.stringify(f));
 
 const local = {
+  /*
+   * Browser-storage mode is the demo and the offline fallback. There is no subscription to
+   * read and nobody to bill, so it grants an open-ended one rather than locking the desk
+   * behind a payment screen that could not be completed anyway.
+   */
+  async loadSubscription() { return { status: "active", current_period_end: null, trial_started_at: null }; },
   async getUser() { return { id: "local", email: "This browser" }; },
   async loadSettings() { return JSON.parse(localStorage.getItem(LS_SETTINGS) || "null"); },
   async saveSettings(obj) { localStorage.setItem(LS_SETTINGS, JSON.stringify(obj)); },

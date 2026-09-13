@@ -3,6 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
+import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
@@ -366,7 +367,111 @@ export default function App() {
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
   if (!user) return <SignInPage><SignIn /></SignInPage>;
-  return <ConfirmHost><Tracker key={user.id} user={user} /></ConfirmHost>;
+  return <ConfirmHost><Gate key={user.id} user={user} /></ConfirmHost>;
+}
+
+/*
+ * Signed in is not the same as subscribed.
+ *
+ * Nexus decides its own access now, rather than only existing for people NordStar Pro had
+ * already vetted. Anyone can hold an account here; what an account holds is a separate
+ * question, and this is where it is asked.
+ *
+ * A refusal never touches the data. Somebody whose trial ran out still owns every fill
+ * they imported — they cannot open the desk until they subscribe, and the moment they do
+ * it is all exactly where they left it. Saying so on the screen is the difference between
+ * a payment prompt and a threat.
+ */
+function Gate({ user }) {
+  const [sub, setSub] = useState(undefined);
+  const [err, setErr] = useState(null);
+
+  const reload = useCallback(() => {
+    setErr(null);
+    db.loadSubscription().then(setSub).catch((e) => { setErr(e.message); setSub(null); });
+  }, []);
+  useEffect(reload, [reload]);
+
+  if (sub === undefined && !err) return <div className="auth dim">Checking your subscription…</div>;
+
+  /*
+   * A failed lookup is not a refusal.
+   *
+   * If the database cannot be reached, the honest answer is "we could not check", not "you
+   * do not have access" — locking a paying customer out of their own book because of a
+   * network blip is the worse of the two mistakes by a distance.
+   */
+  if (err) return (
+    <SignInPage>
+      <div className="signin-card">
+        <h2>Couldn't check your subscription</h2>
+        <p className="lede">This is on us, not on your account. Nothing has changed and your data is untouched.</p>
+        <div className="signin-err">{err}</div>
+        <button className="btn full" onClick={reload}>Try again</button>
+        <button type="button" className="linklike" onClick={() => auth.signOut()}>Sign out</button>
+      </div>
+    </SignInPage>
+  );
+
+  if (!hasAccess(sub)) return <Locked user={user} sub={sub} onChanged={reload} />;
+  return <Tracker user={user} sub={sub} />;
+}
+
+// What somebody sees when they are signed in but hold nothing.
+function Locked({ user, sub, onChanged }) {
+  const state = accessState(sub);
+  const copy = LOCKED_COPY[state] ?? LOCKED_COPY.none;
+  const offerTrial = canStartTrial(sub);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const startTrial = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch("/api/trial", { method: "POST", headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "That did not work. Please try again.");
+      onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <SignInPage>
+      <div className="signin-card">
+        <h2>{copy.title}</h2>
+        <p className="lede">{copy.body}</p>
+        {err && <div className="signin-err">{err}</div>}
+
+        {offerTrial && (
+          <button className="btn full" onClick={startTrial} disabled={busy}>
+            {busy ? "Setting it up…" : "Start my 14-day free trial"}
+          </button>
+        )}
+        <a className={`btn full ${offerTrial ? "portal-sso" : ""}`} href="/subscribe"
+          style={offerTrial ? { marginTop: 8 } : undefined}>
+          {offerTrial ? "Or subscribe now" : "Subscribe"}
+        </a>
+
+        <p className="note">
+          Signed in as {user.email}. Your data is safe either way — nothing here deletes anything.
+        </p>
+        <button type="button" className="linklike" onClick={() => auth.signOut()}>Sign out</button>
+      </div>
+    </SignInPage>
+  );
+}
+
+/*
+ * Proof of who is asking, for our own endpoints.
+ *
+ * The access token, not a cookie: the browser talks to a serverless function on this
+ * domain, which verifies the token with Supabase before writing anything. The row is not
+ * writable from here at all, which is the point — the server is the only thing that can
+ * grant a trial, so it is the only thing that can be wrong about one.
+ */
+async function authHeader() {
+  const token = await auth.accessToken();
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
 // The desk's front door: navy brand panel beside the form, stacking on a phone.
