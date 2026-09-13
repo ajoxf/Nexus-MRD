@@ -443,3 +443,44 @@ export function estimateSizes(fills) {
   }
   return out;
 }
+
+/**
+ * Turn a proposed column mapping into one that can safely be used.
+ *
+ * Pure, and separated from the endpoint that calls it, because this is the check standing
+ * between a suggestion and somebody's margin figures — so it runs on plain Node against
+ * worked examples in scripts/mapping-check.mjs rather than only in production.
+ *
+ * A schema-validated answer is well FORMED, not true. "Price" is a perfectly valid string
+ * whether or not this file has a column called Price. Three things are enforced here that
+ * no schema can:
+ *
+ *   - every header must actually exist in the file. A mapping pointing at a column that is
+ *     not there yields empty fills rather than an error, and empty fills are how a book
+ *     goes quietly wrong.
+ *   - one column cannot fill two fields. Mapping the same column to both qty and price
+ *     produces a plausible-looking import that is nonsense.
+ *   - anything dropped is counted and reported, never silently swallowed.
+ */
+export function sanitiseMapping(proposed, headers) {
+  const known = new Set((headers ?? []).filter((h) => typeof h === "string"));
+  const map = {};
+  const claimed = new Set();
+  const dropped = [];
+
+  for (const field of FIELDS) {
+    const h = proposed?.[field.key];
+    if (typeof h !== "string" || !h) continue;
+    if (!known.has(h)) { dropped.push({ key: field.key, header: h, why: "absent" }); continue; }
+    // First field to claim a column keeps it: FIELDS is in the order a statement is read,
+    // so the earlier field is the likelier owner.
+    if (claimed.has(h)) { dropped.push({ key: field.key, header: h, why: "taken" }); continue; }
+    claimed.add(h);
+    map[field.key] = h;
+  }
+
+  const dateFormat = ["auto", "DMY", "MDY"].includes(proposed?.dateFormat) ? proposed.dateFormat : "auto";
+  const confidence = ["high", "medium", "low"].includes(proposed?.confidence) ? proposed.confidence : "low";
+
+  return { map, dateFormat, confidence, dropped };
+}

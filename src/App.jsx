@@ -2690,6 +2690,15 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const [map, setMap] = useState({});
   const [dateFormat, setDateFormat] = useState("auto");
   const [savedLayout, setSavedLayout] = useState(false);
+  /*
+   * Column help, off by default and never automatic.
+   *
+   * Ticking it sends the column headers and three sample rows to our own server, which asks
+   * Claude which column is which. It never sends the book and it never lets a model touch a
+   * number — the fills are parsed here afterwards, the same way they always were.
+   */
+  const [aiHelp, setAiHelp] = useState(false);
+  const [aiState, setAiState] = useState(null);   // null | "asking" | {notes, confidence, dropped} | ["bad", msg]
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
@@ -2712,10 +2721,45 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     if (saved && Object.values(saved).every((h) => headers.includes(h))) { setMap(saved); setDateFormat(b.csv.dateFormat || "auto"); setSavedLayout(true); }
     else { setMap(guessMapping(headers)); setDateFormat("auto"); setSavedLayout(false); }
   };
+  /*
+   * Ask the server to propose a mapping.
+   *
+   * Proposes — it does not import. The selects below are filled in and the trader looks at
+   * them before anything is read, which is the point: a wrong guess costs a click rather
+   * than a wrong margin figure.
+   */
+  const askForMapping = async (headers, rows) => {
+    setAiState("asking");
+    try {
+      // Three rows. Enough to tell a price from a quantity; nothing like a position history.
+      const samples = rows.slice(0, 3).map((r) => headers.map((h) => r[h]));
+      const res = await fetch("/api/parse-statement", {
+        method: "POST", headers: await authHeader(), body: JSON.stringify({ headers, samples }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Could not work out the columns.");
+      if (!body.map || !Object.keys(body.map).length) throw new Error("Nothing recognisable came back. Map the columns by hand.");
+      setMap(body.map);
+      setDateFormat(body.dateFormat || "auto");
+      setSavedLayout(false);
+      setAiState({ notes: body.notes, confidence: body.confidence, dropped: body.dropped });
+    } catch (e) {
+      // Never fatal. The manual mapping below is untouched and still works.
+      setAiState(["bad", e.message]);
+    }
+  };
+
   const load = async (file) => {
     if (!file) return;
     setResult(null);
-    try { const { headers, rows } = await parseCsvFile(file); setCsv({ name: file.name, headers, rows }); applyLayout(headers, target); }
+    setAiState(null);
+    try {
+      const { headers, rows } = await parseCsvFile(file);
+      setCsv({ name: file.name, headers, rows });
+      applyLayout(headers, target);
+      // Only when asked, and only when the regexes have not already found a saved layout.
+      if (aiHelp) await askForMapping(headers, rows);
+    }
     catch (err) { setResult(["bad", `Couldn't read the file: ${err.message}`]); }
   };
   // Rows pasted from the TT Fills grid go through exactly the same reader as a file.
@@ -2726,9 +2770,10 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
       setCsv({ name: `${rows.length} pasted row${rows.length === 1 ? "" : "s"}`, headers, rows });
       applyLayout(headers, target);
       setPaste(null);
+      if (aiHelp) askForMapping(headers, rows);
     } catch (err) { setResult(["bad", `Couldn't read those rows: ${err.message}`]); }
   };
-  const reset = () => { setCsv(null); setIncludeManual(false); setSplit(true); setApplySizes(true); setSpreadMode("spread"); setImportCash(true); if (fileRef.current) fileRef.current.value = ""; };
+  const reset = () => { setCsv(null); setAiState(null); setIncludeManual(false); setSplit(true); setApplySizes(true); setSpreadMode("spread"); setImportCash(true); if (fileRef.current) fileRef.current.value = ""; };
   const resolveBroker = (raw) => { const v = raw.toLowerCase(); return brokers.find((b) => b.id.toLowerCase() === v || b.name.toLowerCase() === v)?.id || null; };
   // A file holding several broker accounts (e.g. two MT5 logins) is split into separate portal accounts,
   // because each account has its own margin level.
@@ -2856,6 +2901,42 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
           ) : (
             <>
               <div><b>{csv.name}</b> <span className="dim">· {csv.rows.length} rows</span>{savedLayout && <span className="ok" style={{ fontSize: 11, marginLeft: 6 }}>Using {tb.name}'s saved layout</span>}</div>
+
+              {/*
+                * Opt-in, and it says exactly what leaves the desk before it leaves.
+                *
+                * "Data is sent to a third party" buried in a policy is not consent; the
+                * sentence belongs next to the tick box, in the moment somebody decides.
+                */}
+              <label className="check">
+                <input type="checkbox" checked={aiHelp}
+                  onChange={(e) => {
+                    setAiHelp(e.target.checked);
+                    // Ticking it with a file already open runs it now rather than on the next import.
+                    if (e.target.checked && csv) askForMapping(csv.headers, csv.rows);
+                    if (!e.target.checked) setAiState(null);
+                  }} />
+                <span>Help AI understand the schema or format<br />
+                  <span className="faint">
+                    Sends the column headings and three sample rows to Anthropic to work out which
+                    column is which. Your fills, prices and positions are not sent, and nothing is
+                    imported until you have checked the columns below.
+                  </span>
+                </span>
+              </label>
+
+              {aiState === "asking" && <div className="dim" style={{ fontSize: 12 }}>Reading the columns…</div>}
+              {Array.isArray(aiState) && <div className="bad" style={{ fontSize: 12 }}>{aiState[1]} The columns below still work as they always did.</div>}
+              {aiState && !Array.isArray(aiState) && aiState !== "asking" && (
+                <div className={aiState.confidence === "high" ? "ok" : "warn"} style={{ fontSize: 12 }}>
+                  Columns suggested ({aiState.confidence} confidence). Check them before importing.
+                  {aiState.notes ? ` ${aiState.notes}` : ""}
+                  {/* A dropped column means a suggested heading was not in the file. Said out
+                      loud, because it is a reason to read the rest more carefully. */}
+                  {aiState.dropped > 0 && ` ${aiState.dropped} suggestion${aiState.dropped === 1 ? " was" : "s were"} discarded for naming a column this file does not have.`}
+                </div>
+              )}
+
               <div className="fg c2">
                 {FIELDS.map((fd) => (
                   <F key={fd.key} label={fd.label + (fd.required ? "" : " (opt.)")}>
