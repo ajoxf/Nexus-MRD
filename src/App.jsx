@@ -396,7 +396,7 @@ export default function App() {
    * billing problem while their own trial is expired, and locking the admin screens behind
    * the paywall is how a business locks itself out of its own controls.
    */
-  if (path === "/admin") return <ConfirmHost><AdminPage key={user.id} user={user} /></ConfirmHost>;
+  if (path.startsWith("/admin")) return <ConfirmHost><AdminPage key={user.id} user={user} path={path} /></ConfirmHost>;
   return <ConfirmHost><Gate key={user.id} user={user} /></ConfirmHost>;
 }
 
@@ -409,7 +409,18 @@ export default function App() {
  * happen to own the database is the kind of thing that has to be disclosed before it is
  * built, not discovered afterwards.
  */
-function AdminPage({ user }) {
+/*
+ * The tabs. Reports and Sections from the research admin have no meaning here — Nexus
+ * publishes nothing — and everything else does.
+ */
+const ADMIN_TABS = [
+  { path: "/admin", label: "Overview" },
+  { path: "/admin/customers", label: "Customers" },
+  { path: "/admin/usage", label: "Usage" },
+  { path: "/admin/codes", label: "Codes" },
+];
+
+function AdminPage({ user, path }) {
   const [allowed, setAllowed] = useState(undefined);
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState(null);
@@ -461,12 +472,21 @@ function AdminPage({ user }) {
     </SignInPage>
   );
 
+  const tab = ADMIN_TABS.find((t) => t.path === path) ?? ADMIN_TABS[0];
+  const go = (to) => (e) => {
+    e.preventDefault();
+    // pushState rather than a reload: the admin data is already in hand, and refetching it
+    // to change tab is a spinner nobody asked for. popstate in App puts the back button back.
+    window.history.pushState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+
   return (
     <div className="admin">
       <header className="admin-top">
         <div>
           <h1>Nexus admin</h1>
-          <p className="dim">Subscriptions. No customer's trading is shown here.</p>
+          <p className="dim">Subscriptions, codes and usage. No customer's trading is shown here.</p>
         </div>
         <div className="admin-who">
           <span className="dim">{user.email}</span>
@@ -474,34 +494,169 @@ function AdminPage({ user }) {
         </div>
       </header>
 
+      <nav className="admin-tabs" aria-label="Admin sections">
+        {ADMIN_TABS.map((t) => (
+          <a key={t.path} href={t.path} onClick={go(t.path)}
+            aria-current={t.path === tab.path ? "page" : undefined}>{t.label}</a>
+        ))}
+      </nav>
+
       {err && <div className="signin-err" style={{ margin: "0 0 12px" }}>{err}</div>}
 
-      <AdminCodes />
-
-      <section className="panel">
-        <div className="ph">
-          <h2>Accounts<span className="dim">{rows ? rows.length : ""}</span></h2>
-          <button className="btn ghost" onClick={load}>Refresh</button>
-        </div>
-        <div className="tw">
-          <table>
-            <thead><tr>
-              <th className="txt">Customer</th><th className="txt">Stage</th><th className="txt">Access</th>
-              <th>Runs until</th><th>Fills</th><th>Signed up</th><th>Last seen</th><th className="txt">Change</th>
-            </tr></thead>
-            <tbody>
-              {!rows && <tr><td colSpan={8} className="dim">Loading…</td></tr>}
-              {rows && rows.length === 0 && <tr><td colSpan={8} className="dim">No accounts yet.</td></tr>}
-              {rows?.map((row) => <AdminRow key={row.id} row={row} busy={busy === row.id} onSet={setSub} onSaved={load} />)}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      {tab.path === "/admin" && <AdminOverview rows={rows} onRefresh={load} />}
+      {tab.path === "/admin/customers" && <AdminCustomers rows={rows} busy={busy} onSet={setSub} onSaved={load} onRefresh={load} />}
+      {tab.path === "/admin/usage" && <AdminUsage rows={rows} />}
+      {tab.path === "/admin/codes" && <AdminCodes />}
     </div>
   );
 }
 
-const STAGES = ["new", "trialing", "evaluating", "committed", "paying", "at_risk", "lapsed", "lost"];
+/*
+ * The numbers somebody opens this page to see.
+ *
+ * All of them come from the one fetch the page already made — a separate endpoint per tile
+ * would be four round trips to count rows that are already in the browser.
+ */
+function AdminOverview({ rows, onRefresh }) {
+  if (!rows) return <div className="panel"><div className="pb dim">Loading…</div></div>;
+
+  const live = rows.filter((r) => hasAccess(r.sub));
+  const trialing = rows.filter((r) => accessState(r.sub) === "trialing");
+  const paying = rows.filter((r) => accessState(r.sub) === "active");
+  const cold = trialing.filter((r) => r.fills === 0);
+  const lapsed = rows.filter((r) => ["trial_over", "lapsed", "canceled"].includes(accessState(r.sub)));
+  const nothing = rows.filter((r) => accessState(r.sub) === "none");
+  // Soonest to run out, ignoring the open-ended: a comp with no end date is not "next".
+  const ending = live
+    .filter((r) => r.sub?.current_period_end)
+    .sort((a, b) => new Date(a.sub.current_period_end) - new Date(b.sub.current_period_end))
+    .slice(0, 5);
+  const day = (v) => new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
+
+  return (
+    <>
+      <section className="panel">
+        <div className="ph">
+          <h2>Where things stand</h2>
+          <button className="btn ghost" onClick={onRefresh}>Refresh</button>
+        </div>
+        <div className="strip">
+          <div className="kpi"><label>Accounts</label><b>{rows.length}</b></div>
+          <div className="kpi"><label>With access</label><b className="ok">{live.length}</b></div>
+          <div className="kpi"><label>Paying</label><b>{paying.length}</b></div>
+          <div className="kpi"><label>On trial</label><b>{trialing.length}</b>
+            {cold.length > 0 && <span className="faint" style={{ fontSize: 11 }}>{cold.length} imported nothing</span>}</div>
+          <div className="kpi"><label>Lapsed</label><b className={lapsed.length ? "bad" : ""}>{lapsed.length}</b></div>
+          <div className="kpi"><label>Signed up, nothing held</label><b>{nothing.length}</b></div>
+        </div>
+      </section>
+
+      {cold.length > 0 && (
+        <section className="panel">
+          <div className="ph"><h2>Trials that have not started<span className="dim">{cold.length}</span></h2>
+            <span className="faint" style={{ fontSize: 11 }}>Live trial, no fills imported — the ones to ring</span></div>
+          <div className="tw"><table>
+            <thead><tr><th className="txt">Customer</th><th>Days left</th><th>Signed up</th></tr></thead>
+            <tbody>{cold.map((r) => (
+              <tr key={r.id}>
+                <td className="txt">{r.crm?.full_name || r.email}</td>
+                <td className="num">{daysLeft(r.sub) ?? "—"}</td>
+                <td className="num">{day(r.createdAt)}</td>
+              </tr>
+            ))}</tbody>
+          </table></div>
+        </section>
+      )}
+
+      <section className="panel">
+        <div className="ph"><h2>Running out next</h2></div>
+        <div className="tw"><table>
+          <thead><tr><th className="txt">Customer</th><th className="txt">Holds</th><th>Runs until</th><th>Days left</th></tr></thead>
+          <tbody>
+            {ending.length === 0 && <tr><td colSpan={4} className="dim">Nothing with an end date.</td></tr>}
+            {ending.map((r) => (
+              <tr key={r.id}>
+                <td className="txt">{r.crm?.full_name || r.email}</td>
+                <td className="txt"><span className="pill ok">{accessState(r.sub)}</span></td>
+                <td className="num">{day(r.sub.current_period_end)}</td>
+                <td className="num">{daysLeft(r.sub) ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </section>
+    </>
+  );
+}
+
+/*
+ * How hard each account is using the product. Counts and dates only.
+ *
+ * The question this answers is "is this one real" — somebody with four thousand fills
+ * across three brokers is running their book here and will notice if it breaks; somebody
+ * with eleven from a fortnight ago is not, whatever their subscription says.
+ */
+function AdminUsage({ rows }) {
+  if (!rows) return <div className="panel"><div className="pb dim">Loading…</div></div>;
+  const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+  const ranked = [...rows].sort((a, b) => b.fills - a.fills);
+
+  return (
+    <section className="panel">
+      <div className="ph">
+        <h2>Usage<span className="dim">counts and dates only</span></h2>
+        <span className="faint" style={{ fontSize: 11 }}>No fill, price, size or position is shown</span>
+      </div>
+      <div className="tw"><table>
+        <thead><tr>
+          <th className="txt">Customer</th><th>Fills</th><th>Brokers</th><th>Products</th>
+          <th>First trade</th><th>Last trade</th><th>Last import</th><th>Last seen</th>
+        </tr></thead>
+        <tbody>
+          {ranked.map((r) => {
+            const u = r.usage;
+            return (
+              <tr key={r.id}>
+                <td className="txt">{r.crm?.full_name || r.email}</td>
+                <td className="num">{r.fills ? r.fills.toLocaleString() : <span className="faint">none</span>}</td>
+                <td className="num">{u ? Number(u.brokers) : "—"}</td>
+                <td className="num">{u ? Number(u.products) : "—"}</td>
+                <td className="num">{day(u?.first_fill)}</td>
+                <td className="num">{day(u?.last_fill)}</td>
+                <td className="num">{day(u?.last_import)}</td>
+                <td className="num">{day(r.lastSignInAt)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table></div>
+    </section>
+  );
+}
+
+function AdminCustomers({ rows, busy, onSet, onSaved, onRefresh }) {
+  return (
+    <section className="panel">
+      <div className="ph">
+        <h2>Customers<span className="dim">{rows ? rows.length : ""}</span></h2>
+        <button className="btn ghost" onClick={onRefresh}>Refresh</button>
+      </div>
+      <div className="tw">
+        <table>
+          <thead><tr>
+            <th className="txt">Customer</th><th className="txt">Stage</th><th className="txt">Access</th>
+            <th>Runs until</th><th>Fills</th><th>Signed up</th><th>Last seen</th><th className="txt">Change</th>
+          </tr></thead>
+          <tbody>
+            {!rows && <tr><td colSpan={8} className="dim">Loading…</td></tr>}
+            {rows && rows.length === 0 && <tr><td colSpan={8} className="dim">No accounts yet.</td></tr>}
+            {rows?.map((row) => <AdminRow key={row.id} row={row} busy={busy === row.id} onSet={onSet} onSaved={onSaved} />)}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 /*
  * Issue and track access codes.

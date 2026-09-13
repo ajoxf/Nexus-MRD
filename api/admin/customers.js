@@ -30,17 +30,16 @@ export default async function handler(request, response) {
     .select("user_id, full_name, firm, phone, stage, notes");
 
   /*
-   * How many fills each account has imported — a COUNT, never the fills.
+   * Whether each account is actually using the product — counts and dates, never a fill.
    *
-   * It is the difference between a trial going well and a trial going nowhere, and there is
-   * no way to see that from a subscription row: somebody eleven days into fourteen with
-   * nothing imported has not evaluated the product and is about to leave. The number says
-   * whether they got started. It says nothing about what they trade, at what price, or in
-   * what size, and this endpoint returns no row of anybody's book.
+   * It is the difference between a trial going well and one going nowhere: somebody eleven
+   * days into fourteen with nothing imported has not evaluated the product and is about to
+   * leave, and no subscription row shows that. How much and how recently, never what: not a
+   * price, not a size, not a product, not a position.
    */
-  const { data: fillCounts } = await db.rpc("admin_fill_counts");
-  const counts = new Map();
-  if (Array.isArray(fillCounts)) for (const row of fillCounts) counts.set(row.user_id, Number(row.n) || 0);
+  const { data: usageRows } = await db.rpc("admin_usage");
+  const usage = new Map();
+  if (Array.isArray(usageRows)) for (const row of usageRows) usage.set(row.user_id, row);
 
   const byUser = new Map((subs ?? []).map((s) => [s.user_id, s]));
   const byCrm = new Map((crm ?? []).map((c) => [c.user_id, c]));
@@ -53,7 +52,8 @@ export default async function handler(request, response) {
     // a missing one: it is the ordinary state of somebody who just signed up.
     sub: byUser.get(u.id) ?? null,
     crm: byCrm.get(u.id) ?? null,
-    fills: counts.get(u.id) ?? 0,
+    usage: usage.get(u.id) ?? null,
+    fills: Number(usage.get(u.id)?.fills ?? 0),
   }));
 
   customers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));

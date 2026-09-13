@@ -586,3 +586,8 @@ td.faded { opacity: .35; }
 .note.ok { color: var(--ok); font-weight: 600; }
 .admin-issue { display: grid; gap: 10px; }
 .admin-made textarea.in { height: auto; padding: 8px 10px; font-family: var(--num); line-height: 1.6; }
+.admin-tabs { display: flex; gap: 2px; overflow-x: auto; margin: 0 0 14px; border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.admin-tabs::-webkit-scrollbar { display: none; }
+.admin-tabs a { flex: none; padding: 8px 14px; font-size: 13px; color: var(--dim); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.admin-tabs a:hover { color: var(--text); }
+.admin-tabs a[aria-current="page"] { color: var(--navy); font-weight: 600; border-bottom-color: var(--accent); }
