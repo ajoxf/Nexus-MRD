@@ -482,6 +482,22 @@ export default function App() {
   // Before any early return: hooks have to run in the same order every render.
   useReferralCapture(user);
 
+  /*
+   * Copy the sign-up details into the CRM table, once, after signing in.
+   *
+   * It cannot happen at sign-up: there is no session then, and `customers` is writable by
+   * nobody but the server. So the details wait in user metadata until there is a token to
+   * prove who they belong to, which is the first authenticated load — usually straight
+   * after the confirmation link.
+   *
+   * Failure is swallowed on purpose. A name that did not sync is a row to tidy up later;
+   * it is never a reason to stand between somebody and their own book.
+   */
+  useEffect(() => {
+    if (!user || !isRemote) return;
+    auth.syncProfile().catch(() => {});
+  }, [user?.id]);
+
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
   if (!user) return <SignInPage><SignIn /></SignInPage>;
@@ -1688,6 +1704,9 @@ function SignInPage({ children }) {
 function SignIn() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [whatsapp, setWhatsapp] = useState("");
   const [mode, setMode] = useState("in");     // "in" | "up" | "forgot"
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -1698,7 +1717,7 @@ function SignIn() {
     setBusy(true); setErr(null);
     try {
       if (mode === "forgot") { await auth.sendReset(email); setSent(true); }
-      else if (mode === "up") { await auth.signUp(email, password); setSent("up"); }
+      else if (mode === "up") { await auth.signUp(email, password, { firstName, lastName, whatsapp }); setSent("up"); }
       else await auth.signIn(email, password);
     } catch (e2) {
       setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
@@ -1750,6 +1769,30 @@ function SignIn() {
         <input className="in" type="email" autoComplete="username" required autoFocus
           placeholder="you@firm.com" value={email} onChange={(e) => setEmail(e.target.value)} />
       </F>
+      {mode === "up" && (
+        <>
+          {/* Two columns: a first and last name are one question, not two, and stacking
+              them makes the form look longer than it is. */}
+          <div className="fg c2">
+            <F label="First name">
+              <input className="in" autoComplete="given-name" required
+                value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Dale" />
+            </F>
+            <F label="Last name">
+              <input className="in" autoComplete="family-name" required
+                value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Carver" />
+            </F>
+          </div>
+          {/*
+            * Optional, and it says why it is being asked rather than just "(optional)".
+            * A number given without a reason is a number somebody regrets giving.
+            */}
+          <F label="WhatsApp number" hint="Optional. Only for account updates — never for marketing, and you can remove it any time.">
+            <input className="in" type="tel" autoComplete="tel" inputMode="tel"
+              value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} placeholder="+44 7700 900000" />
+          </F>
+        </>
+      )}
       {mode !== "forgot" && (
         <F label={mode === "up" ? "Choose a password" : "Password"} hint={mode === "up" ? "At least 8 characters." : null}>
           <PasswordField autoComplete={mode === "up" ? "new-password" : "current-password"}

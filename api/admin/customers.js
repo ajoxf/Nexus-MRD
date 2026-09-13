@@ -27,7 +27,7 @@ export default async function handler(request, response) {
 
   const { data: crm } = await db
     .from("customers")
-    .select("user_id, full_name, firm, phone, stage, notes");
+    .select("user_id, full_name, first_name, last_name, whatsapp, firm, phone, stage, notes");
 
   /*
    * Whether each account is actually using the product — counts and dates, never a fill.

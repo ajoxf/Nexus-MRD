@@ -117,14 +117,49 @@ export const auth = isRemote
         if (error) throw error;
       },
       async signOut() { await supabase.auth.signOut(); },
-      async signUp(email, password) {
+      /*
+       * Sign up, carrying the details they gave with them.
+       *
+       * They travel as user metadata because at this moment there is no session to
+       * authenticate — the account is not confirmed and nobody is signed in. /api/profile
+       * copies them into the CRM table on the first authenticated load, which is the only
+       * thing that can write there.
+       *
+       * Metadata is user-writable, so it is trusted for a name and a number — theirs to
+       * state — and for nothing else. It grants no access and decides nothing.
+       */
+      async signUp(email, password, details = {}) {
         const { error } = await supabase.auth.signUp({
           email: email.trim(),
           password,
-          // Back to this site after confirming, where the gate decides what they hold.
-          options: { emailRedirectTo: window.location.origin },
+          options: {
+            // Back to this site after confirming, where the gate decides what they hold.
+            emailRedirectTo: window.location.origin,
+            data: {
+              first_name: (details.firstName ?? "").trim() || undefined,
+              last_name: (details.lastName ?? "").trim() || undefined,
+              whatsapp: (details.whatsapp ?? "").trim() || undefined,
+            },
+          },
         });
         if (error) throw error;
+      },
+      /*
+       * Push the signed-in account's details into the CRM table.
+       *
+       * Fire and forget from the caller's point of view: a name that failed to sync is a
+       * thing to fix later, never a reason to keep somebody out of their own book.
+       */
+      async syncProfile(body = {}) {
+        const token = await this.accessToken();
+        if (!token) return null;
+        const r = await fetch("/api/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Could not save your details.");
+        return r.json();
       },
       async signInWithGoogle() {
         const { error } = await supabase.auth.signInWithOAuth({
@@ -194,6 +229,7 @@ export const auth = isRemote
       onAuthChange: () => () => {},
       adoptSessionFromUrl: async () => false,
       accessToken: async () => null,
+      syncProfile: async () => null,
       signOut: async () => {},
     };
 
