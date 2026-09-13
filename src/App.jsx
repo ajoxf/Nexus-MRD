@@ -5,6 +5,7 @@ import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
+import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
@@ -337,6 +338,98 @@ const F = ({ label, hint, children }) => <label className="f">{label}{children}{
 const Side = ({ s }) => <span className={`side ${s === "Long" || s === "Buy" ? "long" : "short"}`}>{s}</span>;
 
 // =====================================================================
+/*
+ * Referral capture: the link, then the claim.
+ *
+ * Two moments, minutes or weeks apart, and the gap between them is the whole problem. The
+ * link is opened by somebody with no account — there is nobody to attribute anything to
+ * yet. The account appears later, on a different page, often after a round trip through a
+ * confirmation email that drops every query string on the way.
+ *
+ * So the code is parked in localStorage when the link is opened and claimed once an
+ * account exists. Not a cookie: this is one device remembering one click for its own use,
+ * it is never sent to anybody but our own endpoint, and it does not need to survive being
+ * read by a third party's script.
+ */
+const REF_STORE = "nexus:ref";
+
+/** The parked code, if there is one and it has not gone stale. */
+function storedRef() {
+  try {
+    const parked = JSON.parse(localStorage.getItem(REF_STORE) || "null");
+    if (!parked || !looksLikeRef(parked.code)) return null;
+    /*
+     * Checked here as well as on the server. The server is the one that decides — this
+     * only stops us posting a claim we already know is a month past the window.
+     */
+    if (!refStillValid(parked.at)) { localStorage.removeItem(REF_STORE); return null; }
+    return parked;
+  } catch { return null; }
+}
+
+function useReferralCapture(user) {
+  // Half one: somebody arrived on a link.
+  useEffect(() => {
+    const code = normaliseRef(new URLSearchParams(window.location.search).get("ref"));
+    if (!looksLikeRef(code)) return;
+
+    /*
+     * First touch wins here too, before the server ever sees it. Someone who clicked
+     * Cameron's link in March and Dale's in April belongs to Cameron, and overwriting the
+     * parked code would quietly hand the credit to whoever sent the most recent email.
+     */
+    if (!storedRef()) {
+      try { localStorage.setItem(REF_STORE, JSON.stringify({ code, at: new Date().toISOString() })); } catch { /* private mode; the visit still counts */ }
+    }
+
+    // Recorded as a visit. Fire and forget: a referral nobody can count is a small loss,
+    // a sign-in page that will not load because an analytics call failed is a large one.
+    fetch("/api/ref", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    }).catch(() => {});
+
+    /*
+     * Out of the address bar once it is stored.
+     *
+     * A ?ref= that lingers gets bookmarked, pasted into chat and shared around, and every
+     * person who follows that copy is credited to an affiliate who never spoke to them.
+     */
+    const url = new URL(window.location.href);
+    url.searchParams.delete("ref");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }, []);
+
+  // Half two: there is now an account to attach it to.
+  useEffect(() => {
+    if (!user || !isRemote) return;
+    const parked = storedRef();
+    if (!parked) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/ref", {
+          method: "POST",
+          headers: await authHeader(),
+          body: JSON.stringify({ code: parked.code, capturedAt: parked.at }),
+        });
+        const body = await r.json().catch(() => ({}));
+        /*
+         * Cleared when the question is settled either way — claimed, or already belonging
+         * to somebody else. Left in place only if the request itself failed, so a flaky
+         * connection on signup day does not cost the affiliate the sale.
+         */
+        if (!cancelled && r.ok && (body.claimed || body.reason === "already_attributed" || body.known === false)) {
+          localStorage.removeItem(REF_STORE);
+        }
+      } catch { /* try again next sign-in */ }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id]);
+}
+
 export default function App() {
   const [user, setUser] = useState(undefined);
   // Set when you arrive from a password-reset email: the link has already signed
@@ -386,6 +479,9 @@ export default function App() {
     return () => { cancelled = true; stop(); };
   }, []);
 
+  // Before any early return: hooks have to run in the same order every render.
+  useReferralCapture(user);
+
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
   if (!user) return <SignInPage><SignIn /></SignInPage>;
@@ -418,6 +514,7 @@ const ADMIN_TABS = [
   { path: "/admin/customers", label: "Customers" },
   { path: "/admin/usage", label: "Usage" },
   { path: "/admin/codes", label: "Codes" },
+  { path: "/admin/affiliates", label: "Affiliates" },
 ];
 
 function AdminPage({ user, path }) {
@@ -507,6 +604,7 @@ function AdminPage({ user, path }) {
       {tab.path === "/admin/customers" && <AdminCustomers rows={rows} busy={busy} onSet={setSub} onSaved={load} onRefresh={load} />}
       {tab.path === "/admin/usage" && <AdminUsage rows={rows} />}
       {tab.path === "/admin/codes" && <AdminCodes />}
+      {tab.path === "/admin/affiliates" && <AdminAffiliates />}
     </div>
   );
 }
@@ -766,6 +864,234 @@ function AdminCodes() {
         </table>
       </div>
     </section>
+  );
+}
+
+/*
+ * The affiliate programme.
+ *
+ * Three questions on one screen, because they are asked together: who is sending people,
+ * whether those people convert, and what is owed as a result. The rewards table underneath
+ * is the ledger — it is what somebody gets paid from, so it shows the rate that applied at
+ * the time rather than the rate on the affiliate today.
+ */
+function AdminAffiliates() {
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [made, setMade] = useState(null);
+
+  /*
+   * reward_value starts EMPTY, and stays empty until somebody types a number.
+   *
+   * Not 20, not 10, not a placeholder that looks like a suggestion. The database refuses a
+   * rate it was not given and so does the endpoint; prefilling the form would defeat both
+   * of them from the one place a person is actually deciding. A rate nobody typed is a
+   * commission nobody agreed to pay.
+   */
+  const BLANK = { name: "", email: "", reward_kind: "percent", reward_value: "", reward_scope: "first", code: "", note: "" };
+  const [d, setD] = useState(BLANK);
+  const set = (k) => (e) => setD((x) => ({ ...x, [k]: e.target.value }));
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch("/api/admin/affiliates", { headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not read the affiliates.");
+      setData(body);
+    } catch (e) { setErr(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    setBusy(true); setErr(null); setMade(null);
+    try {
+      const r = await fetch("/api/admin/affiliates", {
+        method: "POST", headers: await authHeader(),
+        body: JSON.stringify({
+          name: d.name, email: d.email, reward_kind: d.reward_kind,
+          // Sent as typed. Empty stays empty so the server can refuse it rather than
+          // receiving a 0 this screen invented on the operator's behalf.
+          reward_value: String(d.reward_value).trim(),
+          reward_scope: d.reward_scope, code: d.code, note: d.note,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not create that affiliate.");
+      setMade(body.code);
+      setD(BLANK);
+      await load();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const setStatus = async (patch) => {
+    setErr(null);
+    try {
+      const r = await fetch("/api/admin/affiliates", {
+        method: "PATCH", headers: await authHeader(), body: JSON.stringify(patch),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not update that.");
+      await load();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+
+  /*
+   * Minor units to something readable, in the currency that was recorded with it.
+   *
+   * Never the desk's display currency: this is what was actually taken, and restating a
+   * euro payment in dollars at today's rate would make the ledger disagree with the
+   * invoice it came from.
+   */
+  const minor = (v, cur) => {
+    const n = Number(v) || 0;
+    if (!cur) return (n / 100).toFixed(2);
+    try { return new Intl.NumberFormat(undefined, { style: "currency", currency: cur }).format(n / 100); }
+    catch { return `${cur} ${(n / 100).toFixed(2)}`; }
+  };
+
+  const affiliates = data?.affiliates ?? null;
+  const rewards = data?.rewards ?? [];
+  const live = (affiliates ?? []).filter((a) => a.status === "active").length;
+
+  return (
+    <>
+      <section className="panel">
+        <div className="ph">
+          <h2>Affiliates<span className="dim">{affiliates ? `${live} active of ${affiliates.length}` : ""}</span></h2>
+          <button className="btn ghost" onClick={() => { setOpen((v) => !v); setErr(null); }}>{open ? "Close" : "New affiliate"}</button>
+        </div>
+
+        {open && (
+          <div className="pb admin-issue">
+            <div className="fg c2">
+              <F label="Name"><input className="in" value={d.name} onChange={set("name")} placeholder="Who they are" /></F>
+              <F label="Email (optional)" hint="Used to catch self-referrals"><input className="in" type="email" value={d.email} onChange={set("email")} placeholder="them@firm.com" /></F>
+              <F label="Reward type">
+                <select className="in" value={d.reward_kind} onChange={set("reward_kind")}>
+                  <option value="percent">Percentage of the payment</option>
+                  <option value="fixed">Fixed amount per conversion</option>
+                  <option value="free_months">Free months on their own account</option>
+                </select>
+              </F>
+              <F
+                label={d.reward_kind === "percent" ? "Rate (%)" : d.reward_kind === "free_months" ? "Months" : "Amount (minor units)"}
+                hint="Required. There is no default."
+              >
+                <input className="in" type="number" min="0" step="any" value={d.reward_value}
+                  onChange={set("reward_value")} placeholder="" />
+              </F>
+              <F label="Earned on" hint={d.reward_kind === "free_months" ? "Free months are granted once per conversion" : "Every payment means for as long as they keep paying"}>
+                <select className="in" value={d.reward_scope} onChange={set("reward_scope")}>
+                  <option value="first">The first payment only</option>
+                  <option value="recurring">Every payment</option>
+                </select>
+              </F>
+              <F label="Code (optional)" hint="Blank generates one"><input className="in" value={d.code} onChange={set("code")} placeholder="REF-7K4P" /></F>
+            </div>
+            <F label="Note (optional)" hint="The deal as agreed. Internal."><input className="in" value={d.note} onChange={set("note")} /></F>
+            {err && <div className="signin-err">{err}</div>}
+            <div className="admin-set">
+              <button className="btn" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create affiliate"}</button>
+            </div>
+            {made && (
+              <div className="admin-made">
+                <p className="dim">Created. Their link:</p>
+                <textarea className="in" readOnly rows={1} value={`${window.location.origin}/?ref=${made}`}
+                  onFocus={(e) => e.target.select()} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {err && !open && <div className="pb"><div className="signin-err">{err}</div></div>}
+
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th className="txt">Code</th><th className="txt">Name</th><th className="txt">Terms</th>
+              <th>Visits</th><th>Signed up</th><th>Converted</th><th>Owed</th><th>Paid</th>
+              <th className="txt">Status</th><th className="txt"></th>
+            </tr></thead>
+            <tbody>
+              {!affiliates && <tr><td colSpan={10} className="dim">Loading…</td></tr>}
+              {affiliates?.length === 0 && (
+                <tr><td colSpan={10} className="dim">No affiliates yet. Create one and share its link.</td></tr>
+              )}
+              {affiliates?.map((a) => (
+                <tr key={a.code}>
+                  <td className="txt num">{a.code}</td>
+                  <td className="txt">{a.name}{a.note && <div className="faint" style={{ fontSize: 11 }}>{a.note}</div>}</td>
+                  <td className="txt">{describeTerms(a)}</td>
+                  <td className="num">{a.counts.visits}</td>
+                  <td className="num">{a.counts.signups}</td>
+                  <td className="num">{a.counts.conversions}</td>
+                  {/* Free months are not money and are not printed as if they were. */}
+                  <td className="num">{a.tally.months ? `${a.tally.months} mo` : minor(a.tally.owed, a.currency)}</td>
+                  <td className="num">{a.tally.months ? "—" : minor(a.tally.paid, a.currency)}</td>
+                  <td className="txt">
+                    <span className={`pill ${a.status === "active" ? "ok" : "dim"}`}>{a.status}</span>
+                  </td>
+                  <td className="txt">
+                    <select className="in" value={a.status} onChange={(e) => setStatus({ code: a.code, status: e.target.value })}>
+                      <option value="active">active</option>
+                      <option value="paused">paused</option>
+                      <option value="closed">closed</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="ph">
+          <h2>Commission ledger<span className="dim">{rewards.length ? `${rewards.length} entries` : ""}</span></h2>
+        </div>
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th>Earned</th><th className="txt">Affiliate</th><th className="txt">Rate applied</th>
+              <th>Paid by customer</th><th>Commission</th><th className="txt">For</th><th className="txt">Status</th><th className="txt"></th>
+            </tr></thead>
+            <tbody>
+              {rewards.length === 0 && (
+                <tr><td colSpan={8} className="dim">Nothing earned yet. Entries appear when a referred account pays.</td></tr>
+              )}
+              {rewards.map((r) => (
+                <tr key={r.id}>
+                  <td className="num">{day(r.created_at)}</td>
+                  <td className="txt num">{r.affiliate_code}</td>
+                  {/* The rate AS IT WAS, copied into the ledger when this was earned. Changing
+                      an affiliate's terms today does not move this number. */}
+                  <td className="txt">
+                    {r.kind === "percent" ? `${Number(r.rate)}%` : r.kind === "free_months" ? `${Number(r.rate)} months` : minor(r.rate * 100, r.currency)}
+                  </td>
+                  <td className="num">{r.basis_minor == null ? "—" : minor(r.basis_minor, r.currency)}</td>
+                  <td className="num">{r.kind === "free_months" ? `${r.amount_minor} mo` : minor(r.amount_minor, r.currency)}</td>
+                  <td className="txt faint">{r.period_ref === "first" ? "first payment" : day(r.period_ref)}</td>
+                  <td className="txt">
+                    <span className={`pill ${r.status === "paid" ? "ok" : r.status === "void" ? "dim" : ""}`}>{r.status}</span>
+                  </td>
+                  <td className="txt">
+                    <select className="in" value={r.status} onChange={(e) => setStatus({ rewardId: r.id, status: e.target.value })}>
+                      <option value="owed">owed</option>
+                      <option value="paid">paid</option>
+                      <option value="void">void</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
   );
 }
 

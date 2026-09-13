@@ -2,6 +2,7 @@ import { HANDLED_EVENTS, rowFromStripe } from "../src/lib/billing.js";
 import { json, serviceClient } from "./_supabase.js";
 import { rawBody, stripeClient } from "./_stripe.js";
 import { sendOnce } from "./_email.js";
+import { creditReferral } from "./_affiliates.js";
 
 /*
  * Vercel parses JSON bodies for you. Stripe signs the exact bytes it sent, and a
@@ -135,6 +136,18 @@ export default async function handler(request, response) {
           data: { url: `${site}/` },
         });
       }
+    }
+
+    /*
+     * Commission, after the subscription row and after the email.
+     *
+     * Last on purpose: this is the only part of the webhook that can be skipped without
+     * anybody losing access to anything they paid for, so it goes where a failure costs
+     * the least. It is also the only part that must not run on a subscription that merely
+     * turned active — a redeemed code is not a payment, and a share of nothing is nothing.
+     */
+    if (event.type === "invoice.payment_succeeded") {
+      await creditReferral(db, { userId, invoice: object, subscription, buyerEmail: to });
     }
 
     return json(response, 200, { ok: true, status: row.status });
