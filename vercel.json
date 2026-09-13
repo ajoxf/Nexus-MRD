@@ -1,10 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    {
-      "//": "Everything that is not a file and not an endpoint serves the app, so /admin and /subscribe are real addresses rather than 404s. The negative lookahead on api/ matters: without it the rewrite would swallow the serverless functions and every endpoint would return the HTML page instead.",
-      "source": "/((?!api/).*)",
-      "destination": "/index.html"
-    }
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

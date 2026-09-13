@@ -344,9 +344,17 @@ export default function App() {
   /*
    * The address bar is the router.
    *
-   * A router library would be four hundred kilobytes to tell two paths apart. Vercel serves
-   * index.html for every non-endpoint path (see vercel.json), so this reads which one was
-   * asked for and the back button keeps working.
+   * A router library would be four hundred kilobytes to tell two paths apart. This reads
+   * which path was asked for, and the back button keeps working.
+   *
+   * It only works because vercel.json rewrites every path that is not an endpoint to
+   * index.html — without that, /admin is a file Vercel does not have and it answers 404.
+   * The negative lookahead on api/ in that rewrite is what keeps the serverless functions
+   * reachable; swallow those and every endpoint returns this HTML page instead.
+   *
+   * That file cannot carry a comment of its own: JSON has none, and Vercel rejects a
+   * rewrite object with an unknown key — which is exactly how /admin 404'd the first time
+   * it shipped. scripts/vercel-check.mjs now fails the build for it instead.
    */
   const [path, setPath] = useState(() => window.location.pathname.replace(/\/+$/, "") || "/");
   useEffect(() => {
