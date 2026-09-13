@@ -2877,6 +2877,11 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
 
       <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
 
+      {/* Only where there is an account to close. In browser-storage mode there is no
+          server, no subscription and nobody to ask — "delete all fills" above is already
+          the whole of it. */}
+      {isRemote && <CloseAccountPanel fills={fills} brokers={settings.brokers} />}
+
       {settings.brokers.map((b) => (
         <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
           setSettings={setSettings} />
@@ -3056,6 +3061,100 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
 }
 
 // ---------- reset / delete data ----------
+/*
+ * Closing the account for good.
+ *
+ * Kept apart from "delete or reset data" above, and deliberately not a tidy little button
+ * beside it. Those controls clear a bad upload and you carry on trading; this one ends the
+ * relationship, and the two should never be one mis-click apart.
+ *
+ * Three gates before anything happens: read what goes and what stays, type the word, then
+ * confirm. That is more friction than a delete usually deserves — which is the point, for
+ * the one action in Nexus that cannot be walked back.
+ */
+function CloseAccountPanel({ fills, brokers }) {
+  const ask = useConfirm();
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const armed = typed.trim().toUpperCase() === "DELETE";
+
+  const close = async () => {
+    if (!armed) return;
+    setErr(null);
+
+    const { ok, checked } = await ask({
+      title: "Delete your account and everything in it?",
+      body: `Your ${fills.length} fill${fills.length === 1 ? "" : "s"}, every broker account, your limits, your funds ledger and your settings will be deleted. Any subscription is cancelled straight away.`,
+      detail: "We keep the record of payments you have made, because tax law requires it. Everything else goes. This cannot be undone, and we cannot recover it for you afterwards.",
+      checkbox: { label: "Download a CSV backup of my fills first", defaultChecked: true },
+      confirmLabel: "Delete my account",
+      tone: "danger",
+    });
+    if (!ok) return;
+
+    /*
+     * The backup is written before the request goes, not after it comes back. Afterwards
+     * there is no session left to fetch anything with, and a backup that depends on the
+     * deletion succeeding is not a backup.
+     */
+    if (checked && fills.length) downloadBackup(fills, brokers, "all");
+
+    setBusy(true);
+    try {
+      const r = await fetch("/api/account", {
+        method: "DELETE", headers: await authHeader(), body: JSON.stringify({ confirm: "DELETE" }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not delete your account.");
+
+      /*
+       * Signed out from this browser too. The account is banned server-side so the token
+       * is already worthless, but leaving a dead session in localStorage means the next
+       * page load spends a moment pretending to be signed in to nothing.
+       */
+      await auth.signOut();
+      window.location.href = "/";
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <section className="panel reset">
+      <div className="ph">
+        <h2>Close your account</h2>
+        <span className="faint" style={{ fontSize: 11 }}>Permanent. Not the same as cancelling.</span>
+      </div>
+      <div className="pb fg">
+        <p className="dim" style={{ fontSize: 12, margin: 0 }}>
+          <b>Deleted:</b> every fill, every broker account, your limits, prices, scenario settings
+          and funds ledger, any notes we hold about you, and the record of emails we have sent you.
+        </p>
+        <p className="dim" style={{ fontSize: 12, margin: 0 }}>
+          {/* Said plainly and up front rather than buried in a policy. Somebody asking to be
+              erased is entitled to know what survives and why, before they decide. */}
+          <b>Kept:</b> the record of payments you have made. Tax rules require us to hold it,
+          and it is what lets us answer your bank if a charge is ever disputed. It contains
+          what you paid and when — no trades, and nothing from your book.
+        </p>
+        <p className="dim" style={{ fontSize: 12, margin: 0 }}>
+          If you only want to stop paying, cancel your subscription instead — your data stays
+          and you can come back to it.
+        </p>
+        <div className="sep" style={{ margin: "4px 0" }} />
+        <F label="Type DELETE to confirm" hint="Case-insensitive. Nothing happens until you press the button.">
+          <input className="in" value={typed} onChange={(e) => { setTyped(e.target.value); setErr(null); }}
+            placeholder="DELETE" autoComplete="off" spellCheck={false} />
+        </F>
+        {err && <div className="signin-err">{err}</div>}
+        <button className="btn danger" disabled={!armed || busy} onClick={close}>
+          {busy ? "Deleting…" : "Delete my account"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ResetPanel({ settings, setSettings, fills, reloadFills }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
