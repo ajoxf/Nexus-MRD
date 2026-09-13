@@ -4,6 +4,7 @@ import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
+import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
@@ -475,6 +476,8 @@ function AdminPage({ user }) {
 
       {err && <div className="signin-err" style={{ margin: "0 0 12px" }}>{err}</div>}
 
+      <AdminCodes />
+
       <section className="panel">
         <div className="ph">
           <h2>Accounts<span className="dim">{rows ? rows.length : ""}</span></h2>
@@ -499,6 +502,117 @@ function AdminPage({ user }) {
 }
 
 const STAGES = ["new", "trialing", "evaluating", "committed", "paying", "at_risk", "lapsed", "lost"];
+
+/*
+ * Issue and track access codes.
+ *
+ * A code is a promise of access rather than access itself: the days it grants start when it
+ * is redeemed, not when it is issued. So it carries two lifetimes — how long it stays
+ * redeemable, and how much it buys — and conflating them is how somebody ends up with a
+ * code that expired before they opened the email.
+ */
+function AdminCodes() {
+  const [codes, setCodes] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [made, setMade] = useState(null);
+  const [d, setD] = useState({ count: 1, grantsDays: 365, validityDays: 30, email: "", note: "" });
+  const set = (k) => (e) => setD((x) => ({ ...x, [k]: e.target.value }));
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch("/api/admin/codes", { headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not read the codes.");
+      setCodes(body.codes);
+    } catch (e) { setErr(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const issue = async () => {
+    setBusy(true); setErr(null); setMade(null);
+    try {
+      const r = await fetch("/api/admin/codes", {
+        method: "POST", headers: await authHeader(),
+        body: JSON.stringify({
+          count: Number(d.count), grantsDays: Number(d.grantsDays),
+          // Blank means never expires, and that is a choice rather than an omission —
+          // sent as an explicit null so the server does not fill in a default.
+          validityDays: String(d.validityDays).trim() === "" ? null : Number(d.validityDays),
+          email: d.email, note: d.note,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not issue those codes.");
+      setMade(body.codes);
+      await load();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+  const live = (codes ?? []).filter((c) => !c.redeemed_at).length;
+
+  return (
+    <section className="panel">
+      <div className="ph">
+        <h2>Access codes<span className="dim">{codes ? `${live} unused of ${codes.length}` : ""}</span></h2>
+        <button className="btn ghost" onClick={() => setOpen((v) => !v)}>{open ? "Close" : "Issue codes"}</button>
+      </div>
+
+      {open && (
+        <div className="pb admin-issue">
+          <div className="fg c2">
+            <F label="How many" hint="Up to 50 at a time"><input className="in" type="number" min="1" max="50" value={d.count} onChange={set("count")} /></F>
+            <F label="Days of access each grants" hint="Starts when redeemed, not now"><input className="in" type="number" min="1" value={d.grantsDays} onChange={set("grantsDays")} /></F>
+            <F label="Code expires in (days)" hint="Blank never expires"><input className="in" type="number" min="1" value={d.validityDays} onChange={set("validityDays")} /></F>
+            <F label="Issued to (optional)"><input className="in" type="email" value={d.email} onChange={set("email")} placeholder="them@firm.com" /></F>
+          </div>
+          <F label="Note (optional)" hint="Who it went to and why. Internal."><input className="in" value={d.note} onChange={set("note")} /></F>
+          {err && <div className="signin-err">{err}</div>}
+          <div className="admin-set">
+            <button className="btn" disabled={busy} onClick={issue}>{busy ? "Issuing…" : "Issue"}</button>
+          </div>
+          {made && (
+            <div className="admin-made">
+              <p className="dim">Issued. Copy them now — they are listed below too.</p>
+              <textarea className="in" readOnly rows={Math.min(6, made.length)} value={made.join("\n")}
+                onFocus={(e) => e.target.select()} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="tw">
+        <table>
+          <thead><tr>
+            <th className="txt">Code</th><th>Grants</th><th>Expires</th>
+            <th className="txt">Issued to</th><th className="txt">Status</th><th>Issued</th>
+          </tr></thead>
+          <tbody>
+            {!codes && <tr><td colSpan={6} className="dim">Loading…</td></tr>}
+            {codes?.length === 0 && <tr><td colSpan={6} className="dim">No codes yet.</td></tr>}
+            {codes?.map((c) => (
+              <tr key={c.code}>
+                <td className="txt num">{c.code}</td>
+                <td className="num">{c.grants_days}d</td>
+                {/* Blank is "never", said in words so nobody reads it as a missing value. */}
+                <td className="num">{c.expires_at ? day(c.expires_at) : <span className="faint">never</span>}</td>
+                <td className="txt">{c.issued_to_email || <span className="faint">{c.note || "—"}</span>}</td>
+                <td className="txt">
+                  {c.redeemed_at
+                    ? <span className="pill ok">used · {c.redeemed_email || "—"}</span>
+                    : <span className="pill dim">unused</span>}
+                </td>
+                <td className="num">{day(c.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function AdminRow({ row, busy, onSet, onSaved }) {
   const [open, setOpen] = useState(false);
@@ -702,8 +816,11 @@ function Locked({ user, sub, onChanged }) {
           product is half-built, the second gets them what they want. This becomes a
           checkout the day Stripe is wired up, and not a day before.
         */}
-        <p className="note" style={{ marginTop: offerTrial ? 10 : 0 }}>
-          {offerTrial ? "Or, to subscribe straight away, email " : "To subscribe, email "}
+        <div className="signin-or"><span>or use a code</span></div>
+        <RedeemCode onDone={onChanged} />
+
+        <p className="note" style={{ marginTop: 10 }}>
+          {"To subscribe, email "}
           <a href={`mailto:team@fincoursa.com?subject=${encodeURIComponent("Nexus RAMP subscription")}&body=${encodeURIComponent(`My account is ${user.email}.`)}`}>
             team@fincoursa.com
           </a>
@@ -716,6 +833,53 @@ function Locked({ user, sub, onChanged }) {
         <button type="button" className="linklike" onClick={() => auth.signOut()}>Sign out</button>
       </div>
     </SignInPage>
+  );
+}
+
+/*
+ * Redeem an access code.
+ *
+ * The same door whether somebody bought a code, was given one at a meeting, or is coming
+ * back after a lapse. Deliberately on this screen and not buried in settings: the person
+ * holding a code is by definition somebody who cannot get in yet.
+ */
+function RedeemCode({ onDone }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [ok, setOk] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const tidy = normaliseCode(code);
+    // Checked here as well as on the server, so an obvious typo costs a glance rather
+    // than a round trip. The server checks it again regardless; this is courtesy.
+    if (!looksLikeCode(tidy)) { setErr(CODE_REFUSAL_COPY.bad_shape); return; }
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch("/api/redeem", {
+        method: "POST", headers: await authHeader(), body: JSON.stringify({ code: tidy }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "That did not work. Please try again.");
+      setOk(body.days);
+      await onDone();
+    } catch (e2) { setErr(e2.message); } finally { setBusy(false); }
+  };
+
+  if (ok) return <p className="note ok">Code accepted — {ok} days of access added.</p>;
+
+  return (
+    <form onSubmit={submit} className="redeem">
+      <F label="Access code">
+        <input className="in" value={code} placeholder="NXS-4KFP-9TQX" autoComplete="off"
+          spellCheck={false} onChange={(e) => { setCode(e.target.value); setErr(null); }} />
+      </F>
+      {err && <div className="signin-err">{err}</div>}
+      <button className="btn full" disabled={busy || !code.trim()}>
+        {busy ? "Checking…" : "Redeem code"}
+      </button>
+    </form>
   );
 }
 

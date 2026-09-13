@@ -582,3 +582,7 @@ td.faded { opacity: .35; }
 /* An inline link that happens to be a button, so switching between sign in and sign up
    reads as part of the sentence rather than as a control bolted onto it. */
 .signin-inline { display: inline; font-size: inherit; font-weight: 600; }
+.redeem { display: grid; gap: 10px; }
+.note.ok { color: var(--ok); font-weight: 600; }
+.admin-issue { display: grid; gap: 10px; }
+.admin-made textarea.in { height: auto; padding: 8px 10px; font-family: var(--num); line-height: 1.6; }
