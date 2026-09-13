@@ -12,12 +12,12 @@ const ORIENT_PRODUCTS = {
   HO_CL: { size: 1000, margin: 35700, lev: "", note: "Heating oil crack" },
   CL_CL: { size: 1000, margin: 3483, lev: "", note: "WTI calendar spread" },
 };
-const NEW_BROKER = { method: "leverage", leverage: 100, capital: 100000, callRatio: 100, stopRatio: 50, products: {} };
+const NEW_BROKER = { method: "leverage", leverage: 100, capital: 100000, callRatio: 100, stopRatio: 50, currency: "USD", products: {} };
 const DEFAULT_SETTINGS = {
   limits: { minRatio: 200, maxRiskPct: 2, dailyLossPct: 5, maxTrades: 10, includeRealized: true },
   brokers: [
-    { id: "orient", name: "Orient", method: "fixed", leverage: 100, capital: 500000, callRatio: 100, stopRatio: 50, products: ORIENT_PRODUCTS },
-    { id: "mt5", name: "MT5", method: "leverage", leverage: 100, capital: 100000, callRatio: 100, stopRatio: 50, products: {} },
+    { id: "orient", name: "Orient", method: "fixed", leverage: 100, capital: 500000, callRatio: 100, stopRatio: 50, currency: "USD", products: ORIENT_PRODUCTS },
+    { id: "mt5", name: "MT5", method: "leverage", leverage: 100, capital: 100000, callRatio: 100, stopRatio: 50, currency: "USD", products: {} },
   ],
   marks: {},
   view: "all",
@@ -33,11 +33,14 @@ const LEVERAGES = [10, 20, 25, 30, 50, 100, 200, 300, 400, 500];
 function migrate(s) {
   const D = DEFAULT_SETTINGS;
   if (!s) return JSON.parse(JSON.stringify(D));
-  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: s.brokers, marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
+  // Accounts stored before currencies existed were all in dollars, which is what the
+  // figures in them mean — so USD is a statement about the data, not a default.
+  const withCurrency = (list) => list.map((b) => ({ ...b, currency: b.currency || "USD" }));
+  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
   const A = s.account || {};
   return {
     limits: { ...D.limits, ...Object.fromEntries(Object.entries(A).filter(([k]) => k in D.limits)) },
-    brokers: [{ id: "default", name: A.broker || "Main account", method: A.method || "fixed", leverage: A.leverage || 100, capital: A.capital ?? 500000, callRatio: A.callRatio ?? 100, stopRatio: A.stopRatio ?? 50, products: s.products || ORIENT_PRODUCTS }],
+    brokers: [{ id: "default", name: A.broker || "Main account", method: A.method || "fixed", leverage: A.leverage || 100, capital: A.capital ?? 500000, callRatio: A.callRatio ?? 100, stopRatio: A.stopRatio ?? 50, currency: "USD", products: s.products || ORIENT_PRODUCTS }],
     marks: Object.fromEntries(Object.entries(s.marks || {}).map(([p, v]) => [`default|${p}`, v])),
     view: "all",
     scenario: { ...D.scenario },
@@ -50,8 +53,38 @@ function migrate(s) {
 // ---------- helpers ----------
 const n = (v) => (v === "" || v === null || v === undefined || isNaN(+v) ? 0 : +v);
 const has = (v) => v !== "" && v !== null && v !== undefined && !isNaN(+v);
-const money = (v) => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
-const signed = (v) => (v > 0 ? "+" : "") + money(v);
+/*
+ * Money, in the currency of whatever account is on screen.
+ *
+ * DISPLAY.cur is set once per render by Tracker, from the selected account. It is a module
+ * variable rather than a prop because money() is called at 103 sites across 22 components,
+ * and threading a currency through all of them is 103 chances to miss one — a missed one
+ * shows a rupee figure with a dollar sign on it, silently, which is the exact failure this
+ * is here to prevent. There is one Tracker, it writes this in its own body before any
+ * child renders, and nothing else ever writes it.
+ *
+ * Mixing currencies in one figure is not a formatting problem and is not solved here: see
+ * `mixedCurrency` below, which removes the combined view rather than mis-labelling it.
+ */
+const DISPLAY = { cur: "USD" };
+const SYMBOLS = { USD: "$", INR: "₹", EUR: "€", GBP: "£", JPY: "¥", AUD: "A$", CAD: "C$", CHF: "CHF ", SGD: "S$", AED: "AED ", HKD: "HK$", CNY: "CN¥" };
+const symbolFor = (cur) => SYMBOLS[cur] || (cur ? `${cur} ` : "$");
+const money = (v, cur = DISPLAY.cur) =>
+  v === null || v === undefined || !isFinite(v)
+    ? "—"
+    : (v < 0 ? "-" : "") + symbolFor(cur) + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const signed = (v, cur = DISPLAY.cur) => (v === null || v === undefined || !isFinite(v) ? "—" : (v > 0 ? "+" : "") + money(v, cur));
+
+/*
+ * Do these accounts use more than one currency?
+ *
+ * When they do there is no honest "all brokers" figure: adding rupees to dollars produces
+ * a number that looks authoritative and means nothing, and somebody could size a position
+ * on it. Rather than suppress that figure in the dozens of places it appears, the combined
+ * view itself is withdrawn — one rule instead of dozens of exceptions.
+ */
+const currenciesOf = (brokers) => [...new Set((brokers || []).map((b) => b.currency || "USD"))];
+const mixedCurrency = (brokers) => currenciesOf(brokers).length > 1;
 const pct = (v) => (isFinite(v) ? (v * 100).toFixed(1) + "%" : "—");
 const ratioTxt = (r) => (isFinite(r) ? (r * 100).toFixed(0) + "%" : "—");
 const px = (v) => (isFinite(v) ? (+v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 }) : "—");
@@ -159,6 +192,9 @@ function portfolio(fills, settings, now = new Date()) {
       lossToCall: IM > 0 ? TNE - IM * callR : TNE,
       freeIM: (minR > 0 ? TNE / minR : TNE) - IM,
       riskCap: fund.base * n(L.maxRiskPct) / 100,
+      // This account's own share, in its own currency. Used when there is no honest
+      // combined figure to fall back on.
+      dailyCap: fund.base * n(L.dailyLossPct) / 100,
       notional: sum(rs, (r) => r.notional),
       totalRisk: sum(rs, (r) => r.risk || 0),
     };
@@ -176,7 +212,12 @@ function portfolio(fills, settings, now = new Date()) {
       notional: sum(accounts, (a) => a.notional), totalRisk: sum(accounts, (a) => a.totalRisk),
       lossToCall: withPos.length ? Math.min(...withPos.map((a) => a.lossToCall)) : null,
     },
-    dailyCap: capital * n(L.dailyLossPct) / 100,
+    /*
+     * Null when the desk holds more than one currency: this is a percentage of combined
+     * capital, and combined capital does not exist across currencies. Every reader below
+     * falls back to the selected account's own cap, which does.
+     */
+    dailyCap: mixedCurrency(B) ? null : capital * n(L.dailyLossPct) / 100,
   };
 }
 
@@ -817,7 +858,15 @@ function Tracker({ user }) {
   if (!settings || !pf) return <div className="auth dim">Loading your data…</div>;
 
   const L = settings.limits;
-  const view = settings.brokers.some((b) => b.id === settings.view) ? settings.view : "all";
+  /*
+   * With more than one currency in play there is no "all brokers" to show, so the view
+   * falls to a single account whatever was stored. Everything below — the top strip, every
+   * table, every chart — then describes one account in one currency, and the figures on it
+   * are true.
+   */
+  const mixed = mixedCurrency(settings.brokers);
+  const stored = settings.brokers.some((b) => b.id === settings.view) ? settings.view : "all";
+  const view = mixed && stored === "all" ? (settings.brokers[0]?.id ?? "all") : stored;
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
   const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
@@ -826,6 +875,13 @@ function Tracker({ user }) {
 
   // scope for the top bar
   const scoped = view === "all" ? null : pf.acct(view);
+  /*
+   * The currency every figure below will be printed in. Written here, in Tracker's own
+   * body, before a single child renders — see the note on DISPLAY. With one currency
+   * across the desk the combined view keeps working and uses it; with several, `view` can
+   * no longer be "all", so there is always exactly one account to take it from.
+   */
+  DISPLAY.cur = scoped?.currency || currenciesOf(settings.brokers)[0] || "USD";
   const focus = scoped || pf.weakest;           // account whose TNE/IM is shown
   const ratio = focus ? focus.ratio : Infinity;
   const st = statusOf(ratio, focus, pf.minR);
@@ -857,8 +913,14 @@ function Tracker({ user }) {
         <div className="scope">
           <label className="f" style={{ gap: 2 }}>Account
             <select className="in" value={view} onChange={(e) => setView(e.target.value)} aria-label="Account shown">
-              <option value="all">All brokers</option>
-              {settings.brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              {/* Offered only while every account is in the same currency. Adding rupees
+                  to dollars gives a number that looks right and is meaningless. */}
+              {!mixed && <option value="all">All brokers</option>}
+              {settings.brokers.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}{mixed ? ` · ${b.currency || "USD"}` : ""}
+                </option>
+              ))}
             </select>
           </label>
         </div>
@@ -1031,8 +1093,23 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
     else if (a.ratio < pf.minR) warnings.push(["warn", `${nm}TNE/IM ${ratioTxt(a.ratio)} is under your ${L.minRatio}% minimum. Don't add positions.`]);
     else if (a.ratio < pf.minR * 1.2) warnings.push(["warn", `${nm}TNE/IM ${ratioTxt(a.ratio)} is close to your ${L.minRatio}% minimum.`]);
   }
-  if (pf.dailyCap > 0 && pf.total.todayPnl <= -pf.dailyCap) warnings.push(["bad", `Daily loss limit hit (${money(pf.total.todayPnl)} across all brokers). Stop trading today.`]);
-  else if (pf.dailyCap > 0 && pf.total.todayPnl <= -0.7 * pf.dailyCap) warnings.push(["warn", `Today's loss is ${pct(-pf.total.todayPnl / pf.dailyCap)} of your daily limit.`]);
+  /*
+   * Against the combined limit where there is one, and against this account's own where
+   * there is not — never against a limit denominated in a currency the loss is not in.
+   */
+  /*
+   * Said once, plainly, because a missing option is otherwise a mystery: the combined
+   * view is gone because it would have to add two currencies together.
+   */
+  if (mixedCurrency(settings.brokers)) {
+    warnings.push(["dim", `Your accounts are in ${currenciesOf(settings.brokers).join(" and ")}. RAMP does not convert between currencies, so there is no combined view — each account is shown on its own, in its own money.`]);
+  }
+
+  const capNow = pf.dailyCap ?? focus?.dailyCap ?? null;
+  const lossNow = pf.dailyCap !== null ? pf.total.todayPnl : (focus ? focus.realizedToday + focus.upnl : null);
+  const capScope = pf.dailyCap !== null ? " across all brokers" : ` on ${focus?.name ?? "this account"}`;
+  if (capNow > 0 && lossNow !== null && lossNow <= -capNow) warnings.push(["bad", `Daily loss limit hit (${money(lossNow)}${capScope}). Stop trading today.`]);
+  else if (capNow > 0 && lossNow !== null && lossNow <= -0.7 * capNow) warnings.push(["warn", `Today's loss is ${pct(-lossNow / capNow)} of your daily limit.`]);
   if (pf.rows.length >= n(L.maxTrades)) warnings.push(["bad", `Maximum of ${L.maxTrades} open positions reached.`]);
   // Say it on the dashboard too: a scenario that quietly leaves something out
   // is worse than one that admits it.
@@ -1181,7 +1258,10 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
   // Which instruments are on the table. Untouched, it follows what you hold; once you
   // pick, it is exactly what you picked — including nothing.
   // What is left of today's allowance: the limit, less whatever today has already lost.
-  const dailyLeft = pf.dailyCap > 0 ? Math.max(0, pf.dailyCap - Math.max(0, -pf.total.todayPnl)) : Infinity;
+  // Same fallback as the warnings: the combined limit, or this account's own.
+  const dayCap = pf.dailyCap ?? scoped?.dailyCap ?? null;
+  const dayLoss = pf.dailyCap !== null ? pf.total.todayPnl : (scoped ? scoped.realizedToday + scoped.upnl : 0);
+  const dailyLeft = dayCap > 0 ? Math.max(0, dayCap - Math.max(0, -dayLoss)) : Infinity;
   const picked = Array.isArray(S.pick) ? S.pick : null;
   const isOn = (line) => (picked ? picked.includes(line.key) : !!line.pos);
   const toggle = (line, lines) => {
@@ -1239,7 +1319,7 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
               <div className="kpi"><label>Stop-out ({b.stopRatio}%) if all move</label><b>{moveTxt(stopMove)}</b></div>
               <div className="kpi"><label>Max risk per trade</label><b>{acc.riskCap > 0 ? money(acc.riskCap) : "—"}</b>
                 <span className="faint" style={{ fontSize: 11 }}>{L.maxRiskPct}% of {b.name} capital</span></div>
-              <div className="kpi"><label>Daily loss limit</label><b>{pf.dailyCap > 0 ? money(pf.dailyCap) : "—"}</b>
+              <div className="kpi"><label>Daily loss limit</label><b>{dayCap > 0 ? money(dayCap) : "—"}</b>
                 <span className="faint" style={{ fontSize: 11 }}>{L.dailyLossPct}% of all capital{pf.total.todayPnl < 0 ? ` · ${money(-pf.total.todayPnl)} used today` : ""}</span></div>
             </div>
             {res.lines.length === 0 ? <div className="empty">{b.name} has no products yet. Upload its fills, or add products under Settings → {b.name}, and each will get its own row here.</div> : <>
@@ -1366,12 +1446,12 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                     [callMove, `${b.name}'s margin call at ${b.callRatio}%`],
                     [stopMove, `stop-out at ${b.stopRatio}%`],
                   ].filter(([m]) => typeof m === "number" && !Number.isNaN(m) && isFinite(m));
-                  if (!steps.length) return `Nothing on this account is reachable within a 100% move. Your ${money(acc.riskCap)} per-trade and ${money(pf.dailyCap)} daily limits still cap the size.`;
+                  if (!steps.length) return `Nothing on this account is reachable within a 100% move. Your ${money(acc.riskCap)} per-trade and ${money(pf.dailyCap ?? acc.dailyCap)} daily limits still cap the size.`;
                   return <>
                     {steps.map(([m, what], i) => (
                       <span key={what}>{i ? ", then " : "Moving against you, "}<b className={i === 0 ? "warn" : ""}>{m.toFixed(1)}%</b> hits {what}</span>
                     ))}
-                    . Size is capped before any of that by your {money(acc.riskCap)} per-trade limit and {money(pf.dailyCap)} daily limit — whichever bites first is the one that stops you.
+                    . Size is capped before any of that by your {money(acc.riskCap)} per-trade limit and {money(pf.dailyCap ?? acc.dailyCap)} daily limit — whichever bites first is the one that stops you.
                   </>;
                 })()}
               </div>
@@ -1387,8 +1467,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
             {res.lines.some((l) => l.planned) && isFinite(dailyLeft) && (
               <div className={`pb ${res.loss > dailyLeft ? "bad" : "faint"}`} style={{ fontSize: 11 }}>
                 {res.loss > dailyLeft
-                  ? `This plan loses ${money(res.loss)} in the scenario, past the ${money(dailyLeft)} left under today's ${money(pf.dailyCap)} daily limit.`
-                  : `This plan loses ${money(res.loss)} in the scenario, within the ${money(dailyLeft)} left under today's ${money(pf.dailyCap)} daily limit.`}
+                  ? `This plan loses ${money(res.loss)} in the scenario, past the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`
+                  : `This plan loses ${money(res.loss)} in the scenario, within the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`}
               </div>
             )}</>}</>}
           </section>
@@ -1881,12 +1961,18 @@ function LimitsPanel({ settings, setSettings, pf, addBroker }) {
           <F label="Minimum TNE/IM (%)" hint="Per broker account; new trades below it are flagged">{lnum("minRatio")}</F>
           <F label="Max open positions" hint="Across all brokers">{lnum("maxTrades")}</F>
           <F label="Max risk per trade (% of that broker's capital)">{lnum("maxRiskPct", { step: 0.1 })}</F>
-          <F label="Daily loss limit (% of total capital)" hint={dirty ? "Saved figure: " + money(pf.dailyCap) : money(pf.dailyCap)}>{lnum("dailyLossPct", { step: 0.1 })}</F>
+          {/* Across the desk where that means something; per account where it does not. */}
+          <F label={`Daily loss limit (% of ${pf.dailyCap === null ? "each account's" : "total"} capital)`}
+            hint={pf.dailyCap === null ? "Applied per account — your accounts are in different currencies" : (dirty ? "Saved figure: " + money(pf.dailyCap) : money(pf.dailyCap))}>{lnum("dailyLossPct", { step: 0.1 })}</F>
         </div>
         <div className="sep" />
         <label className="check">
           <input type="checkbox" checked={!!d.includeRealized} onChange={(e) => set("includeRealized", e.target.checked)} />
-          <span>Add realized P&L (after fees) to each account's equity (<span className={`num ${pc(pf.total.realizedAll)}`}>{signed(pf.total.realizedAll)}</span> in total)<br /><span className="faint">Untick if you update each broker's capital yourself after closing trades.</span></span>
+          {/* The total is only meaningful while every account is in the same money; with
+              several it would add rupees to dollars, so it is named per account instead. */}
+          <span>Add realized P&L (after fees) to each account's equity{pf.dailyCap === null
+            ? <> (<span className="faint">{pf.accounts.map((a) => `${a.name} ${signed(a.realizedAll, a.currency)}`).join(" · ")}</span>)</>
+            : <> (<span className={`num ${pc(pf.total.realizedAll)}`}>{signed(pf.total.realizedAll)}</span> in total)</>}<br /><span className="faint">Untick if you update each broker's capital yourself after closing trades.</span></span>
         </label>
       </div>
       <SaveBar dirty={dirty} onSave={save} onDiscard={discard} savedNote="Limits are up to date" />
@@ -1947,9 +2033,23 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
       <div className="pb">
         <div className="fg c2">
           <F label="Broker / account name"><input className="in" value={d.name} onChange={set("name")} /></F>
+          {/*
+            The currency this account is denominated in — capital, margin per lot, prices
+            and P&L all in it. RAMP does not convert between currencies and will not: a
+            converted P&L carries an exchange gain your broker statement does not have, and
+            the statement is what you reconcile against. What it does instead is stop
+            offering a combined view once your accounts disagree. See mixedCurrency.
+          */}
+          <F label="Currency" hint="Everything on this account is in it. No conversion is ever applied.">
+            <select className="in" value={d.currency || "USD"} onChange={set("currency")}>
+              {["USD","INR","EUR","GBP","JPY","AUD","CAD","CHF","SGD","AED","HKD","CNY"].map((c) => (
+                <option key={c} value={c}>{c} {symbolFor(c).trim()}</option>
+              ))}
+            </select>
+          </F>
           {acc?.fund?.fromLedger
-            ? <F label="Capital in this account ($)" hint="Net deposits from the Funds tab"><div className="in num" style={{ background: "var(--panel2)" }}>{money(acc.fund.net)}</div></F>
-            : <F label="Capital in this account ($)" hint="Or record deposits in the Funds tab"><input className="in" type="number" value={d.capital} onChange={set("capital")} /></F>}
+            ? <F label={`Capital in this account (${symbolFor(d.currency).trim()})`} hint="Net deposits from the Funds tab"><div className="in num" style={{ background: "var(--panel2)" }}>{money(acc.fund.net, d.currency)}</div></F>
+            : <F label={`Capital in this account (${symbolFor(d.currency).trim()})`} hint="Or record deposits in the Funds tab"><input className="in" type="number" value={d.capital} onChange={set("capital")} /></F>}
           <F label="How margin is set">
             <select className="in" value={d.method} onChange={set("method")}>
               <option value="fixed">Broker gives margin per lot (e.g. Orient)</option>
@@ -1970,7 +2070,7 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
               <option value="average">Average price (e.g. MT5 netting)</option>
             </select>
           </F>
-          <F label="Commission per lot ($)" hint="Per side. Only used where the fill carries no commission of its own.">
+          <F label={`Commission per lot (${symbolFor(d.currency).trim()})`} hint="Per side. Only used where the fill carries no commission of its own.">
             <input className="in" type="number" step="0.01" placeholder="0" value={d.commission ?? ""} onChange={set("commission")} />
           </F>
           <F label="Margin call level (TNE/IM %)" hint={lev ? "MT5: 'Margin call' level" : null}><input className="in" type="number" value={d.callRatio} onChange={set("callRatio")} /></F>
@@ -1982,7 +2082,7 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
       </div>
       <div className="tw">
         <table>
-          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : "Margin / lot ($)"}</th><th>Commission / lot</th><th></th></tr></thead>
+          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : `Margin / lot (${symbolFor(d.currency).trim()})`}</th><th>Commission / lot</th><th></th></tr></thead>
           <tbody>
             {Object.keys(d.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
             {Object.entries(d.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, sp]) => (
@@ -1992,7 +2092,7 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
                 <td>{lev
                   ? <input className="cell" type="number" placeholder={`1:${d.leverage}`} value={sp.lev ?? ""} onChange={(e) => setP(p, "lev", e.target.value)} aria-label={`${p} leverage override`} />
                   : <input className={`cell ${n(sp.margin) ? "" : "need"}`} style={{ width: 96 }} type="number" placeholder="Set" value={sp.margin ?? ""} onChange={(e) => setP(p, "margin", e.target.value)} aria-label={`${p} margin per lot`} />}</td>
-                <td><input className="cell" type="number" step="0.01" placeholder={n(d.commission) ? money(n(d.commission)) : "0"}
+                <td><input className="cell" type="number" step="0.01" placeholder={n(d.commission) ? money(n(d.commission), d.currency) : "0"}
                   value={sp.comm ?? ""} onChange={(e) => setP(p, "comm", e.target.value)}
                   aria-label={`${p} commission per lot`} title="Overrides the account rate. A spread billed per leg costs twice the leg rate." /></td>
                 <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => dropProduct(p)}>✕</button>}</td>
@@ -2120,11 +2220,13 @@ function FundsTab({ pf, settings, setSettings, view }) {
           )}
           <div className="fg c2">
             <F label="Account"><select className="in" value={f.broker} onChange={(e) => set("broker", e.target.value)}>{brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select></F>
-            <F label="Amount ($)"><input className="in" type="number" min="0" step="0.01" value={f.amount} onChange={(e) => set("amount", e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} /></F>
+            {/* The account above decides the currency — a deposit into an INR account is
+                in rupees whatever else is on screen. */}
+            <F label={`Amount (${symbolFor(brokers.find((b) => b.id === f.broker)?.currency).trim()})`}><input className="in" type="number" min="0" step="0.01" value={f.amount} onChange={(e) => set("amount", e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} /></F>
             <F label="Date"><input className="in" type="date" value={f.date} onChange={(e) => set("date", e.target.value)} /></F>
             <F label="Note (optional)"><input className="in" value={f.note} placeholder="e.g. Wire ref 4471" onChange={(e) => set("note", e.target.value)} /></F>
           </div>
-          <button className={`btn full ${f.type === "deposit" ? "buy" : f.type === "charge" ? "charge" : "sell"}`} disabled={!(n(f.amount) > 0)} onClick={add}>Record {f.type}{n(f.amount) > 0 ? ` of ${money(n(f.amount))}${f.type === "charge" && f.monthly ? " a month" : ""}` : ""}</button>
+          <button className={`btn full ${f.type === "deposit" ? "buy" : f.type === "charge" ? "charge" : "sell"}`} disabled={!(n(f.amount) > 0)} onClick={add}>Record {f.type}{n(f.amount) > 0 ? ` of ${money(n(f.amount), brokers.find((b) => b.id === f.broker)?.currency)}${f.type === "charge" && f.monthly ? " a month" : ""}` : ""}</button>
           {msg && <div className={msg[0]} style={{ fontSize: 12 }}>{msg[1]}</div>}
           <small className="faint">Once an account has deposits or withdrawals here, its equity starts from net deposits instead of the Capital typed in Settings. Charges reduce equity. MT5 deal reports that include balance rows can add deposits automatically on upload.</small>
         </div>
