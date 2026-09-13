@@ -16,6 +16,33 @@ const rewrites = config.rewrites ?? [];
 if (!rewrites.length) bad('no rewrites: every path but / would 404');
 else ok('a rewrite is configured');
 
+/*
+ * Top-level keys, guarded for the same reason as the rewrite keys below: Vercel rejects a
+ * key it does not know, and it does so after the deploy has replaced the live site.
+ */
+const ALLOWED_TOP = new Set(['$schema', 'regions', 'functionFailoverRegions', 'rewrites', 'redirects', 'headers', 'crons', 'functions', 'cleanUrls', 'trailingSlash']);
+const strayTop = Object.keys(config).filter((k) => !ALLOWED_TOP.has(k));
+if (strayTop.length) bad(`vercel.json has keys Vercel will reject: ${strayTop.join(', ')}`);
+else ok('vercel.json carries only keys Vercel accepts');
+
+/*
+ * Where the functions RUN, which is a privacy question rather than a performance one.
+ *
+ * Every endpoint in api/ holds the service role key and reads customers' trade data. The
+ * database is in London; without this key the functions default to Vercel's US region, so
+ * the storage would be in the UK while the processing happened in Virginia. That is the
+ * difference between "your data stays in the UK" being true and being nearly true, and it
+ * is the question a desk's compliance team actually asks.
+ *
+ * Kept in the same file that silently 404'd /admin once, so it is checked here before a
+ * deploy rather than discovered afterwards.
+ */
+const UK_AND_EU = new Set(['lhr1', 'dub1', 'cdg1', 'fra1', 'arn1', 'zrh1']);
+const regions = config.regions ?? [];
+if (!regions.length) bad('no regions set: functions would run in Vercel\'s default US region while the database is in London');
+else if (regions.some((r) => !UK_AND_EU.has(r))) bad(`functions would run outside the UK/EU: ${regions.join(', ')}`);
+else ok(`functions run in ${regions.join(', ')}, beside the database`);
+
 const ALLOWED = new Set(['source', 'destination', 'has', 'missing', 'statusCode']);
 for (const rule of rewrites) {
   const strays = Object.keys(rule).filter((k) => !ALLOWED.has(k));
