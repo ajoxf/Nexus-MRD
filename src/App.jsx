@@ -240,6 +240,17 @@ const ICONS = {
   settings: <Icon d={<><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></>} />,
 };
 
+// Google's own mark, in Google's own colours. Drawn rather than fetched: the
+// sign-in screen must not depend on a third party's server being up.
+const GoogleMark = () => (
+  <svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true">
+    <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.91c1.7-1.57 2.69-3.88 2.69-6.62z" />
+    <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.91-2.26c-.81.54-1.84.86-3.05.86-2.35 0-4.34-1.58-5.05-3.71H.96v2.33A9 9 0 0 0 9 18z" />
+    <path fill="#FBBC05" d="M3.95 10.71a5.41 5.41 0 0 1 0-3.42V4.96H.96a9 9 0 0 0 0 8.08l2.99-2.33z" />
+    <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.59C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.96l2.99 2.33C4.66 5.16 6.65 3.58 9 3.58z" />
+  </svg>
+);
+
 const F = ({ label, hint, children }) => <label className="f">{label}{children}{hint && <small>{hint}</small>}</label>;
 const Side = ({ s }) => <span className={`side ${s === "Long" || s === "Buy" ? "long" : "short"}`}>{s}</span>;
 
@@ -355,6 +366,9 @@ function SignIn() {
       */}
       {mode === "in" && PORTAL_SSO_URL && (
         <>
+          <a className="btn full google-sso" href={PORTAL_GOOGLE_URL}>
+            <GoogleMark />Continue with Google
+          </a>
           <a className="btn full portal-sso" href={PORTAL_SSO_URL}>Continue with NordStar Pro</a>
           <div className="signin-or"><span>or sign in directly</span></div>
         </>
@@ -418,6 +432,24 @@ function SignIn() {
  */
 const PORTAL_URL = (import.meta.env.VITE_PORTAL_URL || "https://nordstarpro.com").replace(/\/+$/, "");
 const PORTAL_SSO_URL = import.meta.env.VITE_PORTAL_SSO_URL || `${PORTAL_URL}/api/sso/ramp`;
+
+/*
+ * Google, the long way round — which is the only safe way round.
+ *
+ * RAMP's own database could be wired to Google directly, and that is exactly
+ * what must not happen. Signing in with Google proves who somebody is; it
+ * proves nothing about whether they hold this product. A Google button wired
+ * straight into RAMP would mint an account for anyone with a Google address,
+ * which is the hole that was deliberately closed when self-signup was turned
+ * off.
+ *
+ * So this hands off to the portal's Google flow and asks it to come back
+ * through the handover route. The portal establishes identity, the handover
+ * route checks the entitlement, and only then is a session issued here. One
+ * click less than going via the portal's own page, and not one check skipped.
+ */
+const PORTAL_GOOGLE_URL =
+  `${PORTAL_URL}/api/auth/google/start?next=${encodeURIComponent("/api/sso/ramp")}`;
 
 // The item a trial has to grant before this screen will mention one. An
 // operator can point the portal's trial at a research section instead; saying

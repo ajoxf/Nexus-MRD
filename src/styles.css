@@ -296,11 +296,14 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
 .signin-brand .foot a { color: #C6D4E6; text-decoration: underline; text-underline-offset: 3px; }
 .signin-brand .foot a:hover { color: #FFFFFF; }
 
-.signin-form { display: grid; place-items: center; padding: 32px 24px; background: var(--bg); }
+.signin-form { display: grid; place-items: center; padding: 24px; background: var(--bg); }
 .signin-card {
   width: 100%; max-width: 372px; background: var(--ns-panel);
   border: 1px solid var(--ns-line); border-radius: 12px;
-  padding: 34px 32px; display: grid; gap: 14px; color: var(--ns-ink);
+  /* Tightened when Google joined NordStar Pro above the divider. The card carries
+     two handover buttons, two fields and the trial line, and it still has to fit a
+     640px-tall laptop without scrolling — which is the whole point of this screen. */
+  padding: 28px 30px; display: grid; gap: 12px; color: var(--ns-ink);
 }
 .signin-card h2 { margin: 0; font-size: 22px; font-weight: 600; color: var(--ns-ink); letter-spacing: -.02em; }
 .signin-card .lede { margin: -7px 0 6px; font-size: 13px; color: var(--ns-dim); line-height: 1.55; }
@@ -332,8 +335,8 @@ tbody tr.leg td { background: var(--panel2) !important; border-bottom: 1px solid
   .signin-brand { padding: 26px 22px 30px; border-right: 0; border-bottom: 0; }
   .signin-brand .tagline { margin: 18px 0 0; font-size: 22px; max-width: none; }
   .signin-brand .rule, .signin-brand .foot { display: none; }
-  .signin-form { padding: 24px 16px 40px; align-items: start; }
-  .signin-card { padding: 26px 22px; }
+  .signin-form { padding: 20px 16px 24px; align-items: start; }
+  .signin-card { padding: 24px 22px; }
 }
 
 /* ---------- analysis ---------- */
@@ -514,3 +517,13 @@ td.faded { opacity: .35; }
 .signin-trial { margin: 2px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ns-dim); text-align: center; }
 .signin-trial a { color: var(--ns-accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
 .signin-trial a:hover { color: var(--navy); }
+
+/* Google's button is conventionally white with its own mark — recognisable at a
+   glance, and it keeps two stacked navy slabs off the card. */
+.signin-card .btn.full.google-sso {
+  background: var(--panel); color: var(--ns-ink); border: 1px solid var(--line2);
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  text-decoration: none; margin-top: 0;
+}
+.signin-card .btn.full.google-sso:hover { background: var(--hover); border-color: var(--line2); }
+.signin-card .btn.full.portal-sso { margin-top: 8px; }
