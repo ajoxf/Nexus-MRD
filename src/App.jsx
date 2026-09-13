@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { isOptionSymbol } from "./lib/options.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -2477,6 +2477,16 @@ function MarginHistory({ pf, fills, settings, view, history }) {
 
   // ---------- lots: stacked by product ----------
   if (M.stacked) {
+    /*
+     * Volume comes straight off the fills, not off the day-by-day series.
+     *
+     * A fill is a permanent record of something that happened at a moment, so this is
+     * exact for every day there has ever been — there is nothing to rebuild and no join to
+     * mark, the same as realized money. The series above exists to answer what the book
+     * looked like; this answers what went through it.
+     */
+    const traded = M.fromFills ? tradedByDay(fills, brokers.map((b) => b.id)) : null;
+
     const lotsAt = (d) => {
       const out = {};
       for (const l of lines) {
@@ -2490,7 +2500,7 @@ function MarginHistory({ pf, fills, settings, view, history }) {
       }
       return out;
     };
-    const perDay = axis.map((d) => ({ d, prod: lotsAt(d) }));
+    const perDay = axis.map((d) => ({ d, prod: traded ? (traded.get(d)?.prod ?? {}) : lotsAt(d) }));
     const products = [...new Set(perDay.flatMap((r) => Object.keys(r.prod)))].sort();
     const totalAt = (r) => Object.values(r.prod).reduce((t, v) => t + v, 0);
     const hi = Math.max(1, ...perDay.map(totalAt));
@@ -2499,7 +2509,9 @@ function MarginHistory({ pf, fills, settings, view, history }) {
     const h = hover ? perDay.find((r) => r.d === hover) : null;
 
     if (!products.length) return (
-      <div>{controls}<div className="empty">No lots were held on any day in this range.</div></div>
+      <div>{controls}<div className="empty">
+        {M.fromFills ? "Nothing was traded on any day in this range." : "No lots were held on any day in this range."}
+      </div></div>
     );
 
     return (
@@ -2512,7 +2524,7 @@ function MarginHistory({ pf, fills, settings, view, history }) {
         </div>
         <div style={{ position: "relative" }}>
           <svg viewBox={`0 0 ${W} ${H}`} role="img" className="chart-svg"
-            aria-label={`Lots held per day by product, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
+            aria-label={`${M.label} per day by product, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
             onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
             {ticks3(0, hi).map((t, i) => (
               <g key={i}>
@@ -2520,7 +2532,7 @@ function MarginHistory({ pf, fills, settings, view, history }) {
                 <text x={pad.l - 7} y={y(t) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{qty(Math.round(t * 100) / 100)}</text>
               </g>
             ))}
-            {joinMark}
+            {!M.fromFills && joinMark}
             {perDay.map((r) => {
               let acc = 0;
               return (
@@ -2551,15 +2563,26 @@ function MarginHistory({ pf, fills, settings, view, history }) {
                   <span className="tip-row tip-total"><i>Total</i><b>{qty(totalAt(h))} lots</b></span>
                 </>
               ) : (
-                <span>Flat — nothing on the book</span>
+                <span>{M.fromFills ? "Nothing traded" : "Flat — nothing on the book"}</span>
               )}
             </div>
           )}
         </div>
         <p className="hist-note">
-          Lots held at the close of each day, stacked by product. Broken down exactly:
-          how many lots were on the book is a fact about your fills, not something that
-          depended on a price nobody saved.
+          {M.fromFills ? (
+            <>Lots that changed hands each day, stacked by product. <b>Every fill counts,
+            both sides</b> — buying five and selling them again is ten, which is what the
+            exchange reports and what commission is charged on. Spread legs are skipped;
+            the spread is the trade. Exact for every day: a fill is a record of something
+            that happened, so there is nothing here that had to be rebuilt.</>
+          ) : (
+            <>Lots on the book at the close of each day, stacked by product — what you
+            carried overnight. A position opened and closed inside one session never
+            appears here, so a busy day that ended flat reads as nothing at all; the
+            <b> Lots traded</b> tab is where that day shows up. Broken down exactly: what
+            was on the book is a fact about your fills, not something that depended on a
+            price nobody saved.</>
+          )}
         </p>
       </div>
     );

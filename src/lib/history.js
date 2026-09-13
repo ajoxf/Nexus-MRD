@@ -174,8 +174,15 @@ export const METRICS = [
    * there has ever been, and its line is solid the whole way across.
    */
   { key: "realized", label: "Realized P&L", fmt: "money" },
-  // Drawn as bars broken down by product rather than as a line. See MarginHistory.
+  // Both drawn as bars broken down by product rather than as lines. See MarginHistory.
   { key: "lots", label: "Lots held", fmt: "lots", stacked: true },
+  /*
+   * A different measurement from the one above, not a different view of it. Held is the
+   * position at the close of a day; traded is what changed hands during it. A day can
+   * show heavy volume and end flat, and on the held chart that day looks like nothing
+   * happened.
+   */
+  { key: "traded", label: "Lots traded", fmt: "lots", stacked: true, fromFills: true },
 ];
 
 // TNE/IM is not stored: it is the two stored numbers divided, and a flat
@@ -228,4 +235,38 @@ export function winLossByDay(closed) {
     by.set(d, row);
   }
   return [...by.values()].sort((a, b) => (a.d < b.d ? -1 : 1));
+}
+
+/*
+ * Lots transacted on each day, by product.
+ *
+ * The companion to lots held, and a different measurement. Held is a level — what was on
+ * the book when the day ended, which is what margin is charged on and what you carried
+ * overnight. Traded is a flow: how much changed hands. A desk that opens and closes inside
+ * the session is flat every night and invisible on the held chart, however hard it worked.
+ *
+ * EVERY FILL COUNTS, both sides. Buying five and selling them again is ten lots traded,
+ * which is what the exchange reports and what the broker bills commission on. It is not
+ * "five, once", and the caption on the chart says so — the two readings differ by a factor
+ * of two and somebody checking against a statement needs to know which one they are
+ * looking at.
+ *
+ * Spread legs are skipped. The spread is the trade; counting its legs as well would book
+ * the same volume twice, exactly as it would in the position engine.
+ */
+export function tradedByDay(fills, brokerIds = null) {
+  const by = new Map();
+  for (const f of fills || []) {
+    if (f.is_leg || !f.ts) continue;
+    const broker = f.broker || "default";
+    if (brokerIds && !brokerIds.includes(broker)) continue;
+    const lots = Math.abs(Number(f.qty) || 0);
+    if (!lots || !f.product) continue;
+    const d = dayKey(f.ts);
+    const row = by.get(d) || { d, prod: {}, total: 0 };
+    row.prod[f.product] = round4((row.prod[f.product] || 0) + lots);
+    row.total = round4(row.total + lots);
+    by.set(d, row);
+  }
+  return by;
 }

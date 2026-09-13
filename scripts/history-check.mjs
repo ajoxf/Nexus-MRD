@@ -1,4 +1,4 @@
-import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay }
+import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay }
   from '../src/lib/history.js';
 let fail = 0;
 const eq = (name, got, want) => {
@@ -116,6 +116,31 @@ eq('a day with one of each', wl[0], { d: '2026-09-01', wins: 1, losses: 1, flat:
 eq('a scratch counts as neither a win nor a loss',
    wl[2], { d: '2026-09-04', wins: 1, losses: 0, flat: 1, net: 200 });
 eq('a trade with no close date is not a day', winLossByDay([{ pnl: 5 }]).length, 0);
+
+
+// ---- lots traded per day ----
+const F = (ts, qty, product, extra = {}) => ({ ts, qty, product, broker: 'orient', ...extra });
+const tfills = [
+  F('2026-09-01T09:00:00', 5, 'CL'),            // bought 5
+  F('2026-09-01T15:00:00', 5, 'CL'),            // sold them again
+  F('2026-09-01T16:00:00', 3, 'NG'),
+  F('2026-09-02T09:00:00', 4, 'CL', { is_leg: true }),   // a spread leg: the spread is the trade
+  F('2026-09-03T09:00:00', 2, 'CL', { broker: 'mt5' }),
+];
+const t = tradedByDay(tfills);
+eq('a round turn counts both sides', t.get('2026-09-01').prod.CL, 10);
+eq('and each product keeps its own tally', t.get('2026-09-01').prod.NG, 3);
+eq('the day totals across products', t.get('2026-09-01').total, 13);
+eq('a spread leg is not volume of its own', t.has('2026-09-02'), false);
+eq('another broker still counts when no filter is given', t.get('2026-09-03').total, 2);
+eq('scoping to one broker drops the others',
+   [...tradedByDay(tfills, ['orient']).keys()], ['2026-09-01', '2026-09-03'].filter((d) => d !== '2026-09-03'));
+eq('scoping to the other broker keeps only its day',
+   [...tradedByDay(tfills, ['mt5']).keys()], ['2026-09-03']);
+eq('a fill with no product is not counted', tradedByDay([F('2026-09-05T09:00:00', 5, undefined)]).size, 0);
+eq('a zero-quantity fill is not a trade', tradedByDay([F('2026-09-05T09:00:00', 0, 'CL')]).size, 0);
+eq('a sell recorded as a negative quantity still counts its size',
+   tradedByDay([F('2026-09-05T09:00:00', -4, 'CL')]).get('2026-09-05').total, 4);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);
