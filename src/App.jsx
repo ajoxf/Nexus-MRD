@@ -475,13 +475,13 @@ function AdminPage({ user }) {
         <div className="tw">
           <table>
             <thead><tr>
-              <th className="txt">Email</th><th className="txt">Status</th><th>Runs until</th>
-              <th>Trialled</th><th>Signed up</th><th>Last seen</th><th className="txt">Change</th>
+              <th className="txt">Customer</th><th className="txt">Stage</th><th className="txt">Access</th>
+              <th>Runs until</th><th>Fills</th><th>Signed up</th><th>Last seen</th><th className="txt">Change</th>
             </tr></thead>
             <tbody>
-              {!rows && <tr><td colSpan={7} className="dim">Loading…</td></tr>}
-              {rows && rows.length === 0 && <tr><td colSpan={7} className="dim">No accounts yet.</td></tr>}
-              {rows?.map((row) => <AdminRow key={row.id} row={row} busy={busy === row.id} onSet={setSub} />)}
+              {!rows && <tr><td colSpan={8} className="dim">Loading…</td></tr>}
+              {rows && rows.length === 0 && <tr><td colSpan={8} className="dim">No accounts yet.</td></tr>}
+              {rows?.map((row) => <AdminRow key={row.id} row={row} busy={busy === row.id} onSet={setSub} onSaved={load} />)}
             </tbody>
           </table>
         </div>
@@ -490,7 +490,10 @@ function AdminPage({ user }) {
   );
 }
 
-function AdminRow({ row, busy, onSet }) {
+const STAGES = ["new", "trialing", "evaluating", "committed", "paying", "at_risk", "lapsed", "lost"];
+
+function AdminRow({ row, busy, onSet, onSaved }) {
+  const [open, setOpen] = useState(false);
   const sub = row.sub;
   const state = accessState(sub);
   const live = hasAccess(sub);
@@ -499,30 +502,107 @@ function AdminRow({ row, busy, onSet }) {
   const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
   const left = daysLeft(sub);
 
+  /*
+   * A trial with nothing imported is the one to ring.
+   *
+   * Eleven days into fourteen with no fills is somebody who never got started, and no
+   * subscription row shows that. It is the single most useful thing on this screen.
+   */
+  const cold = state === "trialing" && row.fills === 0;
+
   return (
-    <tr>
-      <td className="txt">{row.email}</td>
-      <td className="txt">
-        <span className={`pill ${live ? "ok" : state === "none" ? "dim" : "bad"}`}>{state.replace("_", " ")}</span>
-      </td>
-      <td className="num">
-        {/* Blank is open-ended, not missing. Said in words so nobody reads it as a gap. */}
-        {sub?.current_period_end ? day(sub.current_period_end) : (live ? "Open-ended" : "—")}
-        {left !== null && <span className="faint"> · {left}d</span>}
-      </td>
-      <td className="num">{sub?.trial_started_at ? day(sub.trial_started_at) : "—"}</td>
-      <td className="num">{day(row.createdAt)}</td>
-      <td className="num">{day(row.lastSignInAt)}</td>
-      <td className="txt">
-        <div className="admin-set">
-          <select className="cell" value={status} onChange={(e) => setStatus(e.target.value)} aria-label={`Status for ${row.email}`}>
-            {["none", "trialing", "active", "past_due", "canceled"].map((v) => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <input className="cell" type="date" value={ends} onChange={(e) => setEnds(e.target.value)}
-            title="Leave blank for open-ended" aria-label={`Runs until, for ${row.email}`} />
-          <button className="btn" disabled={busy} onClick={() => onSet(row, status, ends ? `${ends}T23:59:59Z` : null)}>
-            {busy ? "…" : "Save"}
+    <>
+      <tr className={cold ? "admin-cold" : undefined}>
+        <td className="txt">
+          <button className="linklike admin-name" onClick={() => setOpen((v) => !v)}>
+            {row.crm?.full_name || row.email}
           </button>
+          {row.crm?.firm && <div className="faint">{row.crm.firm}</div>}
+          {row.crm?.full_name && <div className="faint">{row.email}</div>}
+        </td>
+        <td className="txt"><span className="pill dim">{(row.crm?.stage ?? "new").replace("_", " ")}</span></td>
+        <td className="txt">
+          <span className={`pill ${live ? "ok" : state === "none" ? "dim" : "bad"}`}>{state.replace("_", " ")}</span>
+        </td>
+        <td className="num">
+          {/* Blank is open-ended, not missing. Said in words so nobody reads it as a gap. */}
+          {sub?.current_period_end ? day(sub.current_period_end) : (live ? "Open-ended" : "—")}
+          {left !== null && <span className="faint"> · {left}d</span>}
+        </td>
+        <td className="num">
+          {row.fills === 0 ? <span className={cold ? "bad" : "faint"}>none</span> : row.fills.toLocaleString()}
+        </td>
+        <td className="num">{day(row.createdAt)}</td>
+        <td className="num">{day(row.lastSignInAt)}</td>
+        <td className="txt">
+          <div className="admin-set">
+            <select className="cell" value={status} onChange={(e) => setStatus(e.target.value)} aria-label={`Access for ${row.email}`}>
+              {["none", "trialing", "active", "past_due", "canceled"].map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+            <input className="cell" type="date" value={ends} onChange={(e) => setEnds(e.target.value)}
+              title="Leave blank for open-ended" aria-label={`Runs until, for ${row.email}`} />
+            <button className="btn" disabled={busy} onClick={() => onSet(row, status, ends ? `${ends}T23:59:59Z` : null)}>
+              {busy ? "…" : "Save"}
+            </button>
+          </div>
+        </td>
+      </tr>
+      {open && <AdminNotes row={row} onSaved={onSaved} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+/*
+ * The desk's own notes on somebody. Internal, and the customer has no way to read them:
+ * the table has no row level security policy at all, so nothing but the server reaches it.
+ */
+function AdminNotes({ row, onSaved, onClose }) {
+  const crm = row.crm ?? {};
+  const [d, setD] = useState({
+    fullName: crm.full_name ?? "", firm: crm.firm ?? "", phone: crm.phone ?? "",
+    stage: crm.stage ?? "new", notes: crm.notes ?? "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const set = (k) => (e) => setD((x) => ({ ...x, [k]: e.target.value }));
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch("/api/admin/customer", {
+        method: "POST", headers: await authHeader(),
+        body: JSON.stringify({ userId: row.id, ...d }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not save that.");
+      await onSaved();
+      onClose();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <tr className="admin-notes">
+      <td colSpan={8}>
+        <div className="admin-notes-in">
+          <div className="fg c2">
+            <F label="Name"><input className="in" value={d.fullName} onChange={set("fullName")} placeholder="Who you deal with" /></F>
+            <F label="Firm"><input className="in" value={d.firm} onChange={set("firm")} /></F>
+            <F label="Phone"><input className="in" value={d.phone} onChange={set("phone")} placeholder="+44 …" /></F>
+            <F label="Stage" hint="Where they are with you — not the same as whether their subscription is live">
+              <select className="in" value={d.stage} onChange={set("stage")}>
+                {STAGES.map((v) => <option key={v} value={v}>{v.replace("_", " ")}</option>)}
+              </select>
+            </F>
+          </div>
+          <F label="Notes" hint="Internal. The customer cannot see this.">
+            <textarea className="in" rows={4} value={d.notes} onChange={set("notes")}
+              placeholder="What they trade, what they asked for, what you promised." />
+          </F>
+          {err && <div className="signin-err">{err}</div>}
+          <div className="admin-set">
+            <button className="btn" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save notes"}</button>
+            <button className="btn ghost" onClick={onClose}>Close</button>
+          </div>
         </div>
       </td>
     </tr>

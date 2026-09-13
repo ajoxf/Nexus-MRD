@@ -25,7 +25,25 @@ export default async function handler(request, response) {
     .select("user_id, status, current_period_end, trial_started_at, cancel_at_period_end, provider");
   if (subsError) return json(response, 500, { error: "Could not read the subscriptions." });
 
+  const { data: crm } = await db
+    .from("customers")
+    .select("user_id, full_name, firm, phone, stage, notes");
+
+  /*
+   * How many fills each account has imported — a COUNT, never the fills.
+   *
+   * It is the difference between a trial going well and a trial going nowhere, and there is
+   * no way to see that from a subscription row: somebody eleven days into fourteen with
+   * nothing imported has not evaluated the product and is about to leave. The number says
+   * whether they got started. It says nothing about what they trade, at what price, or in
+   * what size, and this endpoint returns no row of anybody's book.
+   */
+  const { data: fillCounts } = await db.rpc("admin_fill_counts");
+  const counts = new Map();
+  if (Array.isArray(fillCounts)) for (const row of fillCounts) counts.set(row.user_id, Number(row.n) || 0);
+
   const byUser = new Map((subs ?? []).map((s) => [s.user_id, s]));
+  const byCrm = new Map((crm ?? []).map((c) => [c.user_id, c]));
   const customers = (page?.users ?? []).map((u) => ({
     id: u.id,
     email: u.email,
@@ -34,6 +52,8 @@ export default async function handler(request, response) {
     // Null where an account has never been given anything, which is a real answer and not
     // a missing one: it is the ordinary state of somebody who just signed up.
     sub: byUser.get(u.id) ?? null,
+    crm: byCrm.get(u.id) ?? null,
+    fills: counts.get(u.id) ?? 0,
   }));
 
   customers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));

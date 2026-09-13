@@ -574,3 +574,8 @@ td.faded { opacity: .35; }
 .admin-set { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .admin-set .cell { height: 28px; }
 .admin-set .btn { height: 28px; padding: 0 12px; font-size: 12px; }
+.admin .admin-name { font-size: 13px; font-weight: 600; color: var(--accent); text-align: left; }
+.admin-cold td { background: var(--warn-soft); }
+.admin-notes td { background: var(--panel2); }
+.admin-notes-in { display: grid; gap: 10px; padding: 12px 4px 14px; max-width: 760px; }
+.admin-notes-in textarea.in { height: auto; padding: 8px 10px; line-height: 1.5; resize: vertical; }
