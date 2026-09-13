@@ -527,3 +527,16 @@ td.faded { opacity: .35; }
 }
 .signin-card .btn.full.google-sso:hover { background: var(--hover); border-color: var(--line2); }
 .signin-card .btn.full.portal-sso { margin-top: 8px; }
+
+/* A password you can look at. The eye sits inside the field's own box, so the
+   field keeps its height and the layout does not move when it appears. */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap .in { width: 100%; padding-right: 40px; }
+.pw-eye {
+  position: absolute; right: 1px; top: 1px; bottom: 1px; width: 38px;
+  display: grid; place-items: center; background: none; border: 0; border-radius: 0 6px 6px 0;
+  color: var(--faint); cursor: pointer;
+}
+.pw-eye:hover { color: var(--dim); }
+.signin-err-hint { display: block; margin-top: 6px; color: var(--dim); }
+.signin-err-hint b { color: var(--text); font-weight: 600; }

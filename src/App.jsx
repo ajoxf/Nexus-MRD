@@ -240,6 +240,45 @@ const ICONS = {
   settings: <Icon d={<><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></>} />,
 };
 
+/*
+ * A password field you can look at.
+ *
+ * Typing a long password blind, into a field that shows only dots, is how people
+ * end up locked out of an account whose password they know perfectly well. The
+ * eye is a button rather than a decorated span so it is reachable by keyboard,
+ * and it says which state it will move you to rather than which state you are in.
+ *
+ * It starts hidden every time. Remembering "shown" across a page load would leave
+ * somebody's password on screen in an office, which is the thing a password field
+ * exists to prevent.
+ */
+function PasswordField({ value, onChange, autoComplete, autoFocus }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="pw-wrap">
+      <input className="in" type={shown ? "text" : "password"} required
+        autoComplete={autoComplete} autoFocus={autoFocus}
+        value={value} onChange={onChange} />
+      <button type="button" className="pw-eye" onClick={() => setShown((v) => !v)}
+        aria-label={shown ? "Hide password" : "Show password"} title={shown ? "Hide password" : "Show password"}>
+        {shown ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3 3l18 18" />
+            <path d="M10.6 5.2A9.7 9.7 0 0 1 12 5c5 0 9 4.5 10 7a15 15 0 0 1-3.2 4.1" />
+            <path d="M6.2 6.7A15.2 15.2 0 0 0 2 12c1 2.5 5 7 10 7a9.9 9.9 0 0 0 4.3-1" />
+            <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+          </svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
 // Google's own mark, in Google's own colours. Drawn rather than fetched: the
 // sign-in screen must not depend on a third party's server being up.
 const GoogleMark = () => (
@@ -325,16 +364,29 @@ function SignIn() {
   const [mode, setMode] = useState("in");     // "in" | "forgot"
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  // Whether to point a failed sign-in at the portal, where their password may live.
+  const [handover, setHandover] = useState(false);
   const [sent, setSent] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
-    setBusy(true); setErr(null);
+    setBusy(true); setErr(null); setHandover(false);
     try {
       if (mode === "forgot") { await auth.sendReset(email); setSent(true); }
       else await auth.signIn(email, password);
     } catch (e2) {
-      setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
+      /*
+       * "Wrong password" is true and useless to the person most likely to see it.
+       *
+       * An account opened through NordStar Pro — a trial, or a subscription — is
+       * created here with a password generated on the spot, which nobody is ever
+       * shown. Its owner has no password to type and no way to know that, so they
+       * try the one they use at the portal, are told it does not match, and try
+       * it again. The way in is the button at the top of this card, so say so.
+       */
+      const wrong = e2.message === "Invalid login credentials";
+      setErr(wrong ? "That email and password don't match." : e2.message);
+      setHandover(wrong && !!PORTAL_SSO_URL);
     } finally { setBusy(false); }
   };
 
@@ -380,11 +432,21 @@ function SignIn() {
       </F>
       {mode === "in" && (
         <F label="Password">
-          <input className="in" type="password" autoComplete="current-password" required
+          <PasswordField autoComplete="current-password"
             value={password} onChange={(e) => setPassword(e.target.value)} />
         </F>
       )}
-      {err && <div className="signin-err">{err}</div>}
+      {err && (
+        <div className="signin-err">
+          {err}
+          {handover && (
+            <span className="signin-err-hint">
+              If your account came from NordStar Pro you may never have set a password here —
+              use <b>Continue with NordStar Pro</b> above.
+            </span>
+          )}
+        </div>
+      )}
       <button className="btn full" disabled={busy}>
         {busy ? "Please wait…" : mode === "in" ? "Sign in" : "Email me a reset link"}
       </button>
@@ -510,11 +572,11 @@ function NewPassword({ onDone }) {
       <h2>Choose a new password</h2>
       <p className="lede">At least 8 characters.</p>
       <F label="New password">
-        <input className="in" type="password" autoComplete="new-password" required autoFocus
+        <PasswordField autoComplete="new-password" autoFocus
           value={password} onChange={(e) => setPassword(e.target.value)} />
       </F>
       <F label="Repeat it">
-        <input className="in" type="password" autoComplete="new-password" required
+        <PasswordField autoComplete="new-password"
           value={again} onChange={(e) => setAgain(e.target.value)} />
       </F>
       {tooShort && <div className="signin-err warn">Too short — use at least 8 characters.</div>}
