@@ -2455,12 +2455,16 @@ function MarginHistory({ pf, fills, settings, view, history }) {
   const axisFoot = (
     <>
       {dateTicks(axis).map((d) => (
-        <text key={d} x={x(d)} y={H - 22} fontSize="10" textAnchor="middle" fill="var(--faint)">
+        <text key={d} x={x(d)} y={H - 22} fontSize="10" fill="var(--faint)"
+          textAnchor={d === axis[0] ? "start" : d === axis[axis.length - 1] ? "end" : "middle"}>
           {shortDay(d)}
         </text>
       ))}
-      <text x={pad.l} y={H - 7} fontSize="9" fill="var(--faint)">{longDay(axis[0])}</text>
-      <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">{longDay(axis[axis.length - 1])}</text>
+      {/* The year, once, under the right-hand end — the ticks carry day and month and a
+          chart spanning a year boundary would otherwise never say which year it is in. */}
+      <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">
+        {new Date(endOfDay(axis[axis.length - 1])).getFullYear()}
+      </text>
     </>
   );
 
@@ -2507,9 +2511,9 @@ function MarginHistory({ pf, fills, settings, view, history }) {
           ))}
         </div>
         <div style={{ position: "relative" }}>
-          <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+          <svg viewBox={`0 0 ${W} ${H}`} role="img" className="chart-svg"
             aria-label={`Lots held per day by product, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
-            onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+            onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
             {ticks3(0, hi).map((t, i) => (
               <g key={i}>
                 <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" />
@@ -2541,8 +2545,10 @@ function MarginHistory({ pf, fills, settings, view, history }) {
               <b>{longDay(h.d)}</b>
               {totalAt(h) > 0 ? (
                 <>
-                  {products.filter((n) => h.prod[n]).map((n) => <span key={n}>{n} {qty(h.prod[n])}</span>)}
-                  <span className="tip-total">Total {qty(totalAt(h))} lots</span>
+                  {products.filter((n) => h.prod[n]).map((n) => (
+                    <span key={n} className="tip-row"><i>{n}</i><b>{qty(h.prod[n])}</b></span>
+                  ))}
+                  <span className="tip-row tip-total"><i>Total</i><b>{qty(totalAt(h))} lots</b></span>
                 </>
               ) : (
                 <span>Flat — nothing on the book</span>
@@ -2599,9 +2605,9 @@ function MarginHistory({ pf, fills, settings, view, history }) {
         ))}
       </div>
       <div style={{ position: "relative" }}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+        <svg viewBox={`0 0 ${W} ${H}`} role="img" className="chart-svg"
           aria-label={`${M.label} per broker account, ${longDay(axis[0])} to ${longDay(axis[axis.length - 1])}`}
-          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
           {ticks3(lo, hi).map((t, i) => (
             <g key={i}>
               <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" />
@@ -2645,7 +2651,11 @@ function MarginHistory({ pf, fills, settings, view, history }) {
             <b>{longDay(hover)}</b>
             {drawn.map((l) => {
               const p = l.vals.find((q) => q.d === hover);
-              return p ? <span key={l.id}>{l.name} {fmt(p.v)}{p.recorded ? "" : " · rebuilt"}</span> : null;
+              return p ? (
+                <span key={l.id} className="tip-row">
+                  <i>{l.name}{p.recorded ? "" : " · rebuilt"}</i><b>{fmt(p.v)}</b>
+                </span>
+              ) : null;
             })}
           </div>
         )}
@@ -2713,9 +2723,9 @@ function WinLossDays({ pf, view }) {
         <span><i style={{ background: "var(--bad)" }} />Losers</span>
       </div>
       <div style={{ position: "relative" }}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img"
+        <svg viewBox={`0 0 ${W} ${H}`} role="img" className="chart-svg"
           aria-label={`Winning and losing trades per day, ${longDay(days[0])} to ${longDay(days[days.length - 1])}`}
-          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ display: "block", cursor: "crosshair" }}>
+          onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
           <line x1={pad.l} x2={W - pad.r} y1={zero} y2={zero} stroke="var(--line2)" strokeWidth="1" />
           <text x={pad.l - 7} y={yUp(maxW) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{maxW}</text>
           <text x={pad.l - 7} y={zero + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">0</text>
@@ -2731,19 +2741,21 @@ function WinLossDays({ pf, view }) {
           {hover && <line x1={x(hover)} x2={x(hover)} y1={top} y2={bottom} stroke="var(--line2)" strokeWidth="1" />}
 
           {dateTicks(days).map((d) => (
-            <text key={d} x={x(d)} y={H - 22} fontSize="10" textAnchor="middle" fill="var(--faint)">{shortDay(d)}</text>
+            <text key={d} x={x(d)} y={H - 22} fontSize="10" fill="var(--faint)"
+              textAnchor={d === days[0] ? "start" : d === days[days.length - 1] ? "end" : "middle"}>{shortDay(d)}</text>
           ))}
-          <text x={pad.l} y={H - 7} fontSize="9" fill="var(--faint)">{longDay(days[0])}</text>
-          <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">{longDay(days[days.length - 1])}</text>
+          <text x={W - pad.r} y={H - 7} fontSize="9" textAnchor="end" fill="var(--faint)">
+            {new Date(endOfDay(days[days.length - 1])).getFullYear()}
+          </text>
         </svg>
 
         {h && (
           <div className="chart-tip" style={{ left: `${(x(h.d) / W) * 100}%` }}>
             <b>{longDay(h.d)}</b>
-            <span className="ok">{h.wins} won</span>
-            <span className="bad">{h.losses} lost</span>
-            {h.flat > 0 && <span>{h.flat} scratched</span>}
-            <span className="tip-total">{signed(h.net)} on the day</span>
+            <span className="tip-row ok"><i>Won</i><b>{h.wins}</b></span>
+            <span className="tip-row bad"><i>Lost</i><b>{h.losses}</b></span>
+            {h.flat > 0 && <span className="tip-row"><i>Scratched</i><b>{h.flat}</b></span>}
+            <span className="tip-row tip-total"><i>On the day</i><b>{signed(h.net)}</b></span>
           </div>
         )}
       </div>
@@ -2825,8 +2837,10 @@ function AnalysisTab({ pf, settings, view, fills }) {
         x to line them up. It is a metric on the chart above now, by date like everything
         else, and the peak and drawdown it used to caption are in the strip at the top.
       */}
-      {history}
-      {winLoss}
+      <div className="grid-charts">
+        {history}
+        {winLoss}
+      </div>
 
       <div className="grid-settings">
         <section className="panel">

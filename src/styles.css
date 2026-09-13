@@ -546,3 +546,21 @@ td.faded { opacity: .35; }
 .hist-legend.stack { margin: 0 0 8px; max-width: 100%; }
 .chart-tip .tip-total { margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(255,255,255,.25); }
 .chart-tip .ok { color: #7FE0B4; } .chart-tip .bad { color: #FF9DA5; }
+
+/* The charts are drawn in a 760-wide viewBox. Pinning a pixel height letterboxed
+   them in the middle of any wider panel, which is where the dead space came from:
+   height follows width instead, so the drawing fills the box it is given. */
+.chart-svg { display: block; width: 100%; height: auto; }
+
+/* Two charts across on a desk, stacked once a column would be too narrow to read a
+   date axis in. 470px is where the six date labels start to collide. */
+/* min() so the 470px floor collapses on a phone. A bare minmax(470px, 1fr) keeps the
+   track 470 wide inside a 390 viewport and pushes the whole page sideways. */
+.grid-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(470px, 100%), 1fr)); gap: 12px; align-items: start; }
+.grid-charts > .panel + .panel { margin-top: 0; }
+
+/* Name on the left, figure on the right, so a column of numbers reads as a column
+   rather than as the tail of whatever product name happens to precede it. */
+.chart-tip .tip-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.chart-tip .tip-row i { font-style: normal; min-width: 0; }
+.chart-tip .tip-row b { font-family: var(--num); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
