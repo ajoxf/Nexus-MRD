@@ -341,6 +341,19 @@ export default function App() {
   // Set when you arrive from a password-reset email: the link has already signed
   // you in, so show "choose a new password" rather than the desk.
   const [recovering, setRecovering] = useState(false);
+  /*
+   * The address bar is the router.
+   *
+   * A router library would be four hundred kilobytes to tell two paths apart. Vercel serves
+   * index.html for every non-endpoint path (see vercel.json), so this reads which one was
+   * asked for and the back button keeps working.
+   */
+  const [path, setPath] = useState(() => window.location.pathname.replace(/\/+$/, "") || "/");
+  useEffect(() => {
+    const on = () => setPath(window.location.pathname.replace(/\/+$/, "") || "/");
+    window.addEventListener("popstate", on);
+    return () => window.removeEventListener("popstate", on);
+  }, []);
 
   useEffect(() => {
     /*
@@ -367,7 +380,153 @@ export default function App() {
   if (user === undefined) return <div className="auth dim">Loading Nexus…</div>;
   if (recovering) return <SignInPage><NewPassword onDone={() => setRecovering(false)} /></SignInPage>;
   if (!user) return <SignInPage><SignIn /></SignInPage>;
+  /*
+   * /admin is checked before the subscription gate, not after.
+   *
+   * An operator's own subscription is beside the point — somebody has to be able to fix a
+   * billing problem while their own trial is expired, and locking the admin screens behind
+   * the paywall is how a business locks itself out of its own controls.
+   */
+  if (path === "/admin") return <ConfirmHost><AdminPage key={user.id} user={user} /></ConfirmHost>;
   return <ConfirmHost><Gate key={user.id} user={user} /></ConfirmHost>;
+}
+
+/*
+ * The operator's screen, at /admin.
+ *
+ * Subscriptions only — who signed up, what they hold, and the controls to change it by
+ * hand. It shows no fills, no positions and no figure from anybody's book. Running the
+ * business does not need that, and helping yourself to a customer's trading because you
+ * happen to own the database is the kind of thing that has to be disclosed before it is
+ * built, not discovered afterwards.
+ */
+function AdminPage({ user }) {
+  const [allowed, setAllowed] = useState(undefined);
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try {
+      const r = await fetch("/api/admin/customers", { headers: await authHeader() });
+      if (r.status === 403) { setAllowed(false); return; }
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not load the accounts.");
+      setAllowed(true);
+      setRows(body.customers);
+    } catch (e) { setErr(e.message); setAllowed(true); }
+  }, []);
+
+  useEffect(() => { db.isAdmin().then((ok) => { if (!ok) setAllowed(false); else load(); }); }, [load]);
+
+  const setSub = async (row, status, endsAt) => {
+    setBusy(row.id); setErr(null);
+    try {
+      const r = await fetch("/api/admin/subscription", {
+        method: "POST",
+        headers: await authHeader(),
+        body: JSON.stringify({ userId: row.id, status, currentPeriodEnd: endsAt || null }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not save that.");
+      await load();
+    } catch (e) { setErr(e.message); } finally { setBusy(null); }
+  };
+
+  if (allowed === undefined) return <div className="auth dim">Checking…</div>;
+
+  /*
+   * A plain "not found", not "you are not an admin".
+   *
+   * Telling somebody the page exists and they are not important enough is an invitation to
+   * keep trying. It also says nothing about who is.
+   */
+  if (allowed === false) return (
+    <SignInPage>
+      <div className="signin-card">
+        <h2>Nothing here</h2>
+        <p className="lede">That page does not exist for this account.</p>
+        <a className="btn full" href="/">Back to the desk</a>
+      </div>
+    </SignInPage>
+  );
+
+  return (
+    <div className="admin">
+      <header className="admin-top">
+        <div>
+          <h1>Nexus admin</h1>
+          <p className="dim">Subscriptions. No customer's trading is shown here.</p>
+        </div>
+        <div className="admin-who">
+          <span className="dim">{user.email}</span>
+          <a className="btn ghost" href="/">Back to the desk</a>
+        </div>
+      </header>
+
+      {err && <div className="signin-err" style={{ margin: "0 0 12px" }}>{err}</div>}
+
+      <section className="panel">
+        <div className="ph">
+          <h2>Accounts<span className="dim">{rows ? rows.length : ""}</span></h2>
+          <button className="btn ghost" onClick={load}>Refresh</button>
+        </div>
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th className="txt">Email</th><th className="txt">Status</th><th>Runs until</th>
+              <th>Trialled</th><th>Signed up</th><th>Last seen</th><th className="txt">Change</th>
+            </tr></thead>
+            <tbody>
+              {!rows && <tr><td colSpan={7} className="dim">Loading…</td></tr>}
+              {rows && rows.length === 0 && <tr><td colSpan={7} className="dim">No accounts yet.</td></tr>}
+              {rows?.map((row) => <AdminRow key={row.id} row={row} busy={busy === row.id} onSet={setSub} />)}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AdminRow({ row, busy, onSet }) {
+  const sub = row.sub;
+  const state = accessState(sub);
+  const live = hasAccess(sub);
+  const [status, setStatus] = useState(sub?.status ?? "none");
+  const [ends, setEnds] = useState(sub?.current_period_end ? sub.current_period_end.slice(0, 10) : "");
+  const day = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+  const left = daysLeft(sub);
+
+  return (
+    <tr>
+      <td className="txt">{row.email}</td>
+      <td className="txt">
+        <span className={`pill ${live ? "ok" : state === "none" ? "dim" : "bad"}`}>{state.replace("_", " ")}</span>
+      </td>
+      <td className="num">
+        {/* Blank is open-ended, not missing. Said in words so nobody reads it as a gap. */}
+        {sub?.current_period_end ? day(sub.current_period_end) : (live ? "Open-ended" : "—")}
+        {left !== null && <span className="faint"> · {left}d</span>}
+      </td>
+      <td className="num">{sub?.trial_started_at ? day(sub.trial_started_at) : "—"}</td>
+      <td className="num">{day(row.createdAt)}</td>
+      <td className="num">{day(row.lastSignInAt)}</td>
+      <td className="txt">
+        <div className="admin-set">
+          <select className="cell" value={status} onChange={(e) => setStatus(e.target.value)} aria-label={`Status for ${row.email}`}>
+            {["none", "trialing", "active", "past_due", "canceled"].map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
+          <input className="cell" type="date" value={ends} onChange={(e) => setEnds(e.target.value)}
+            title="Leave blank for open-ended" aria-label={`Runs until, for ${row.email}`} />
+          <button className="btn" disabled={busy} onClick={() => onSet(row, status, ends ? `${ends}T23:59:59Z` : null)}>
+            {busy ? "…" : "Save"}
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
 }
 
 /*

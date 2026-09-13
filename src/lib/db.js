@@ -41,6 +41,19 @@ const remote = {
     if (error) throw error;
     return data ?? null;
   },
+  /*
+   * Is the signed-in account an operator?
+   *
+   * Reads the caller's own row and nobody else's — the policy on that table allows exactly
+   * that. This decides whether to SHOW the admin screens; every admin endpoint checks the
+   * same table again on the server, so a client that lies about this gets a locked door
+   * rather than a key.
+   */
+  async isAdmin() {
+    const { data, error } = await supabase.from("admins").select("user_id").maybeSingle();
+    if (error) return false;
+    return !!data;
+  },
   async getUser() {
     const { data } = await supabase.auth.getSession();
     const u = data?.session?.user;
@@ -196,6 +209,8 @@ const local = {
    * behind a payment screen that could not be completed anyway.
    */
   async loadSubscription() { return { status: "active", current_period_end: null, trial_started_at: null }; },
+  // Nobody to administer in browser-storage mode: there is one account and it is this one.
+  async isAdmin() { return false; },
   async getUser() { return { id: "local", email: "This browser" }; },
   async loadSettings() { return JSON.parse(localStorage.getItem(LS_SETTINGS) || "null"); },
   async saveSettings(obj) { localStorage.setItem(LS_SETTINGS, JSON.stringify(obj)); },

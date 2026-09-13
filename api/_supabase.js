@@ -30,3 +30,22 @@ export async function callerFrom(request, db) {
 }
 
 export const json = (res, status, body) => res.status(status).json(body);
+
+/**
+ * The caller, if they are an operator. Null otherwise.
+ *
+ * Checked against the admins table with the service role, never against anything the
+ * browser said. Hiding the admin screens in the client is a courtesy so customers are not
+ * shown a door they cannot open; THIS is the lock, and it is on the server side of it.
+ */
+export async function adminFrom(request, db) {
+  const user = await callerFrom(request, db);
+  if (!user) return null;
+  const { data, error } = await db
+    .from("admins")
+    .select("user_id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (error || !data) return null;
+  return user;
+}

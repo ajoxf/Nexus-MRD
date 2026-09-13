@@ -564,3 +564,13 @@ td.faded { opacity: .35; }
 .chart-tip .tip-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .chart-tip .tip-row i { font-style: normal; min-width: 0; }
 .chart-tip .tip-row b { font-family: var(--num); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- admin ---------- */
+.admin { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+.admin-top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.admin-top h1 { margin: 0; font-size: 22px; font-weight: 600; color: var(--navy); letter-spacing: -.02em; }
+.admin-top p { margin: 2px 0 0; font-size: 12px; }
+.admin-who { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.admin-set { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.admin-set .cell { height: 28px; }
+.admin-set .btn { height: 28px; padding: 0 12px; font-size: 12px; }
