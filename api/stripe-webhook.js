@@ -1,6 +1,7 @@
 import { HANDLED_EVENTS, rowFromStripe } from "../src/lib/billing.js";
 import { json, serviceClient } from "./_supabase.js";
 import { rawBody, stripeClient } from "./_stripe.js";
+import { sendOnce } from "./_email.js";
 
 /*
  * Vercel parses JSON bodies for you. Stripe signs the exact bytes it sent, and a
@@ -110,6 +111,30 @@ export default async function handler(request, response) {
       // exactly the case worth retrying.
       console.error("[stripe-webhook] write failed", error.message);
       return json(response, 500, { error: "Could not record that." });
+    }
+
+    /*
+     * Told once per period, not once per event.
+     *
+     * Stripe sends several events for one renewal — invoice paid, subscription updated —
+     * and `ref` being the period end means they collapse into a single email. The customer
+     * sees one confirmation a month, which is what they would expect from a bank.
+     */
+    const { data: who } = await db.auth.admin.getUserById(userId);
+    const to = who?.user?.email;
+    if (to) {
+      const site = (process.env.SITE_URL || "https://nexus-funds.vercel.app").replace(/\/+$/, "");
+      if (row.status === "active" && event.type !== "customer.subscription.deleted") {
+        await sendOnce(db, {
+          userId, to, kind: "subscribed", ref: row.current_period_end ?? "open",
+          data: { endsAt: row.current_period_end ?? new Date().toISOString(), url: `${site}/` },
+        });
+      } else if (row.status === "past_due") {
+        await sendOnce(db, {
+          userId, to, kind: "payment_failed", ref: row.current_period_end ?? String(event.created),
+          data: { url: `${site}/` },
+        });
+      }
     }
 
     return json(response, 200, { ok: true, status: row.status });

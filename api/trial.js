@@ -1,5 +1,13 @@
 import { canStartTrial } from "../src/lib/access.js";
 import { callerFrom, json, serviceClient } from "./_supabase.js";
+import { sendOnce } from "./_email.js";
+
+const siteRoot = (request) => {
+  const configured = process.env.SITE_URL;
+  if (configured) return configured.replace(/\/+$/, "");
+  const host = request.headers["x-forwarded-host"] || request.headers.host;
+  return `${request.headers["x-forwarded-proto"] || "https"}://${host}`;
+};
 
 /** How long a Nexus trial runs. One place, so the row and the copy cannot disagree. */
 export const TRIAL_DAYS = 14;
@@ -31,6 +39,20 @@ export default async function handler(request, response) {
   if (!user) return json(response, 401, { error: "Sign in first." });
 
   const result = await grantTrial(db, user.id);
+
+  /*
+   * After the grant, and never in front of it. An email provider having a bad afternoon
+   * must not cost somebody their trial — sendOnce swallows its own failures for the same
+   * reason, so there is nothing here to await defensively.
+   */
+  if (result.status === 200) {
+    await sendOnce(db, {
+      userId: user.id, to: user.email, kind: "trial_started",
+      ref: result.body.endsAt,
+      data: { days: result.body.days, endsAt: result.body.endsAt, url: siteRoot(request) },
+    });
+  }
+
   return json(response, result.status, result.body);
 }
 
