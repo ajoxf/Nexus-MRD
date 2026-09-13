@@ -536,13 +536,28 @@ function useTrialOffer() {
     let cancelled = false;
     const stop = new AbortController();
     const timer = setTimeout(() => stop.abort(), 6000);
-    fetch(`${PORTAL_URL}/api/trial/status`, { signal: stop.signal })
+    /*
+     * Asks about THIS product by name.
+     *
+     * The portal can have several trials open at once, so "is a trial open" is no longer
+     * a question with one answer. Naming the item also removes the check that used to sit
+     * below — the portal cannot hand back an offer for something else when it was asked
+     * about this.
+     */
+    fetch(`${PORTAL_URL}/api/trial/status?item=${encodeURIComponent(RAMP_ITEM_SLUG)}`, {
+      signal: stop.signal,
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
+        // Belt and braces: a portal that ignored the parameter must not get a free pass.
         if (cancelled || !d?.open || d.slug !== RAMP_ITEM_SLUG) return;
         const days = Number(d.days);
         if (!Number.isFinite(days) || days < 1) return;
-        setOffer({ days: Math.round(days), url: `${PORTAL_URL}/trial` });
+        const url =
+          typeof d.url === "string" && d.url.startsWith(`${PORTAL_URL}/`)
+            ? d.url
+            : `${PORTAL_URL}/trial?item=${encodeURIComponent(RAMP_ITEM_SLUG)}`;
+        setOffer({ days: Math.round(days), url });
       })
       .catch(() => {});
     return () => { cancelled = true; clearTimeout(timer); stop.abort(); };
