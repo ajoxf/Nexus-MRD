@@ -2143,7 +2143,7 @@ function Tracker({ user }) {
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
   const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
-  const addFills = async (rows) => { const added = await db.addFills(rows); await reloadFills(); return added; };
+  const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
 
   // scope for the top bar
@@ -2878,6 +2878,26 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     return { bid, prod, size: v.size, samples: v.samples, cur, differs: cur !== undefined && Math.abs(n(cur) - v.size) / v.size > 0.02 };
   }) : [];
   const toImport = parsed ? parsed.rows.filter((r) => r.status === "new" || (includeManual && r.status === "manual")) : [];
+
+  /*
+   * Fills already stored, but which this file can now say more about.
+   *
+   * Without this the repair is unreachable. A file imported before the app could recover MT5
+   * position tickets left every row without one; re-importing it classifies all of them as
+   * duplicates, so there is nothing to import and the button is disabled — the trader is told
+   * their file holds nothing new while the thing they came to fix goes untouched. The only way
+   * through was to delete the lot and start again.
+   *
+   * Strictly additive: a stored fill that already has a ticket is left alone.
+   */
+  const storedByRef = useMemo(() => {
+    const m = new Map();
+    for (const f of fills) m.set(`${f.broker || "default"}|${f.ref}`, f);
+    return m;
+  }, [fills]);
+  const toRepair = parsed
+    ? parsed.rows.filter((r) => r.status === "stored" && r.position && !storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position)
+    : [];
   // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)
   const cashKey = (c) => `${c.broker}|${c.type}|${(+c.amount).toFixed(2)}|${String(c.ts).slice(0, 16)}`;
   const cashNew = parsed ? (() => { const have = new Set((settings.cash || []).map(cashKey)); return parsed.cash.filter((c) => !have.has(cashKey(c))); })() : [];
@@ -2886,7 +2906,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const doImport = async () => {
     setBusy(true);
     try {
-      const payload = toImport.map(({ key, status, matchTs, _profit, ...f }) => f);
+      const payload = [...toImport, ...toRepair].map(({ key, status, matchTs, _profit, ...f }) => f);
       const ids = new Set(brokers.map((b) => b.id));
       const newIds = [...new Set(payload.map((f) => f.broker))].filter((id) => !ids.has(id));
       setSettings((st) => {
@@ -2911,10 +2931,12 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
       });
       const newCash = importCash ? cashNew : [];
       if (newCash.length) setSettings((st) => ({ ...st, cash: [...(st.cash || []), ...newCash.map((c) => ({ ...c, id: crypto.randomUUID(), source: "csv" }))] }));
-      const added = payload.length ? await addFills(payload) : 0;
+      const { added, updated } = payload.length ? await addFills(payload) : { added: 0, updated: 0 };
       setBroker(tb.id, "csv", { map, dateFormat });
-      const skipped = parsed.rows.length - added;
-      setResult(["ok", `${newCash.length ? `Added ${newCash.length} deposit/withdrawal${newCash.length === 1 ? "" : "s"} to Funds · ` : ""}Imported ${added} new fill${added === 1 ? "" : "s"} to ${newIds.length || splitting ? acctVals.join(" & ") : tb.name}${newIds.length ? ` · created ${newIds.length} account${newIds.length === 1 ? "" : "s"} — record their deposits in Funds` : ""}${skipped ? ` · ${skipped} duplicate${skipped === 1 ? "" : "s"} skipped` : ""}${parsed.nonTrade ? ` · ${parsed.nonTrade} non-trade rows ignored` : ""}${parsed.errors.length ? ` · ${parsed.errors.length} unreadable rows` : ""}`]);
+      // A repaired row is neither new nor skipped; counting it as skipped would report a
+      // duplicate where something was actually put right.
+      const skipped = Math.max(0, parsed.rows.length - added - updated);
+      setResult(["ok", `${newCash.length ? `Added ${newCash.length} deposit/withdrawal${newCash.length === 1 ? "" : "s"} to Funds · ` : ""}Imported ${added} new fill${added === 1 ? "" : "s"}${updated ? ` · updated ${updated} existing fill${updated === 1 ? "" : "s"} with position tickets` : ""} to ${newIds.length || splitting ? acctVals.join(" & ") : tb.name}${newIds.length ? ` · created ${newIds.length} account${newIds.length === 1 ? "" : "s"} — record their deposits in Funds` : ""}${skipped ? ` · ${skipped} duplicate${skipped === 1 ? "" : "s"} skipped` : ""}${parsed.nonTrade ? ` · ${parsed.nonTrade} non-trade rows ignored` : ""}${parsed.errors.length ? ` · ${parsed.errors.length} unreadable rows` : ""}`]);
       reset();
     } catch (e) { setResult(["bad", `Import failed: ${e.message}`]); }
     setBusy(false);
@@ -3101,7 +3123,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
                 </div>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}` : "Nothing new to import"}</button>
+                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} with position tickets` : "Nothing new to import"}</button>
                 <button className="btn ghost" onClick={reset}>Cancel</button>
               </div>
             </>

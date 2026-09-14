@@ -78,19 +78,56 @@ const remote = {
     }
     return all;
   },
-  // returns number of new fills stored (duplicates are skipped)
+  /*
+   * Store fills, and let a re-import repair what an older one could not read.
+   *
+   * Returns { added, updated }: new fills stored, and existing fills refreshed.
+   *
+   * The second half matters more than it looks. A file imported before the app learned to
+   * recover MT5 position tickets produced rows with no ticket, and re-importing it skipped
+   * every row as a duplicate — so the fix could never reach anybody who had already
+   * uploaded. The only way out was to delete a season's trading and start again, which is
+   * not a thing to ask of somebody reconciling against a statement.
+   *
+   * So a row carrying information the stored one lacks is written over it. Same file, same
+   * broker, same fill id, read better — the update is the same trade with more known about
+   * it, never a different trade. Rows that add nothing new are still skipped, so the count
+   * of genuinely new fills stays honest.
+   */
   async addFills(rows) {
     const uid = await myId();
+    const owned = rows.map((r) => ({ ...r, user_id: uid }));
     let added = 0;
-    for (let i = 0; i < rows.length; i += CHUNK) {
+
+    for (let i = 0; i < owned.length; i += CHUNK) {
       const { data, error } = await supabase
         .from("fills")
-        .upsert(rows.slice(i, i + CHUNK).map((r) => ({ ...r, user_id: uid })), { onConflict: "user_id,broker,ref", ignoreDuplicates: true })
+        .upsert(owned.slice(i, i + CHUNK), { onConflict: "user_id,broker,ref", ignoreDuplicates: true })
         .select("id");
       if (error) throw error;
       added += data.length;
     }
-    return added;
+
+    /*
+     * Only rows that now carry a position ticket, and only when the file has more of them
+     * than landed as new fills — i.e. some of them were skipped as duplicates.
+     */
+    const ticketed = owned.filter((r) => r.position);
+    if (!ticketed.length || ticketed.length <= added) return { added, updated: 0 };
+
+    let updated = 0;
+    for (let i = 0; i < ticketed.length; i += CHUNK) {
+      const { data, error } = await supabase
+        .from("fills")
+        .upsert(ticketed.slice(i, i + CHUNK), { onConflict: "user_id,broker,ref" })
+        .select("id");
+      // Never fatal: the fills are stored either way, and a ticket that did not take is a
+      // re-import away rather than a reason to fail an import that otherwise worked.
+      if (error) { console.error("[fills] could not refresh existing rows:", error.message); break; }
+      updated += data.length;
+    }
+    // The rows that were new were refreshed too; only the repairs are worth reporting.
+    return { added, updated: Math.max(0, updated - added) };
   },
   async deleteFill(id) {
     const { error } = await supabase.from("fills").delete().eq("id", id);
@@ -254,15 +291,22 @@ const local = {
   async addFills(rows) {
     const cur = readFills();
     const rk = (f) => `${f.broker || "default"}|${f.ref}`;
-    const refs = new Set(cur.map(rk));
+    const byKey = new Map(cur.map((f) => [rk(f), f]));
     const fresh = [];
+    let updated = 0;
     for (const r of rows) {
-      if (refs.has(rk(r))) continue;
-      refs.add(rk(r));
-      fresh.push({ ...r, id: crypto.randomUUID(), created_at: new Date().toISOString() });
+      const existing = byKey.get(rk(r));
+      if (existing) {
+        // Same repair as the database path: a re-import that can read more fills it in.
+        if (r.position && !existing.position) { Object.assign(existing, r); updated += 1; }
+        continue;
+      }
+      const row = { ...r, id: crypto.randomUUID(), created_at: new Date().toISOString() };
+      byKey.set(rk(r), row);
+      fresh.push(row);
     }
     writeFills([...cur, ...fresh]);
-    return fresh.length;
+    return { added: fresh.length, updated };
   },
   async deleteFill(id) { writeFills(readFills().filter((f) => f.id !== id)); },
   async deleteAllFills() { writeFills([]); },
