@@ -6,6 +6,7 @@ import { isOptionSymbol } from "./lib/options.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
+import { authErrorCopy } from "./lib/auth-errors.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
@@ -1720,14 +1721,20 @@ function SignIn() {
       else if (mode === "up") { await auth.signUp(email, password, { firstName, lastName, whatsapp }); setSent("up"); }
       else await auth.signIn(email, password);
     } catch (e2) {
-      setErr(e2.message === "Invalid login credentials" ? "That email and password don't match." : e2.message);
+      /*
+       * Translated rather than passed through. Supabase writes for whoever is building the
+       * thing; this is read by somebody trying to get to their book before the open.
+       */
+      setErr(authErrorCopy(e2.message, mode));
     } finally { setBusy(false); }
   };
 
   const withGoogle = async () => {
     setBusy(true); setErr(null);
     try { await auth.signInWithGoogle(); }
-    catch (e2) { setErr(e2.message); setBusy(false); }
+    // Through the same translator as the email path: `err` is copy here, not a raw string,
+    // and a bare message would render an empty red box.
+    catch (e2) { setErr(authErrorCopy(e2.message, mode)); setBusy(false); }
   };
 
   if (sent) return (
@@ -1799,7 +1806,17 @@ function SignIn() {
             value={password} onChange={(e) => setPassword(e.target.value)} />
         </F>
       )}
-      {err && <div className="signin-err">{err}</div>}
+      {/*
+        * An error we caused reads differently from one they caused. Same box, different
+        * opening — being told to check your details when the fault is at our end is how a
+        * customer concludes the product is blaming them for its own outage.
+        */}
+      {err && (
+        <div className="signin-err">
+          {err.ours && <b style={{ display: "block", marginBottom: 2 }}>This one is on us.</b>}
+          {err.text}
+        </div>
+      )}
       <button className="btn full" disabled={busy}>
         {busy ? "Please wait…" : mode === "in" ? "Sign in" : mode === "up" ? "Create my account" : "Email me a reset link"}
       </button>
