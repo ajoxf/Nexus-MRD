@@ -179,7 +179,21 @@ function portfolio(fills, settings, now = new Date()) {
     const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
     const risk = hasStop ? Math.max(0, dir * (mark - n(stop))) * size * p.lots : null;
-    return { ...p, key, brokerName: br.name, spec, dir, mark, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: br.method === "fixed" && !n(spec.margin), method: br.method };
+    /*
+     * A current price on the opposite side of zero from the entry.
+     *
+     * On a spread this is nearly always a dropped minus sign, and it is expensive: a
+     * position opened at -9.13 and marked at +9.13 books an 18.26 move that never
+     * happened, which flows into open P&L, into TNE, and into the TNE/IM ratio that
+     * decides whether the account reads "Healthy". Nothing else in the app would
+     * question it, because the arithmetic is correct — only the input is wrong.
+     *
+     * Flagged, never corrected. A price is the trader's to state, and silently flipping a
+     * sign on somebody's mark would be a worse bug than the one it fixes.
+     */
+    const markGiven = has(M[key]?.price);
+    const signFlip = markGiven && mark !== 0 && p.avg !== 0 && Math.sign(mark) !== Math.sign(p.avg);
+    return { ...p, key, brokerName: br.name, spec, dir, mark, markGiven, signFlip, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: br.method === "fixed" && !n(spec.margin), method: br.method };
   });
 
   const accounts = B.map((b) => {
@@ -2377,6 +2391,12 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   accts.forEach((a) => { if (!n(a.capital) && a.rows.length) warnings.unshift(["warn", `${a.name}: no funds recorded. Add its deposits in Funds, or TNE/IM and the scenario are wrong.`]); });
   rows.forEach((r) => {
     const nm = all ? `${r.brokerName} ${r.product}` : r.product;
+    /*
+     * First in the list and marked bad, because every other figure on the screen is
+     * downstream of it — and unlike a missing stop, this one is silently WRONG rather
+     * than merely incomplete.
+     */
+    if (r.signFlip) warnings.push(["bad", `${nm}: current price ${px(r.mark)} is ${r.mark > 0 ? "positive" : "negative"} but the position was opened at ${px(r.avg)}. Check the sign — this is putting ${signed(r.upnl)} into your open P&L, your equity and your TNE/IM.`]);
     if (r.noMargin) warnings.push(["warn", `${nm}: broker margin per lot not set (Settings). TNE/IM is understated.`]);
     if (!r.hasStop) warnings.push(["warn", `${nm}: no stop — risk is unlimited.`]);
     else if (r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity)) warnings.push(["bad", `${nm}: risk ${money(r.risk)} exceeds per-trade limit ${money(pf.acct(r.broker).riskCap)}.`]);
@@ -2443,7 +2463,13 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
                       <td><Side s={r.side} /></td>
                       <td>{qty(r.lots)}</td>
                       <td><b>{px(r.avg)}</b></td>
-                      <td><input className="cell" type="number" step="0.01" placeholder={px(r.avg)} value={settings.marks[r.key]?.price ?? ""} onChange={(e) => setMark(r.key, "price", e.target.value)} aria-label={`Current price ${r.product} ${r.brokerName}`} /></td>
+                      {/* Flagged at the input as well as in Warnings: this is the box the
+                          correction gets typed into, so it is where the red belongs. */}
+                      <td><input className={`cell ${r.signFlip ? "need" : ""}`} type="number" step="0.01"
+                        placeholder={px(r.avg)} value={settings.marks[r.key]?.price ?? ""}
+                        title={r.signFlip ? `Opened at ${px(r.avg)} — check the sign` : undefined}
+                        onChange={(e) => setMark(r.key, "price", e.target.value)}
+                        aria-label={`Current price ${r.product} ${r.brokerName}`} /></td>
                       <td><input className={`cell ${r.hasStop ? "" : "need"}`} type="number" step="0.01" placeholder="Set" value={settings.marks[r.key]?.stop ?? ""} onChange={(e) => setMark(r.key, "stop", e.target.value)} aria-label={`Stop ${r.product} ${r.brokerName}`} /></td>
                       <td className={pc(r.upnl)}><b>{signed(r.upnl)}</b></td>
                       <td className={r.noMargin ? "warn" : ""} title={r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
