@@ -2840,8 +2840,8 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     setResult(null);
     setAiState(null);
     try {
-      const { headers, rows } = await parseCsvFile(file);
-      setCsv({ name: file.name, headers, rows });
+      const { headers, rows, layout, mt5 } = await parseCsvFile(file);
+      setCsv({ name: file.name, headers, rows, layout, mt5 });
       applyLayout(headers, target);
       // Only when asked, and only when the regexes have not already found a saved layout.
       if (aiHelp) await askForMapping(headers, rows);
@@ -2987,6 +2987,19 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
           ) : (
             <>
               <div><b>{csv.name}</b> <span className="dim">· {csv.rows.length} rows</span>{savedLayout && <span className="ok" style={{ fontSize: 11, marginLeft: 6 }}>Using {tb.name}'s saved layout</span>}</div>
+
+              {/*
+                * Said out loud, because it is the difference between agreeing with the
+                * customer's statement and not. A hedging account matches each close against
+                * the position it closed; recovering those tickets is what makes the P&L here
+                * the same number the broker shows.
+                */}
+              {csv.mt5 > 0 && (
+                <div className="ok" style={{ fontSize: 12 }}>
+                  MT5 report recognised — position tickets recovered for {csv.mt5} deals, so closed
+                  trades are matched per position and will agree with your statement.
+                </div>
+              )}
 
               {/*
                 * Opt-in, and it says exactly what leaves the desk before it leaves.

@@ -106,6 +106,101 @@ function resplit(rows) {
   return rows;
 }
 
+/*
+ * MT5 "Trade History Report": giving every deal its position ticket.
+ *
+ * A hedging account does not net. Each position is its own ticket with its own entry, and the
+ * broker matches a close against THAT ticket — so closing a lot opened at 95.532 for 95.485 is
+ * a 47-cent loss, whatever else is open at a lower price. Match it any other way (running
+ * average, oldest-first) and the P&L disagrees with the customer's statement, which for this
+ * product is the whole ball game.
+ *
+ * The Deals sheet does not carry the position ticket. The rest of the report does, in two
+ * halves, and between them every deal can be placed:
+ *
+ *   an OPENING deal — MT5 numbers a new position after the order that opened it, so the
+ *                     ticket IS the Order. Verified against the report's own tables.
+ *   a CLOSING deal  — the Positions section lists each closed position with the time and
+ *                     price it closed at, which identifies the deal that closed it.
+ *
+ * With that column filled in, computeBook's existing per-ticket path does the matching and the
+ * figures agree with the broker. Nothing here invents a number: it only says which trade each
+ * deal belongs to.
+ */
+
+/** The rows of one titled section — a title row, a header row, then data until the next title. */
+function sectionRows(rows, title) {
+  const isTitle = (r) => r.filter(Boolean).length === 1;
+  const at = rows.findIndex((r) => isTitle(r) && new RegExp(`^${title}$`, "i").test(r.find(Boolean) || ""));
+  if (at < 0) return [];
+  const out = [];
+  for (let i = at + 2; i < rows.length; i++) {      // +2 skips the title and its header
+    const r = rows[i];
+    if (r.filter(Boolean).length <= 1) break;
+    out.push(r);
+  }
+  return out;
+}
+
+/** Same number written two ways in two sections ("0.01" / "0.010") must key the same. */
+const keyNum = (v) => {
+  const x = Number(String(v ?? "").replace(/[\s,]/g, ""));
+  return Number.isFinite(x) ? String(x) : String(v ?? "").trim();
+};
+const keyTime = (v) => String(v ?? "").trim();
+
+/**
+ * Adds a "Position" column to a parsed MT5 deals table. Returns the new headers, or null when
+ * this is not an MT5 deals table and nothing should change.
+ */
+export function mt5Positions(rows, headers, body) {
+  const has = (name) => headers.some((h) => h.toLowerCase() === name);
+  // Direction (in/out) with an Order column is the MT5 deals table and nothing else.
+  if (!has("direction") || !has("order") || !has("deal")) return null;
+
+  /*
+   * Closed positions, keyed by the close they were matched to. Column positions rather than
+   * names: this section has Time and Price TWICE — opened, then closed — and a lookup by name
+   * would silently take the opening one and map every close to the wrong ticket.
+   */
+  const POS_TICKET = 1, POS_SYMBOL = 2, POS_VOLUME = 4, POS_CLOSE_TIME = 8, POS_CLOSE_PRICE = 9;
+  const closedBy = new Map();
+  for (const r of sectionRows(rows, "Positions")) {
+    const ticket = String(r[POS_TICKET] ?? "").trim();
+    if (!ticket) continue;
+    closedBy.set(
+      [String(r[POS_SYMBOL] ?? "").trim(), keyNum(r[POS_VOLUME]), keyTime(r[POS_CLOSE_TIME]), keyNum(r[POS_CLOSE_PRICE])].join("|"),
+      ticket,
+    );
+  }
+
+  let filled = 0;
+  for (const row of body) {
+    const dir = String(row.Direction ?? "").trim().toLowerCase();
+    if (dir === "in") {
+      // The opening order's ticket becomes the position's ticket.
+      const order = String(row.Order ?? "").trim();
+      if (order) { row.Position = order; filled += 1; }
+    } else if (dir === "out") {
+      const k = [String(row.Symbol ?? "").trim(), keyNum(row.Volume), keyTime(row.Time), keyNum(row.Price)].join("|");
+      const ticket = closedBy.get(k);
+      /*
+       * Left blank when the close cannot be placed — a partial close, or a report whose
+       * Positions section was trimmed by a date filter. Blank falls back to the account's
+       * normal matching rather than guessing at a ticket, because a close attached to the
+       * WRONG position is worse than one attached to none.
+       */
+      if (ticket) { row.Position = ticket; filled += 1; }
+      else row.Position = "";
+    } else {
+      row.Position = "";
+    }
+  }
+
+  if (!filled) return null;
+  return { headers: [...headers, "Position"], matched: filled };
+}
+
 export function tableFromRows(raw) {
   const rows = resplit(raw.map((r) => r.map((c) => String(c ?? "")))).map((r) => r.map((c) => String(c ?? "").trim()));
   if (looksLikeTtFills(rows)) {
@@ -143,6 +238,14 @@ export function tableFromRows(raw) {
     headers.forEach((h, j) => { obj[h] = r[j] ?? ""; });
     body.push(obj);
   }
+  /*
+   * An MT5 report gets its position tickets filled in before anybody sees the mapping screen,
+   * so the Position column is simply there to be mapped like any other — and guessMapping
+   * picks it up on its own.
+   */
+  const mt5 = mt5Positions(rows, headers, body);
+  if (mt5) return { headers: mt5.headers, rows: body, headerLine: best + 1, layout: "MT5 report · position tickets recovered", mt5: mt5.matched };
+
   return { headers, rows: body, headerLine: best + 1 };
 }
 
