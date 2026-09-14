@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Nexus RAMP">
+  <!--
+    The same mark as the left rail and the sign-in page: navy tile, white N.
+
+    The N is a path rather than text on purpose. A favicon is rendered outside the page, where
+    none of our fonts are loaded — set in type it would fall back to whatever the browser had
+    and look like a different product on every machine. Drawn, it is the same shape everywhere.
+
+    Navy rather than white, because a tab strip is light in one theme and dark in the other and
+    a white tile disappears into the first one.
+  -->
+  <rect width="32" height="32" rx="6" fill="#12233B"/>
+  <path fill="#FFFFFF" d="M8.6 24V8h4.6l5.6 9.3V8h4.6v16h-4.6l-5.6-9.3V24z"/>
+</svg>

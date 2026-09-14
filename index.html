@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#12233B" />
+
+    <!--
+      The tab mark. SVG first, so it stays sharp on any display and in any tab size; the PNG is
+      the fallback for browsers that will not take an SVG icon, and the 180px one is what iOS
+      uses when somebody adds the desk to their home screen.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Nexus RAMP - Risk and Margin Platform</title>
     <style>html,body{margin:0;background:#EEF1F5;}</style>
   </head>
