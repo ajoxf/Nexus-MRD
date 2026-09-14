@@ -3,6 +3,8 @@
 // Margin: fixed-per-lot brokers keep the same margin; leverage brokers (MT5) recalculate margin at the stressed price.
 
 const num = (v) => (v === "" || v === null || v === undefined || isNaN(+v) ? 0 : +v);
+/** Lot arithmetic, kept off the floating-point cliff. */
+const round9 = (x) => (Math.abs(x) < 1e-9 ? 0 : +(+x).toFixed(9));
 
 // Price distance of the move for one lot at price m
 export const moveDist = (m, mv) => (mv.unit === "%" ? Math.abs(m) * num(mv.v) / 100 : num(mv.v));
@@ -30,17 +32,40 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     // are reported. A plan with lots on it is stressed as though it were already on, so
     // the row and the account answer "what would this trade look like".
     const planSign = p.plan === "long" ? 1 : p.plan === "short" ? -1 : 0;
-    const planLots = !p.pos && planSign && num(p.planLots) > 0 ? num(p.planLots) : 0;
-    const effPos = p.pos || planSign * planLots;
-    const planned = !p.pos && !!planLots;
-    const dir = Math.sign(p.pos) || planSign;
+
+    /*
+     * Lots being considered, ON TOP of whatever is already held.
+     *
+     * This used to apply only to a flat product, which answered "what could I put on?" but
+     * never "what does adding two more do to me?" — and the second is the question somebody
+     * actually has, because they ask it while already in the trade. The account tile said how
+     * many lots COULD be added; it would not price the ones you meant.
+     *
+     * Added lots are stressed as though they were already on, entered at the current mark. So
+     * they cost margin and they lose in the scenario, but they book no instant profit — buying
+     * at the price you are marked at does not make you money.
+     */
+    const planLots = planSign && num(p.planLots) > 0 ? num(p.planLots) : 0;
+    const adding = planSign * planLots;
+    // Rounded, or 0.13 + 0.01 lots arrives as 0.14000000000000001 and prints like it.
+    const effPos = round9(p.pos + adding);
+    const planned = adding !== 0;
+
+    /*
+     * Direction comes from the COMBINED position, not the held one. Selling two against a long
+     * one leaves you short one, and the move that hurts is then the other way — stressing it as
+     * a long would report a profit where there is a loss.
+     */
+    const dir = Math.sign(effPos) || planSign;
     const stressed = hasPrice && dir ? p.mark - dir * dist : null;
     const both = hasPrice && isFinite(dist) && !dir;
     const stressedIfLong = both ? p.mark - dist : null;
     const stressedIfShort = both ? p.mark + dist : null;
     const loss = effPos ? Math.abs(effPos) * size * dist : 0;
     const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
-    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, planned, loss, im, hasPrice, needsPrice };
+    // `adding` is carried so the screen can say "adding 2 -> Long 3" rather than just "Long 3",
+    // which on its own reads like a position the trader already has.
+    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, adding, planned, loss, im, hasPrice, needsPrice };
   });
   const loss = lines.reduce((a, l) => a + (isFinite(l.loss) ? l.loss : 0), 0);
   const IM = lines.reduce((a, l) => a + l.im, 0);

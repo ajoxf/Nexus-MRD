@@ -257,7 +257,8 @@ function scenarioFor(pf, settings, b) {
     // A real position always counts, picked or not — you can't untick your way out of risk.
     const picked = Array.isArray(S.pick) ? S.pick : null;
     const considered = picked ? picked.includes(key) : !!pos;
-    const plan = !pos && considered && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
+    // A plan now rides on top of an open position as well as standing alone on a flat one.
+    const plan = considered && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
     return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots, isOption: isOptionSymbol(product) };
   });
   // An option's premium does not move with the underlying one for one, so
@@ -2647,39 +2648,60 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       : l.reason === "margin" ? ["warn", "Set margin per lot"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
                       : (l.canBuy !== null && l.canBuy <= 0 && l.canSell <= 0) ? ["bad", "No room"]
-                      : l.pos ? ["ok", "Within limit"]
+                      /*
+                       * The planned checks come BEFORE "within limit".
+                       *
+                       * They used to sit after it, which was harmless while a plan could only
+                       * exist on a flat product. Now that lots can be added to an open one, a
+                       * held position would swallow every one of them — the row would read
+                       * "Within limit" in green while the lots being considered blew through the
+                       * per-trade limit. The quiet green was the dangerous part.
+                       */
                       : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap && l.loss > dailyLeft
                         ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit and past ${money(dailyLeft)} left today`]
                       : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap
                         ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit`]
                       : l.planned && l.loss > dailyLeft
                         ? ["bad", `Risks ${money(l.loss)} — only ${money(dailyLeft)} left under today's limit`]
-                      : l.planned ? ["warn", `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
+                      : l.planned ? ["warn", l.pos
+                          // With a position behind it, the total on its own reads like something
+                          // already held. Say what is being added and where it lands.
+                          ? `${l.adding > 0 ? "Buying" : "Selling"} ${qty(Math.abs(l.adding))} → ${l.effPos === 0 ? "flat" : `${l.effPos > 0 ? "long" : "short"} ${qty(Math.abs(l.effPos))}`}`
+                          : `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
+                      : l.pos ? ["ok", "Within limit"]
                       : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
                       : ["dim", "Flat"];
                     return (
                       <tr key={l.key}>
                         <td className="txt"><b>{l.product}</b></td>
-                        <td>{l.pos
-                          ? <><Side s={l.pos > 0 ? "Long" : "Short"} /> {qty(Math.abs(l.pos))}</>
-                          : <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                              <select className="cell" style={{ width: 86, textAlign: "left" }}
-                                value={settings.marks[l.key]?.dir || ""}
-                                onChange={(e) => setMark(l.key, "dir", e.target.value)}
-                                aria-label={`Direction you're considering for ${l.product}`}
-                                title="Flat. Pick the side you're thinking of trading.">
-                                <option value="">Either way</option>
-                                <option value="long">If long</option>
-                                <option value="short">If short</option>
-                              </select>
-                              {settings.marks[l.key]?.dir && (
-                                <input className={`cell ${l.planned ? "planning" : ""}`} style={{ width: 52 }} type="number" min="0" step="any"
-                                  placeholder="lots" value={settings.marks[l.key]?.lots ?? ""}
-                                  onChange={(e) => setMark(l.key, "lots", e.target.value)}
-                                  aria-label={`Lots you're considering for ${l.product}`}
-                                  title="Lots you're thinking of trading. The scenario treats them as if they were already on." />
-                              )}
-                            </span>}</td>
+                        {/*
+                          * The planner sits BESIDE an open position rather than instead of it.
+                          * Scaling into a trade you are already in is the ordinary case, and
+                          * hiding the control there left the tool able to say how many lots you
+                          * could add but never what adding them would do.
+                          */}
+                        <td>
+                          <span style={{ display: "inline-flex", gap: 4, alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                            {!!l.pos && <><Side s={l.pos > 0 ? "Long" : "Short"} /> {qty(Math.abs(l.pos))}</>}
+                            <select className="cell" style={{ width: l.pos ? 96 : 86, textAlign: "left" }}
+                              value={settings.marks[l.key]?.dir || ""}
+                              onChange={(e) => setMark(l.key, "dir", e.target.value)}
+                              aria-label={l.pos ? `Trade you're considering on top of your ${l.product} position` : `Direction you're considering for ${l.product}`}
+                              title={l.pos ? "Lots you're thinking of trading on top of this position." : "Flat. Pick the side you're thinking of trading."}>
+                              {/* Named from where the trader stands: on a long, "sell" reduces. */}
+                              <option value="">{l.pos ? "As it is" : "Either way"}</option>
+                              <option value="long">{l.pos > 0 ? "Buy more" : l.pos < 0 ? "Buy back" : "If long"}</option>
+                              <option value="short">{l.pos > 0 ? "Sell" : l.pos < 0 ? "Sell more" : "If short"}</option>
+                            </select>
+                            {settings.marks[l.key]?.dir && (
+                              <input className={`cell ${l.planned ? "planning" : ""}`} style={{ width: 52 }} type="number" min="0" step="any"
+                                placeholder="lots" value={settings.marks[l.key]?.lots ?? ""}
+                                onChange={(e) => setMark(l.key, "lots", e.target.value)}
+                                aria-label={`Lots you're considering for ${l.product}`}
+                                title="Lots you're thinking of trading. The scenario treats them as if they were already on, entered at the current price." />
+                            )}
+                          </span>
+                        </td>
                         <td>{l.pos ? px(l.mark) : <input className="cell" type="number" step="0.01" placeholder="Price" value={settings.marks[l.key]?.price ?? ""} onChange={(e) => setMark(l.key, "price", e.target.value)} aria-label={`Reference price ${l.product}`} />}</td>
                         <td>
                           <span style={{ display: "inline-flex", gap: 4 }}>
