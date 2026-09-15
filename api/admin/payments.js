@@ -1,5 +1,6 @@
 import { adminFrom, json, serviceClient } from "../_supabase.js";
 import { stripeClient, stripeConfigured } from "../_stripe.js";
+import { cregisConfigured, cryptoPlan } from "../_cregis.js";
 
 /*
  * Money in, and whether the machinery that collects it is actually switched on.
@@ -69,6 +70,22 @@ export default async function handler(request, response) {
       replyTo: has("NEXUS_EMAIL_REPLY_TO"),
     },
     database: { configured: true }, // We are talking to it; that is the proof.
+    crypto: {
+      configured: cregisConfigured() && cryptoPlan().ok,
+      projectId: has("CREGIS_PROJECT_ID"),
+      apiKey: has("CREGIS_API_KEY"),
+      baseUrl: has("CREGIS_BASE_URL"),
+      // Not a secret, and the thing most likely to be missing: keys set but nobody has said
+      // what a payment buys, so checkout refuses rather than invent a price.
+      plan: cryptoPlan().ok ? { amount: cryptoPlan().amount, currency: cryptoPlan().currency, days: cryptoPlan().days } : null,
+      /*
+       * Cregis allowlists the calling IP and Vercel has no stable one, so without a relay
+       * every checkout fails with "the IP is not added to the whitelist". Worth reporting:
+       * it looks like a credential fault and is not one.
+       */
+      relay: has("CREGIS_RELAY_URL"),
+      relaySecret: has("CREGIS_RELAY_SECRET"),
+    },
   };
 
   // What our own records say, which is true even when Stripe cannot be reached.
@@ -82,12 +99,22 @@ export default async function handler(request, response) {
     if (s.provider === "stripe" && s.provider_subscription_id) counts.onStripe += 1;
   }
 
+  // Crypto orders are ours, not Stripe's, so they are read whatever Stripe is doing.
+  const { data: cryptoOrders } = await db
+    .from("crypto_orders")
+    .select("id, user_id, amount, currency, grants_days, status, cregis_order_id, paid_amount, paid_at, created_at")
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  const crypto = { orders: cryptoOrders ?? [], counts: { paid: 0, pending: 0, underpaid: 0, failed: 0, expired: 0 } };
+  for (const o of crypto.orders) if (crypto.counts[o.status] !== undefined) crypto.counts[o.status] += 1;
+
   if (!config.stripe.configured) {
     /*
      * Stripe is off. Everything above is still true and still worth showing — the point of
      * this screen is to say WHY there is nothing here, not to render an empty table.
      */
-    return json(response, 200, { config, counts, price: null, payments: [], totals: null });
+    return json(response, 200, { config, counts, price: null, payments: [], totals: null, crypto });
   }
 
   /*
@@ -161,5 +188,5 @@ export default async function handler(request, response) {
       : "Could not reach Stripe. The figures below come from our own records.";
   }
 
-  return json(response, 200, { config, counts, price, payments, totals, stripeError });
+  return json(response, 200, { config, counts, price, payments, totals, stripeError, crypto });
 }

@@ -1233,8 +1233,9 @@ function AdminPayments() {
   );
   if (!data) return <section className="panel"><div className="pb dim">Loading…</div></section>;
 
-  const { config, counts, price, payments, totals, stripeError } = data;
+  const { config, counts, price, payments, totals, stripeError, crypto } = data;
   const sc = config.stripe;
+  const cc = config.crypto ?? {};
 
   /*
    * The headline verdict, in one sentence, before any number.
@@ -1296,6 +1297,38 @@ function AdminPayments() {
                 </span>
               </div>
             </div>
+            <div className="row">
+              <span className={`dot ${cc.configured ? "on" : cc.apiKey || cc.projectId ? "warn" : "off"}`} />
+              <div className="what">
+                <b>Crypto {cc.configured ? "set up" : cc.apiKey || cc.projectId ? "half set up" : "not set up"}</b>
+                <span>
+                  <code>CREGIS_PROJECT_ID</code>, <code>CREGIS_API_KEY</code> and <code>CREGIS_BASE_URL</code>, plus{" "}
+                  <code>CREGIS_PRICE_AMOUNT</code> and <code>CREGIS_GRANT_DAYS</code> to say what a payment buys.
+                  {cc.plan
+                    ? <> Currently <b>{cc.plan.amount} {cc.plan.currency}</b> for <b>{cc.plan.days} days</b>.</>
+                    : cc.apiKey ? " Keys are set but the price and length are not, so checkout refuses rather than invent one." : ""}
+                </span>
+              </div>
+            </div>
+            {/*
+              * Its own row because it is the failure everybody misreads. Cregis allowlists the
+              * calling address and Vercel has no stable one, so without a relay every checkout
+              * fails with an IP error that looks exactly like a bad credential.
+              */}
+            {cc.configured && (
+              <div className="row">
+                <span className={`dot ${cc.relay && cc.relaySecret ? "on" : "warn"}`} />
+                <div className="what">
+                  <b>Fixed-IP relay {cc.relay ? (cc.relaySecret ? "set" : "half set") : "not set"}</b>
+                  <span>
+                    <code>CREGIS_RELAY_URL</code> and <code>CREGIS_RELAY_SECRET</code>. Cregis only accepts calls
+                    from allowlisted addresses and this host has none it keeps.
+                    {!cc.relay && " Without it checkouts fail with an IP error that reads like a credential problem."}
+                    {cc.relay && !cc.relaySecret && " The URL is set without its secret — the relay will refuse the call with a 401."}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="row">
               <span className={`dot ${config.email.configured ? "on" : "warn"}`} />
               <div className="what">
@@ -1382,6 +1415,47 @@ function AdminPayments() {
             </tbody>
           </table>
         </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="ph">
+          <h2>Crypto payments<span className="sub">Cregis · one-off, does not renew</span></h2>
+          {crypto?.counts?.underpaid > 0 && <span className="badge off">{crypto.counts.underpaid} underpaid</span>}
+        </div>
+        {!crypto?.orders?.length ? (
+          <div className="admin-empty">
+            {cc.configured
+              ? <><b>No crypto payments yet</b>Cregis is connected. Nobody has started a crypto checkout so far.</>
+              : <><b>No crypto payments, because crypto is not switched on</b>
+                  The checkout, the callback and the ledger are all here. They need the keys above.</>}
+          </div>
+        ) : (
+          <div className="tw">
+            <table>
+              <thead><tr>
+                <th>Started</th><th className="txt">Order</th><th>Asked</th><th>Paid</th>
+                <th>Buys</th><th>Paid at</th><th className="txt">Status</th>
+              </tr></thead>
+              <tbody>
+                {crypto.orders.map((o) => (
+                  <tr key={o.id}>
+                    <td className="num">{day(o.created_at)}</td>
+                    <td className="txt num">{o.cregis_order_id || <span className="faint">{o.id.slice(0, 8)}</span>}</td>
+                    <td className="num">{o.amount} {o.currency}</td>
+                    {/* Shown beside what was asked, because the interesting row is the one
+                        where they differ — an underpayment somebody has to deal with. */}
+                    <td className="num">{o.paid_amount ? `${o.paid_amount} ${o.currency}` : "—"}</td>
+                    <td className="num">{o.grants_days}d</td>
+                    <td className="num">{o.paid_at ? day(o.paid_at) : "—"}</td>
+                    <td className="txt">
+                      <span className={`pill ${o.status === "paid" ? "ok" : o.status === "underpaid" || o.status === "failed" ? "bad" : "dim"}`}>{o.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </>
@@ -1583,6 +1657,7 @@ function Locked({ user, sub, onChanged }) {
           </button>
         )}
         <Subscribe />
+        <PayWithCrypto />
 
         <div className="signin-or"><span>or use a code</span></div>
         <RedeemCode onDone={onChanged} />
@@ -1623,6 +1698,44 @@ function Subscribe() {
       <button type="button" className="btn full portal-sso" onClick={go} disabled={busy} style={{ marginTop: 8 }}>
         {busy ? "Opening…" : "Subscribe by card"}
       </button>
+      {err && <div className="signin-err">{err}</div>}
+    </>
+  );
+}
+
+/*
+ * Pay in crypto.
+ *
+ * Sits beside the card button rather than behind a toggle: a desk that pays this way
+ * usually only pays this way, and making them hunt for it is a lost sale. Like the card
+ * button it falls back to an address rather than a dead control — until Cregis is
+ * configured the endpoint says so, and somebody who wants to pay gets a way to.
+ */
+function PayWithCrypto() {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const go = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch("/api/crypto-checkout", { method: "POST", headers: await authHeader() });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || "Could not start that payment.");
+      // Cregis's hosted page, not ours. No wallet, key or address touches this application.
+      window.location.href = body.url;
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <>
+      <button type="button" className="btn full alt" onClick={go} disabled={busy} style={{ marginTop: 6 }}>
+        {busy ? "Opening…" : "Pay with crypto"}
+      </button>
+      {/* Said before they commit, because a crypto payment does not renew itself and
+          somebody expecting a subscription would be surprised when it simply ran out. */}
+      <p className="note" style={{ margin: "4px 0 0" }}>
+        A one-off payment for a fixed period — it does not renew, so nothing is taken again.
+      </p>
       {err && <div className="signin-err">{err}</div>}
     </>
   );

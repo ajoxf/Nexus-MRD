@@ -520,6 +520,21 @@ td.faded { opacity: .35; }
 
 /* Google's button is conventionally white with its own mark — recognisable at a
    glance, and it keeps two stacked navy slabs off the card. */
+/*
+ * The second way to pay, styled as the second way to pay.
+ *
+ * .signin-card .btn.full is solid navy and outranks .btn.ghost on specificity, so without
+ * this the crypto button is indistinguishable from the card button and the card stacks up
+ * three identical navy blocks with no hierarchy. Outlined, the eye reads card first and
+ * crypto as the alternative it is — the same treatment the Google button already uses.
+ */
+.signin-card .btn.full.alt {
+  /* The base rule sets `border: 0`, so a border-color alone does nothing and the button
+     renders as bare text. The shorthand has to be restated. */
+  background: var(--panel); border: 1px solid var(--line2); color: var(--text); font-weight: 600;
+}
+.signin-card .btn.full.alt:hover:not(:disabled) { background: var(--hover); border-color: var(--accent); color: var(--accent); }
+
 .signin-card .btn.full.google-sso {
   background: var(--panel); color: var(--ns-ink); border: 1px solid var(--line2);
   display: inline-flex; align-items: center; justify-content: center; gap: 10px;
