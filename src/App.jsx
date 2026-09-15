@@ -1311,20 +1311,23 @@ function AdminPayments() {
               </div>
             </div>
             {/*
-              * Its own row because it is the failure everybody misreads. Cregis allowlists the
-              * calling address and Vercel has no stable one, so without a relay every checkout
-              * fails with an IP error that looks exactly like a bad credential.
+              * Informational when unset, not a warning.
+              *
+              * Cregis CAN allowlist the calling address, and this host has none it keeps —
+              * but whether that check is enforced is a property of the Cregis account, and
+              * on the sibling product it was waived. An amber "not set" here would send an
+              * operator hunting for a relay they may never need.
               */}
             {cc.configured && (
               <div className="row">
-                <span className={`dot ${cc.relay && cc.relaySecret ? "on" : "warn"}`} />
+                <span className={`dot ${cc.relay ? (cc.relaySecret ? "on" : "warn") : "on"}`} />
                 <div className="what">
-                  <b>Fixed-IP relay {cc.relay ? (cc.relaySecret ? "set" : "half set") : "not set"}</b>
+                  <b>Fixed-IP relay {cc.relay ? (cc.relaySecret ? "set" : "half set — will 401") : "not in use"}</b>
                   <span>
-                    <code>CREGIS_RELAY_URL</code> and <code>CREGIS_RELAY_SECRET</code>. Cregis only accepts calls
-                    from allowlisted addresses and this host has none it keeps.
-                    {!cc.relay && " Without it checkouts fail with an IP error that reads like a credential problem."}
-                    {cc.relay && !cc.relaySecret && " The URL is set without its secret — the relay will refuse the call with a 401."}
+                    <code>CREGIS_RELAY_URL</code> and <code>CREGIS_RELAY_SECRET</code>, both optional. Only needed if
+                    Cregis enforces its IP allowlist on this account — this host has no address it keeps.
+                    {cc.relay && !cc.relaySecret && " The URL is set without its secret, so the relay will refuse the call with a 401."}
+                    {!cc.relay && " If a checkout ever fails with \"the IP is not added to the whitelist\", the credentials are fine — do not rotate them, and do not allowlist the address in the message, because it rotates. Raise it with Cregis."}
                   </span>
                 </div>
               </div>

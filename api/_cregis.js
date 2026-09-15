@@ -131,11 +131,17 @@ const OUTBOUND_TIMEOUT_MS = 20000;
 /**
  * Create a hosted checkout and return the URL to send the buyer to.
  *
- * OUTBOUND IP. Cregis allowlists the address that calls its API and will not turn that
- * check off. Vercel functions have no stable outbound address, so a direct call from here
- * is rejected with "E0001 — The IP is not added to the whitelist". CREGIS_RELAY_URL points
- * at a small relay on fixed-IP hosting whose address IS allowlisted; unset, the call goes
- * direct, which is right for a machine that is already allowlisted.
+ * OUTBOUND IP. Cregis CAN restrict API calls to allowlisted addresses, and this host has
+ * none it keeps. Whether that check is enforced is a property of the Cregis ACCOUNT rather
+ * than of the API — on the sibling product it was waived, and the relay below went unused.
+ * So the default is a direct call, and CREGIS_RELAY_URL is the escape hatch if the check
+ * ever bites.
+ *
+ * If it does — "E0001: The IP is not added to the whitelist <address>" — the request
+ * authenticated and reached Cregis, so the credentials are RIGHT and rotating them is
+ * wasted effort. Nor should the address in the message be allowlisted: it is one
+ * invocation's egress and it rotates, so doing so appears to fix the problem and then
+ * fails unpredictably, which is worse than a clean failure.
  */
 export async function createCheckout({ orderId, email, amount, currency, siteUrl, remark }) {
   const { projectId, apiKey, baseUrl } = cregisConfig();
