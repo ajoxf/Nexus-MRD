@@ -587,3 +587,29 @@ export function sanitiseMapping(proposed, headers) {
 
   return { map, dateFormat, confidence, dropped };
 }
+
+/*
+ * Which column layout to use for a file: the broker's saved one, or a fresh guess.
+ *
+ * A saved layout is kept when every column it names is still in the file — a broker whose
+ * statements have a stable shape should not need re-mapping every time.
+ *
+ * With one exception, and it is the reason this is a function rather than two lines in the
+ * component. When the reader has recovered MT5 position tickets it adds a `Position`
+ * column of its own, and that column always wins. The saved layout was written before the
+ * app could read tickets, so it cannot have an opinion about a column that did not exist;
+ * what it does have is `position` pointed at MT5's Comment field, which holds strings like
+ * "LADDER0004-130a" and, on a close, the literal word "CLOSE". A close whose ticket is
+ * "CLOSE" matches no open lot, so every trade falls through to average matching and the
+ * book shows no closed trades at all. The tickets were in the file; the saved layout was
+ * aiming past them.
+ *
+ * Overruling it is safe because this is not a column the trader chose. It is one we derive.
+ */
+export function mappingFor(headers, savedMap, mt5 = 0) {
+  const cols = headers ?? [];
+  const usedSaved = Boolean(savedMap) && Object.values(savedMap).every((h) => cols.includes(h));
+  const map = usedSaved ? { ...savedMap } : guessMapping(cols);
+  if (mt5 > 0 && cols.includes("Position")) map.position = "Position";
+  return { map, usedSaved };
+}

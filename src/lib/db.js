@@ -113,7 +113,7 @@ const remote = {
      * than landed as new fills — i.e. some of them were skipped as duplicates.
      */
     const ticketed = owned.filter((r) => r.position);
-    if (!ticketed.length || ticketed.length <= added) return { added, updated: 0 };
+    if (!ticketed.length) return { added, updated: 0 };
 
     let updated = 0;
     for (let i = 0; i < ticketed.length; i += CHUNK) {
@@ -297,8 +297,9 @@ const local = {
     for (const r of rows) {
       const existing = byKey.get(rk(r));
       if (existing) {
-        // Same repair as the database path: a re-import that can read more fills it in.
-        if (r.position && !existing.position) { Object.assign(existing, r); updated += 1; }
+        // Same repair as the database path. Different, not merely missing: a ticket read
+        // wrongly by an older import does not look empty, and is exactly what needs fixing.
+        if (r.position && existing.position !== r.position) { Object.assign(existing, r); updated += 1; }
         continue;
       }
       const row = { ...r, id: crypto.randomUUID(), created_at: new Date().toISOString() };

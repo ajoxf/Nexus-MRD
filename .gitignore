@@ -10,3 +10,4 @@ dist/
 # real data. The file only holds empty values, but an env file in the repo is how a build
 # quietly picks up the wrong configuration later.
 .env.demo
+dist-demo/

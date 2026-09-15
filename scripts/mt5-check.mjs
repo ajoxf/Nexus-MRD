@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { tableFromRows, guessMapping, rowsToFills } from '../src/lib/csv.js';
+import { tableFromRows, guessMapping, mappingFor, rowsToFills } from '../src/lib/csv.js';
 import { computeBook } from '../src/lib/positions.js';
 
 /*
@@ -68,6 +68,26 @@ for (const [acct, rows] of Object.entries(sheets)) {
    */
   const blind = computeBook(fills.map(({ position, ...f }) => f), () => 1000, () => 'average');
   is(`${acct}: without tickets there are no closed trades at all`, blind.closed.length, 0);
+
+  /*
+   * And the way it actually reached a customer: not missing tickets, wrong ones.
+   *
+   * His broker carried a column layout saved before the app could read MT5 tickets, with
+   * `position` pointed at the Comment column. Comment on this very report holds
+   * "LADDER0004-130a" on an open and the word "CLOSE" on a close — so every close carried
+   * the ticket "CLOSE", matched no open lot, and he saw 26 fills and not one round trip.
+   * The saved layout survives a re-import, which is why shipping the ticket reader alone
+   * changed nothing for him.
+   */
+  const stale = { ...guessMapping(t.headers), position: 'Comment' };
+  const commentFills = rowsToFills(t.rows, stale, { dateFormat: 'auto', defaultBroker: acct, resolveBroker: () => null, spreadMode: 'spread' }).fills;
+  is(`${acct}: a stale layout aimed at Comment closes nothing`, computeBook(commentFills, () => 1000, () => 'average').closed.length, 0);
+
+  // What the fix does about it: the recovered column overrules the saved layout.
+  const fixed = mappingFor(t.headers, stale, t.mt5);
+  is(`${acct}: the recovered column overrules the stale layout`, fixed.map.position, 'Position');
+  const repaired = rowsToFills(t.rows, fixed.map, { dateFormat: 'auto', defaultBroker: acct, resolveBroker: () => null, spreadMode: 'spread' }).fills;
+  is(`${acct}: and the round trips come back`, computeBook(repaired, () => 1000, () => 'average').closed.length, 4);
 }
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);

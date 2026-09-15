@@ -8,7 +8,7 @@ import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js"
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
-import { FIELDS, parseCsvFile, parsePastedText, guessMapping, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
+import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
 const ORIENT_PRODUCTS = {
@@ -2939,11 +2939,12 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const tb = brokers.find((b) => b.id === target);
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
 
-  const applyLayout = (headers, brokerId) => {
+  const applyLayout = (headers, brokerId, mt5 = 0) => {
     const b = brokers.find((x) => x.id === brokerId);
-    const saved = b?.csv?.map;
-    if (saved && Object.values(saved).every((h) => headers.includes(h))) { setMap(saved); setDateFormat(b.csv.dateFormat || "auto"); setSavedLayout(true); }
-    else { setMap(guessMapping(headers)); setDateFormat("auto"); setSavedLayout(false); }
+    const { map, usedSaved } = mappingFor(headers, b?.csv?.map, mt5);
+    setMap(map);
+    setDateFormat(usedSaved ? (b.csv.dateFormat || "auto") : "auto");
+    setSavedLayout(usedSaved);
   };
   /*
    * Ask the server to propose a mapping.
@@ -2980,7 +2981,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     try {
       const { headers, rows, layout, mt5 } = await parseCsvFile(file);
       setCsv({ name: file.name, headers, rows, layout, mt5 });
-      applyLayout(headers, target);
+      applyLayout(headers, target, mt5);
       // Only when asked, and only when the regexes have not already found a saved layout.
       if (aiHelp) await askForMapping(headers, rows);
     }
@@ -3034,7 +3035,18 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     return m;
   }, [fills]);
   const toRepair = parsed
-    ? parsed.rows.filter((r) => r.status === "stored" && r.position && !storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position)
+    ? parsed.rows.filter((r) => {
+        if (r.status !== "stored" || !r.position) return false;
+        /*
+         * DIFFERENT, not merely missing.
+         *
+         * An older import could store a ticket that is wrong rather than absent — a saved
+         * column layout aimed `position` at MT5's Comment field, so closes arrived carrying
+         * the word "CLOSE". Repairing only blank tickets would leave exactly the rows that
+         * need it most, because they do not look empty.
+         */
+        return storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position !== r.position;
+      })
     : [];
   // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)
   const cashKey = (c) => `${c.broker}|${c.type}|${(+c.amount).toFixed(2)}|${String(c.ts).slice(0, 16)}`;
@@ -3118,7 +3130,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         </div>
         <div className="pb fg">
           <F label="Broker these fills belong to" hint={tb ? `${basis(tb)} · ${matchOf(tb) === "fifo" ? "FIFO" : "average price"}${tb.csv?.map ? " · saved column layout" : ""}` : null}>
-            <select className="in" value={target} onChange={(e) => { setTarget(e.target.value); if (csv) applyLayout(csv.headers, e.target.value); }}>
+            <select className="in" value={target} onChange={(e) => { setTarget(e.target.value); if (csv) applyLayout(csv.headers, e.target.value, csv.mt5); }}>
               {brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </F>

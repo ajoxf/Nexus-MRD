@@ -1,4 +1,4 @@
-import { sanitiseMapping, FIELDS } from '../src/lib/csv.js';
+import { sanitiseMapping, mappingFor, FIELDS } from '../src/lib/csv.js';
 
 /*
  * The guard between a suggested column mapping and somebody's margin figures.
@@ -59,6 +59,35 @@ is('every key that survives is a known field', Object.keys(extra.map).every((k) 
 // space would read an empty column and silently import nothing for that field.
 is('a header differing by case is refused', sanitiseMapping({ price: 'price' }, HEADERS).map.price, undefined);
 is('a header differing by a space is refused', sanitiseMapping({ price: ' Price' }, HEADERS).map.price, undefined);
+
+
+/*
+ * --- choosing between a saved layout and a fresh read ---
+ *
+ * The bug this covers cost a customer every closed trade he had. His broker carried a
+ * column layout saved before the app could read MT5 position tickets, and that layout had
+ * `position` pointed at MT5's Comment column. Comment holds "LADDER0004-130a" on an open
+ * and the literal word "CLOSE" on a close. A close whose ticket is "CLOSE" matches no open
+ * lot, so nothing ever closed and his book read as 26 fills and no round trips.
+ */
+// MT5's own headers, with the Position column the reader recovers.
+const MT5 = ['Time', 'Deal', 'Symbol', 'Type', 'Volume', 'Price', 'Commission', 'Comment', 'Position'];
+// The layout saved by a pre-fix import: position aimed at Comment.
+const STALE = { date: 'Time', ref: 'Deal', product: 'Symbol', side: 'Type', qty: 'Volume', price: 'Price', fee: 'Commission', position: 'Comment' };
+
+is('a recovered Position column overrules a stale saved layout', mappingFor(MT5, STALE, 8).map.position, 'Position');
+is('the rest of the saved layout is left alone', mappingFor(MT5, STALE, 8).map.qty, 'Volume');
+is('it still counts as the saved layout', mappingFor(MT5, STALE, 8).usedSaved, true);
+is('no recovered tickets means no override', mappingFor(MT5, STALE, 0).map.position, 'Comment');
+is('no Position column means no override', mappingFor(MT5.slice(0, 8), STALE, 8).map.position, 'Comment');
+is('a saved layout naming an absent column is dropped', mappingFor(['Date', 'Symbol'], STALE, 0).usedSaved, false);
+is('with no saved layout the headers are guessed', mappingFor(HEADERS, undefined, 0).map.qty, 'Lots');
+is('a fresh guess takes the recovered column too', mappingFor(MT5, undefined, 8).map.position, 'Position');
+// The saved layout is the broker's stored object; writing through it would corrupt it for
+// every later import.
+const frozen = { ...STALE };
+mappingFor(MT5, frozen, 8);
+is('the saved layout itself is not mutated', frozen.position, 'Comment');
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
