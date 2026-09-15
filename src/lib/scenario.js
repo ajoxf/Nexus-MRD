@@ -1,10 +1,13 @@
 // Scenario analysis for one broker account.
 // Every position is moved AGAINST its direction by that product's scenario move (% of price or price points).
 // Margin: fixed-per-lot brokers keep the same margin; leverage brokers (MT5) recalculate margin at the stressed price.
+// Planned lots may name the price they go on at. That re-prices the line to the fill and charges the
+// account what it cost to get there first — see the note on `fill` below.
 
 const num = (v) => (v === "" || v === null || v === undefined || isNaN(+v) ? 0 : +v);
 /** Lot arithmetic, kept off the floating-point cliff. */
 const round9 = (x) => (Math.abs(x) < 1e-9 ? 0 : +(+x).toFixed(9));
+const round2 = (x) => (isFinite(x) ? +(+x).toFixed(2) : 0);
 
 // Price distance of the move for one lot at price m
 export const moveDist = (m, mv) => (mv.unit === "%" ? Math.abs(m) * num(mv.v) / 100 : num(mv.v));
@@ -24,9 +27,7 @@ export function runScenario(broker, acc, products, target, scale = 1) {
   const lines = products.map((p) => {
     const size = num(p.spec.size) || 1000;
     const mv = { ...p.move, v: num(p.move.v) * scale };
-    const hasPrice = p.mark !== null && isFinite(p.mark);
     const needsPrice = mv.unit === "%" || broker.method === "leverage";
-    const dist = hasPrice || mv.unit === "pts" ? moveDist(hasPrice ? p.mark : 0, mv) : NaN;
     // A held position sets the direction. Flat, the trader can name the side they are
     // considering (p.plan) and how many lots (p.planLots); with neither, both directions
     // are reported. A plan with lots on it is stressed as though it were already on, so
@@ -52,24 +53,74 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const planned = adding !== 0;
 
     /*
+     * THE PRICE THE PLANNED LOTS GO ON AT.
+     *
+     * Adding at the current mark is the market order. A trader scaling in rarely means that:
+     * they mean a limit sitting away from the market — "I'm long 2 at 8.35, I'll take 2 more
+     * at 8.65". Priced at the mark, the tool answered a question they had not asked.
+     *
+     * The important part is not that the new lots enter cheaper. It is that a limit away from
+     * the market ONLY FILLS WHEN THE MARKET COMES TO IT, and by then the position already
+     * held has travelled the same distance. So naming a fill price re-prices the whole line:
+     * the scenario is stressed from the fill, not from today's mark, and what it cost to get
+     * there is worked out separately and charged to the account before the scenario starts.
+     *
+     * Getting that second part wrong is how a scale-in plan looks affordable and is not. On a
+     * real desk book the difference was $636 on a plan the screen showed as $3,354.
+     */
+    const fillGiven = planned && p.planPrice !== "" && p.planPrice !== null && p.planPrice !== undefined && isFinite(+p.planPrice);
+    const fill = fillGiven ? +p.planPrice : null;
+    // Everything below stresses from here. With no fill named it is simply today's mark.
+    const ref = fill !== null ? fill : p.mark;
+    const hasPrice = ref !== null && ref !== undefined && isFinite(ref);
+    const dist = hasPrice || mv.unit === "pts" ? moveDist(hasPrice ? ref : 0, mv) : NaN;
+
+    /*
+     * What the journey to the fill costs on the lots already held. Signed: negative is the
+     * money gone by the time the limit trades, positive is a limit the market has to come UP
+     * to, which pays you on the way. Either way it has happened before the scenario begins,
+     * so it belongs to the account and not to the stress.
+     *
+     * Measured from the CURRENT MARK, not the entry price. The move from entry to today is
+     * already sitting in open P&L and therefore already in TNE; counting it again here would
+     * charge the trader twice for a loss they have already taken.
+     */
+    const drift = fill !== null && p.pos && p.mark !== null && isFinite(p.mark)
+      ? round2(p.pos * size * (fill - p.mark))
+      : 0;
+
+    // Where the combined position would be entered, for the breakeven the trader will hold.
+    const avgAfter = planned && fill !== null && effPos !== 0 && isFinite(+p.avg)
+      ? round9((p.pos * +p.avg + adding * fill) / effPos)
+      : null;
+
+    /*
      * Direction comes from the COMBINED position, not the held one. Selling two against a long
      * one leaves you short one, and the move that hurts is then the other way — stressing it as
      * a long would report a profit where there is a loss.
      */
     const dir = Math.sign(effPos) || planSign;
-    const stressed = hasPrice && dir ? p.mark - dir * dist : null;
+    const stressed = hasPrice && dir ? ref - dir * dist : null;
     const both = hasPrice && isFinite(dist) && !dir;
-    const stressedIfLong = both ? p.mark - dist : null;
-    const stressedIfShort = both ? p.mark + dist : null;
+    const stressedIfLong = both ? ref - dist : null;
+    const stressedIfShort = both ? ref + dist : null;
     const loss = effPos ? Math.abs(effPos) * size * dist : 0;
-    const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? p.mark ?? 0) : 0;
+    const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? ref ?? 0) : 0;
     // `adding` is carried so the screen can say "adding 2 -> Long 3" rather than just "Long 3",
     // which on its own reads like a position the trader already has.
-    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, adding, planned, loss, im, hasPrice, needsPrice };
+    return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, adding, planned,
+      fill, ref, drift, avgAfter, loss, im, hasPrice, needsPrice };
   });
   const loss = lines.reduce((a, l) => a + (isFinite(l.loss) ? l.loss : 0), 0);
   const IM = lines.reduce((a, l) => a + l.im, 0);
-  const TNE = acc.TNE - loss;
+  /*
+   * Money spent reaching the named fills, before any stress is applied. Charged to the
+   * account first, because by the time those limits trade it is already gone — every figure
+   * below, capacity included, is worked out from what would actually be left.
+   */
+  const drift = lines.reduce((a, l) => a + (isFinite(l.drift) ? l.drift : 0), 0);
+  const startTNE = acc.TNE + drift;
+  const TNE = startTNE - loss;
   const ratio = IM > 0 ? TNE / IM : Infinity;
 
   // Capacity: the account ratio after trading this product depends only on the new net size |p'|,
@@ -87,7 +138,7 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const others = lines.filter((x) => x !== l);
     const lossO = others.reduce((a, x) => a + (isFinite(x.loss) ? x.loss : 0), 0);
     const imO = others.reduce((a, x) => a + x.im, 0);
-    const head = acc.TNE - lossO - target * imO;
+    const head = startTNE - lossO - target * imO;
     const L1 = l.size * l.dist;
     const side = (d) => {
       const sp = l.hasPrice ? l.mark - d * l.dist : 0;
@@ -105,7 +156,7 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     return { ...l, canBuy, canSell, cut, maxLong, maxShort };
   });
 
-  return { lines: withCap, loss, IM, TNE, ratio };
+  return { lines: withCap, loss, IM, TNE, ratio, drift, startTNE };
 }
 
 // Smallest uniform % move against every open position that pushes the account to `level` (e.g. callR).

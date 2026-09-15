@@ -267,7 +267,10 @@ function scenarioFor(pf, settings, b) {
     const considered = picked ? picked.includes(key) : !!pos;
     // A plan now rides on top of an open position as well as standing alone on a flat one.
     const plan = considered && (M[key]?.dir === "long" || M[key]?.dir === "short") ? M[key].dir : null;
-    return { key, product, spec, pos, mark, move: mv, plan, planLots: M[key]?.lots, isOption: isOptionSymbol(product) };
+    // `avg` rides along so a plan can report the breakeven the trader would end up holding;
+    // `planPrice` is the fill they named, blank meaning at the market.
+    return { key, product, spec, pos, mark, avg: row ? row.avg : null, move: mv, plan,
+      planLots: M[key]?.lots, planPrice: considered ? M[key]?.at : "", isOption: isOptionSymbol(product) };
   });
   // An option's premium does not move with the underlying one for one, so
   // stressing it the way a future is stressed gives an answer that is not
@@ -2941,7 +2944,17 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
                 : <span className={verdict[0]} style={{ fontSize: 12, fontWeight: 600 }}>{verdict[1]}</span>}
             </div>
             <div className="strip">
-              <div className="kpi"><label>TNE now → after</label><b>{money(acc.TNE)} <span className="faint">→</span> <span className={res.loss ? "bad" : ""}>{money(res.TNE)}</span></b></div>
+              <div className="kpi"><label>TNE now → after</label><b>{money(acc.TNE)} <span className="faint">→</span> <span className={res.loss || res.drift ? "bad" : ""}>{money(res.TNE)}</span></b>
+                {res.drift !== 0 && <span className="faint" style={{ fontSize: 11 }}>via {money(res.startTNE)} once your limits fill</span>}</div>
+              {/*
+                * Only when a fill price has been named. A limit away from the market costs the
+                * position you already hold whatever the market travels to reach it, and that is
+                * gone before the scenario starts — so it is its own number, not folded into one.
+                */}
+              {res.drift !== 0 && (
+                <div className="kpi"><label>Getting to your fills</label><b className={res.drift < 0 ? "bad" : "ok"}>{signed(res.drift)}</b>
+                  <span className="faint" style={{ fontSize: 11 }}>{res.drift < 0 ? "on what you already hold, before the scenario" : "the market pays you on the way in"}</span></div>
+              )}
               <div className="kpi"><label>TNE / IM now → after</label><b><span className={statusOf(acc.ratio, acc, pf.minR).cls}>{ratioTxt(acc.ratio)}</span> <span className="faint">→</span> <span className={st.cls}>{ratioTxt(res.ratio)}</span></b></div>
               <div className="kpi"><label>Initial margin after</label><b>{money(res.IM)}</b></div>
               <div className="kpi"><label>Margin call ({b.callRatio}%) if all move</label><b className={callMove !== null && isFinite(callMove) && callMove < 10 ? "bad" : ""}>{moveTxt(callMove)}</b></div>
@@ -2964,10 +2977,10 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.map((l) => l.key) })}>All</button>
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: res.lines.filter((l) => l.pos).map((l) => l.key) })}>Only open</button>
               <button type="button" className="btn ghost" onClick={() => setScen({ pick: [] })}>None</button>
-              {res.lines.some((l) => settings.marks[l.key]?.dir || settings.marks[l.key]?.lots) && (
+              {res.lines.some((l) => settings.marks[l.key]?.dir || settings.marks[l.key]?.lots || settings.marks[l.key]?.at) && (
                 <button type="button" className="btn ghost red"
                   title="Forget every direction and lot count typed on this account"
-                  onClick={() => res.lines.forEach((l) => { setMark(l.key, "dir", ""); setMark(l.key, "lots", ""); })}>
+                  onClick={() => res.lines.forEach((l) => { setMark(l.key, "dir", ""); setMark(l.key, "lots", ""); setMark(l.key, "at", ""); })}>
                   Clear plans
                 </button>
               )}
@@ -2987,6 +3000,17 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
                 <tbody>
                   {res.lines.filter(isOn).map((l) => {
                     const mv = S.moves[l.key] || { v: S.defV, unit: S.defUnit };
+                    /*
+                     * What this row actually costs to carry out, against the trader's own limits.
+                     *
+                     * The scenario loss, plus whatever the market has to travel for a named limit
+                     * to fill — because that trip is spent on THIS product, on lots already held,
+                     * before the scenario begins. Judging the plan on the stress alone let a
+                     * scale-in read "within limit" when reaching the fill had already breached it.
+                     */
+                    const trip = Math.max(0, -(l.drift || 0));
+                    const cost = l.loss + trip;
+                    const costTxt = trip > 0 ? `${money(cost)} (${money(trip)} to reach ${px(l.fill)}, then ${money(l.loss)})` : money(cost);
                     const status = l.reason === "price" ? ["warn", "Enter a price"]
                       : l.reason === "margin" ? ["warn", "Set margin per lot"]
                       : l.cut > 0 ? ["bad", `Too big: cut ${qty(l.cut)} lots`]
@@ -3000,16 +3024,16 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
                        * "Within limit" in green while the lots being considered blew through the
                        * per-trade limit. The quiet green was the dangerous part.
                        */
-                      : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap && l.loss > dailyLeft
-                        ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit and past ${money(dailyLeft)} left today`]
-                      : l.planned && acc.riskCap > 0 && l.loss > acc.riskCap
-                        ? ["bad", `Risks ${money(l.loss)} — over your ${money(acc.riskCap)} per-trade limit`]
-                      : l.planned && l.loss > dailyLeft
-                        ? ["bad", `Risks ${money(l.loss)} — only ${money(dailyLeft)} left under today's limit`]
+                      : l.planned && acc.riskCap > 0 && cost > acc.riskCap && cost > dailyLeft
+                        ? ["bad", `Risks ${costTxt} — over your ${money(acc.riskCap)} per-trade limit and past ${money(dailyLeft)} left today`]
+                      : l.planned && acc.riskCap > 0 && cost > acc.riskCap
+                        ? ["bad", `Risks ${costTxt} — over your ${money(acc.riskCap)} per-trade limit`]
+                      : l.planned && cost > dailyLeft
+                        ? ["bad", `Risks ${costTxt} — only ${money(dailyLeft)} left under today's limit`]
                       : l.planned ? ["warn", l.pos
                           // With a position behind it, the total on its own reads like something
                           // already held. Say what is being added and where it lands.
-                          ? `${l.adding > 0 ? "Buying" : "Selling"} ${qty(Math.abs(l.adding))} → ${l.effPos === 0 ? "flat" : `${l.effPos > 0 ? "long" : "short"} ${qty(Math.abs(l.effPos))}`}`
+                          ? `${l.adding > 0 ? "Buying" : "Selling"} ${qty(Math.abs(l.adding))}${l.fill !== null ? ` at ${px(l.fill)}` : ""} → ${l.effPos === 0 ? "flat" : `${l.effPos > 0 ? "long" : "short"} ${qty(Math.abs(l.effPos))}`}`
                           : `Planned: ${l.effPos > 0 ? "buy" : "sell"} ${qty(Math.abs(l.effPos))}`]
                       : l.pos ? ["ok", "Within limit"]
                       : l.dir ? ["dim", l.dir > 0 ? "Flat · sizing a buy" : "Flat · sizing a sell"]
@@ -3045,16 +3069,46 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
                               <option value="long">{l.pos > 0 ? "Buy more" : l.pos < 0 ? "Buy back" : "If long"}</option>
                               <option value="short">{l.pos > 0 ? "Sell" : l.pos < 0 ? "Sell more" : "If short"}</option>
                             </select>
-                            {settings.marks[l.key]?.dir && (
+                            {/* Lots and the price they go on at read as one instruction, so they
+                                stay on one line together rather than wrapping apart. */}
+                            {settings.marks[l.key]?.dir && <span style={{ display: "inline-flex", gap: 4 }}>
                               <input className={`cell ${l.planned ? "planning" : ""}`} style={{ width: 52 }} type="number" min="0" step="any"
                                 placeholder="lots" value={settings.marks[l.key]?.lots ?? ""}
                                 onChange={(e) => setMark(l.key, "lots", e.target.value)}
                                 aria-label={`Lots you're considering for ${l.product}`}
-                                title="Lots you're thinking of trading. The scenario treats them as if they were already on, entered at the current price." />
+                                title="Lots you're thinking of trading. Leave the price beside this blank to trade at the market." />
+                            {/*
+                              * The price those lots go on at. Blank means at the market, which is
+                              * what this did before and is still the right default. Filling it in
+                              * says "my limit is here", and the scenario then stresses from there
+                              * and charges the account what the market costs to reach it.
+                              */}
+                            {l.planned && (
+                              <input className={`cell ${l.fill !== null ? "planning" : ""}`} style={{ width: 70 }} type="number" step="any"
+                                placeholder={`at ${l.pos ? px(l.mark) : "price"}`} value={settings.marks[l.key]?.at ?? ""}
+                                onChange={(e) => setMark(l.key, "at", e.target.value)}
+                                aria-label={`Price you'd trade those lots at for ${l.product}`}
+                                title="The price you'd get filled at. Leave it blank for the market. A limit away from the market only fills once the market comes to it, so naming one prices the whole row from there and charges you the trip." />
                             )}
+                            </span>}
                           </span>
+                          {l.avgAfter !== null && l.pos !== 0 && (
+                            <div className="faint" style={{ fontSize: 10, marginTop: 2 }}
+                              title={`${qty(Math.abs(l.pos))} at ${px(l.avg)} plus ${qty(Math.abs(l.adding))} at ${px(l.fill)}`}>
+                              breakeven {px(l.avgAfter)} on {qty(Math.abs(l.effPos))}
+                            </div>
+                          )}
                         </td>
-                        <td>{l.pos ? px(l.mark) : <input className="cell" type="number" step="0.01" placeholder="Price" value={settings.marks[l.key]?.price ?? ""} onChange={(e) => setMark(l.key, "price", e.target.value)} aria-label={`Reference price ${l.product}`} />}</td>
+                        <td>{l.pos
+                          ? (l.fill !== null
+                              // Struck through, not replaced: the trader needs to see that the row
+                              // is no longer being stressed from the live price, and from what.
+                              ? <span title={`Stressed from your ${px(l.fill)} fill, not the live ${px(l.mark)}`}>
+                                  <span className="faint" style={{ textDecoration: "line-through" }}>{px(l.mark)}</span>{" "}
+                                  <b>{px(l.fill)}</b>
+                                </span>
+                              : px(l.mark))
+                          : <input className="cell" type="number" step="0.01" placeholder="Price" value={settings.marks[l.key]?.price ?? ""} onChange={(e) => setMark(l.key, "price", e.target.value)} aria-label={`Reference price ${l.product}`} />}</td>
                         <td>
                           <span style={{ display: "inline-flex", gap: 4 }}>
                             <input className="cell" style={{ width: 64 }} type="number" step="0.1" value={mv.v} onChange={(e) => setMove(l.key, { v: e.target.value })} aria-label={`Move ${l.product}`} />
@@ -3124,10 +3178,18 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
               </div>
             )}
             {res.lines.some((l) => l.planned) && isFinite(dailyLeft) && (
-              <div className={`pb ${res.loss > dailyLeft ? "bad" : "faint"}`} style={{ fontSize: 11 }}>
-                {res.loss > dailyLeft
-                  ? `This plan loses ${money(res.loss)} in the scenario, past the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`
-                  : `This plan loses ${money(res.loss)} in the scenario, within the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`}
+              <div className={`pb ${res.loss + Math.max(0, -res.drift) > dailyLeft ? "bad" : "faint"}`} style={{ fontSize: 11 }}>
+                {(() => {
+                  // The whole cost from today: reaching the fills, then the scenario on top.
+                  // Counting only the scenario let a scale-in plan read as affordable when the
+                  // trip to the limit had already spent the day's allowance.
+                  const trip = Math.max(0, -res.drift);
+                  const all = res.loss + trip;
+                  const how = trip > 0 ? `${money(trip)} getting to your fills and ${money(res.loss)} in the scenario` : `${money(res.loss)} in the scenario`;
+                  return all > dailyLeft
+                    ? `This plan costs ${money(all)} — ${how} — past the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`
+                    : `This plan costs ${money(all)} — ${how} — within the ${money(dailyLeft)} left under today's ${money(pf.dailyCap ?? acc.dailyCap)} daily limit.`;
+                })()}
               </div>
             )}</>}</>}
           </section>

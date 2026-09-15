@@ -85,5 +85,97 @@ const bmHeld = breakingMove(broker, acc, line(null, 0), 1);
 const bmAdding = breakingMove(broker, acc, line('long', 2), 1);
 is('adding lots brings the margin call nearer', bmAdding < bmHeld, true);
 
+
+/*
+ * ---------------------------------------------------------------------------
+ * NAMING THE PRICE THE NEW LOTS GO ON AT
+ * ---------------------------------------------------------------------------
+ * From the desk: long 2 CL-BZ entered at -8.35, marked -8.385, wanting 2 more at -8.65 on a
+ * 10% move. Orient, $2,500 a lot, size 1000.
+ *
+ * Worked on paper:
+ *   getting there   = 2 lots x 1000 x (-8.65 - -8.385)   = -$530   (the mark, NOT the entry:
+ *                                                                   entry->mark is already in TNE)
+ *   move distance   = |-8.65| x 10%                      = 0.865
+ *   scenario loss   = 4 lots x 1000 x 0.865              = $3,460
+ *   average after   = (2 x -8.35 + 2 x -8.65) / 4        = -8.50
+ *   margin          = 4 x 2,500                          = $10,000
+ *
+ * Priced at the mark instead, the same plan reads $3,354 and no cost of getting there at
+ * all — $636 cheaper than it is.
+ */
+const scaleIn = (planPrice) => [{ product: 'CL-BZ', spec, pos: 2, avg: -8.35, mark: -8.385, move: { v: 10, unit: '%' }, plan: 'long', planLots: 2, planPrice }];
+const deskAcc = { TNE: 40000, callR: 1, stopR: 0.5 };
+
+const atMark = runScenario(broker, deskAcc, scaleIn(''), 2);
+near('priced at the mark, the plan loses $3,354', atMark.loss, 3354);
+is('and nothing is charged for getting there', atMark.drift, 0);
+
+const atLimit = runScenario(broker, deskAcc, scaleIn(-8.65), 2);
+const L0 = atLimit.lines[0];
+near('the limit re-prices the line to the fill', L0.ref, -8.65);
+near('getting there costs $530 on the lots already held', L0.drift, -530);
+near('measured from the mark, not the entry', L0.drift, 2 * 1000 * (-8.65 - -8.385));
+near('the scenario is then stressed from -8.65', atLimit.loss, 3460);
+near('stressed price follows the fill', L0.stressed, -9.515);
+near('the average across all 4 lots', L0.avgAfter, -8.5);
+near('margin is unchanged on a fixed-margin broker', atLimit.IM, 10000);
+
+// The account is charged the journey BEFORE the stress, because by then it has happened.
+near('equity starts from what the journey leaves', atLimit.startTNE, 40000 - 530);
+near('and the scenario comes off that', atLimit.TNE, 40000 - 530 - 3460);
+near('so the plan costs $3,990 from today, not $3,354', deskAcc.TNE - atLimit.TNE, 3990);
+near('which is $636 more than pricing it at the mark', (deskAcc.TNE - atLimit.TNE) - (deskAcc.TNE - atMark.TNE), 636);
+/*
+ * Capacity is worked out from what the journey leaves, so it tightens. On a whole-lot
+ * futures account the published Can buy is floored to a lot and both round to 2 here — so
+ * the claim is checked on the unrounded figure it is floored from, which is where the
+ * difference actually lives.
+ */
+is('capacity is worked out after the journey too', atLimit.lines[0].maxLong < atMark.lines[0].maxLong, true);
+is('and never reports MORE room after paying to get there', atLimit.lines[0].canBuy <= atMark.lines[0].canBuy, true);
+
+/*
+ * A limit the market has to come UP to pays you on the way: long 2 at -8.385 adding at -8.20
+ * means the position gained 0.185 before the second tranche filled. Charging that as a cost
+ * would be as wrong as ignoring the loss in the case above.
+ */
+const up = runScenario(broker, deskAcc, scaleIn(-8.2), 2);
+near('a favourable journey is credited, not charged', up.lines[0].drift, +370);
+near('and the account starts above where it is today', up.startTNE, 40000 + 370);
+
+// --- a fill price that is not one ---
+is('an empty fill price falls back to the mark', runScenario(broker, deskAcc, scaleIn(''), 2).lines[0].fill, null);
+is('so does a blank one', runScenario(broker, deskAcc, scaleIn(null), 2).lines[0].fill, null);
+is('and rubbish is ignored rather than stressed', runScenario(broker, deskAcc, scaleIn('abc'), 2).lines[0].fill, null);
+near('an ignored fill leaves the loss at the mark figure', runScenario(broker, deskAcc, scaleIn('abc'), 2).loss, 3354);
+// Zero is a real price on a spread, so it must NOT be treated as "unset".
+near('zero is a price, not a blank', runScenario(broker, deskAcc, scaleIn(0), 2).lines[0].ref, 0);
+
+// --- a fill price with no lots behind it decides nothing ---
+const noLots = [{ product: 'CL-BZ', spec, pos: 2, avg: -8.35, mark: -8.385, move: { v: 10, unit: '%' }, plan: 'long', planLots: 0, planPrice: -8.65 }];
+is('a fill price with no lots planned is ignored', runScenario(broker, deskAcc, noLots, 2).lines[0].fill, null);
+near('and the account is unchanged', runScenario(broker, deskAcc, noLots, 2).loss, 2 * 1000 * 0.8385);
+
+// --- opening from flat: there is no position to travel ---
+const fresh = [{ product: 'CL-BZ', spec, pos: 0, avg: 0, mark: -8.385, move: { v: 10, unit: '%' }, plan: 'long', planLots: 2, planPrice: -8.65 }];
+is('opening from flat costs nothing to get there', runScenario(broker, deskAcc, fresh, 2).drift, 0);
+near('but is still stressed from the price named', runScenario(broker, deskAcc, fresh, 2).loss, 2 * 1000 * 0.865);
+near('and entered there', runScenario(broker, deskAcc, fresh, 2).lines[0].avgAfter, -8.65);
+
+// --- a leverage account recalculates margin off the fill ---
+const lev = { method: 'leverage', leverage: 100 };
+const levSpec = { size: 1000, lev: 100 };
+const levLine = (planPrice) => [{ product: 'USOIL', spec: levSpec, pos: 0.1, avg: 90, mark: 93, move: { v: 10, unit: '%' }, plan: 'long', planLots: 0.1, planPrice }];
+const levAt = runScenario(lev, { TNE: 5000, callR: 1, stopR: 0.5 }, levLine(100), 2);
+near('a leverage account travels to the fill as well', levAt.lines[0].drift, 0.1 * 1000 * (100 - 93));
+// Margin at the stressed price: 0.2 lots x 1000 x (100 - 10) / 100
+near('and takes margin at the stressed price from that fill', levAt.IM, 0.2 * 1000 * 90 / 100);
+
+// --- the breaking move accounts for it too ---
+const bmMark = breakingMove(broker, deskAcc, scaleIn(''), 1);
+const bmFill = breakingMove(broker, deskAcc, scaleIn(-8.65), 1);
+is('a plan that costs money to reach brings the margin call nearer', bmFill < bmMark, true);
+
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
