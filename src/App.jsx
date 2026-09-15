@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
+import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
@@ -26,6 +27,12 @@ const DEFAULT_SETTINGS = {
   marks: {},
   view: "all",
   scenario: { target: "min", defV: 5, defUnit: "%", moves: {}, openOnly: true },
+  /*
+   * Trades held as two or more legs, often one leg per broker account. Empty by default and
+   * only ever filled in by the trader: see lib/spreads.js for why nothing is paired
+   * automatically. A spread changes no margin figure — it answers what the trade can cost.
+   */
+  spreads: [],
   cash: [],
   statement: {},
   // One row per broker account per day, written live. See lib/history.js.
@@ -40,7 +47,7 @@ function migrate(s) {
   // Accounts stored before currencies existed were all in dollars, which is what the
   // figures in them mean — so USD is a statement about the data, not a default.
   const withCurrency = (list) => list.map((b) => ({ ...b, currency: b.currency || "USD" }));
-  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
+  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, spreads: s.spreads || [], cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
   const A = s.account || {};
   return {
     limits: { ...D.limits, ...Object.fromEntries(Object.entries(A).filter(([k]) => k in D.limits)) },
@@ -48,6 +55,7 @@ function migrate(s) {
     marks: Object.fromEntries(Object.entries(s.marks || {}).map(([p, v]) => [`default|${p}`, v])),
     view: "all",
     scenario: { ...D.scenario },
+    spreads: [],
     cash: [],
     statement: {},
     history: [],
@@ -2356,7 +2364,7 @@ function Tracker({ user }) {
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
-        {tab === "scen" && <ScenarioTab pf={pf} settings={settings} view={view} setScen={setScen} setMark={setMark} />}
+        {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} fills={fills} />}
@@ -2646,8 +2654,215 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   );
 }
 
+
+/*
+ * ---------- spreads ----------
+ *
+ * Legs held in two accounts are one trade. The account tiles below stress each leg against
+ * itself, which is right for margin — a broker will liquidate one account without caring
+ * that you are hedged in another — and badly wrong as a picture of what the trade can cost.
+ * This panel answers the second question and touches none of the first.
+ */
+function SpreadsPanel({ pf, settings, setSettings, fills, view }) {
+  const S = settings.scenario;
+  const saved = useMemo(() => (settings.spreads || []).map(normaliseSpread), [settings.spreads]);
+  const [adding, setAdding] = useState(false);
+  const ask = useConfirm();
+
+  const setSpreads = (fn) => setSettings((st) => ({ ...st, spreads: fn(st.spreads || []) }));
+  const patch = (id, p) => setSpreads((list) => list.map((x) => (x.id === id ? { ...x, ...p } : x)));
+
+  // Resolve a stored spread's legs against the book as it stands right now.
+  const resolve = (sp) =>
+    sp.legs.map((leg) => {
+      const key = legKey(leg);
+      const row = pf.rows.find((r) => r.key === key);
+      const spec = settings.brokers.find((b) => b.id === leg.broker)?.products?.[leg.product] || {};
+      const pos = row ? (row.side === "Long" ? row.lots : -row.lots) : 0;
+      const mark = row ? row.mark : has(settings.marks[key]?.price) ? n(settings.marks[key].price) : null;
+      return resolveLeg(leg, { pos, size: row ? row.size : n(spec.size) || 1000, mark });
+    });
+
+  /*
+   * Suggestions, from fills the trader has already put on. Nothing is paired without them
+   * saying so — see lib/spreads.js. Anything already saved drops out of the list.
+   */
+  const have = new Set(saved.map((sp) => sp.legs.map(legKey).sort().join(" / ")));
+  const suggestions = useMemo(
+    () => suggestSpreads(fills || []).filter((c) => !have.has(c.key)).slice(0, 4),
+    [fills, settings.spreads],
+  );
+
+  const add = (legs, name) =>
+    setSpreads((list) => [
+      ...list,
+      { id: crypto.randomUUID(), name: name || legs.map((l) => l.product).join(" / "), legs: legs.map((l) => ({ ...l, ratio: 1 })), widen: { v: "", unit: "pts" } },
+    ]);
+
+  // Every open position, for building a spread by hand.
+  const openRows = pf.rows.filter((r) => view === "all" || r.broker === view);
+  const [pick, setPick] = useState([]);
+  const togglePick = (key) => setPick((ps) => (ps.includes(key) ? ps.filter((k) => k !== key) : [...ps, key]));
+  const addPicked = () => {
+    const legs = pick.map((k) => { const r = pf.rows.find((x) => x.key === k); return { broker: r.broker, product: r.product }; });
+    add(legs);
+    setPick([]); setAdding(false);
+  };
+
+  const shown = view === "all" ? saved : saved.filter((sp) => sp.legs.some((l) => l.broker === view));
+
+  if (!shown.length && !suggestions.length && !adding) return null;
+
+  return (
+    <section className="panel" style={{ marginTop: 12 }}>
+      <div className="ph">
+        <h2>Spreads<span className="dim">one trade, held as two or more legs</span></h2>
+        <div className="actions">
+          {openRows.length >= 2 && <button type="button" className="btn ghost" onClick={() => setAdding((a) => !a)}>{adding ? "Cancel" : "Build one"}</button>}
+        </div>
+      </div>
+
+      {suggestions.length > 0 && (
+        <div className="pb" style={{ borderBottom: "1px solid var(--line)" }}>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+            These look like spreads you're already trading — opposite legs filled together, again and again.
+            Nothing is paired until you say so.
+          </div>
+          <div className="chips">
+            {suggestions.map((c) => (
+              <button key={c.key} type="button" className="chip" onClick={() => add(c.legs, c.name)}>
+                {c.name}
+                <span className="chip-tag">{c.crossAccount ? "2 accounts" : `${c.pairs} pairs`}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {adding && (
+        <div className="pb" style={{ borderBottom: "1px solid var(--line)" }}>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>Pick the legs. Two or more, and they can't all be the same way round.</div>
+          <div className="chips">
+            {openRows.map((r) => (
+              <button key={r.key} type="button" className={`chip ${pick.includes(r.key) ? "on" : ""}`} aria-pressed={pick.includes(r.key)} onClick={() => togglePick(r.key)}>
+                {r.product}<span className="chip-tag">{r.side} {qty(r.lots)} · {r.brokerName}</span>
+              </button>
+            ))}
+            <span className="chips-gap" />
+            <button type="button" className="btn" disabled={pick.length < 2} onClick={addPicked}>Add spread</button>
+          </div>
+        </div>
+      )}
+
+      {shown.length === 0 ? (
+        <div className="empty">No spreads set up yet.</div>
+      ) : (
+        shown.map((sp) => {
+          const legs = resolve(sp);
+          // The correlated move is the one already set on the first leg, so this panel and
+          // the leg's own row below are stressed by the same number rather than two.
+          const mv = S.moves[legs[0]?.key] || { v: S.defV, unit: S.defUnit };
+          const res = stressSpread(legs, mv, sp.widen);
+          const set = matchLegs(legs).matched > 0;
+          const noWiden = !has(sp.widen.v) || n(sp.widen.v) === 0;
+          const mvTxt = `${n(mv.v)}${mv.unit === "%" ? "%" : " pts"}`;
+          // A widening is a distance in the spread's own price, so it is printed like a price.
+          // money() would render 2 as "$2" and 2.5 as "$3", which is not what was typed.
+          const wTxt = sp.widen.unit === "%" ? `${n(sp.widen.v)}%` : n(sp.widen.v).toFixed(2);
+          return (
+            <div key={sp.id} style={{ borderTop: "1px solid var(--line)" }}>
+              <div className="ph" style={{ background: "transparent", borderBottom: 0, paddingBottom: 0 }}>
+                <h2 style={{ fontSize: 12 }}>{sp.name}
+                  {legs.some((l) => l.broker !== legs[0].broker) && <span className="dim">legged across {new Set(legs.map((l) => l.broker)).size} accounts</span>}
+                </h2>
+                <button type="button" className="btn ghost red" onClick={async () => {
+                  const { ok } = await ask({
+                    title: "Remove this spread?",
+                    body: "Only the pairing goes. Every fill, position and margin figure is untouched — each leg carries on showing in its own account.",
+                    confirmLabel: "Remove", tone: "danger",
+                  });
+                  if (ok) setSpreads((list) => list.filter((x) => x.id !== sp.id));
+                }}>Remove</button>
+              </div>
+              <div className="tw">
+                <table>
+                  <thead><tr><th className="txt">Leg</th><th className="txt">Account</th><th>Position</th><th>Price</th><th title="How many of this leg make one unit of the spread. 1:1 for a barrel-for-barrel oil spread.">Ratio</th></tr></thead>
+                  <tbody>
+                    {legs.map((l) => (
+                      <tr key={l.key}>
+                        <td className="txt">{l.product}</td>
+                        <td className="txt dim">{settings.brokers.find((b) => b.id === l.broker)?.name || l.broker}</td>
+                        <td>{l.pos ? <span className={`side ${l.pos > 0 ? "long" : "short"}`}>{l.pos > 0 ? "Long" : "Short"}</span> : <span className="faint">flat</span>} <span className="num">{l.pos ? qty(Math.abs(l.pos)) : ""}</span></td>
+                        <td className="num">{l.mark === null ? <span className="warn">no price</span> : l.mark.toFixed(5)}</td>
+                        <td>
+                          <input className="cell" style={{ width: 60 }} type="number" step="0.01" min="0" value={sp.legs.find((x) => legKey(x) === l.key)?.ratio ?? 1}
+                            onChange={(e) => patch(sp.id, { legs: sp.legs.map((x) => (legKey(x) === l.key ? { ...x, ratio: e.target.value } : x)) })} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {!set ? (
+                <div className="pb warn" style={{ fontSize: 11 }}>
+                  Nothing is matched here — a spread needs at least two legs open, and not all the same way round.
+                  Each leg is stressed on its own in the accounts below, which is what it is.
+                </div>
+              ) : (
+                <>
+                  <div className="pb fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 260px))", alignItems: "end", paddingBottom: 0 }}>
+                    <F label="Spread now" hint={`${qty(res.matched)} units matched`}>
+                      <div className="num" style={{ fontSize: 18, fontWeight: 600, padding: "6px 0" }}>{res.value === null ? <span className="warn" style={{ fontSize: 13 }}>Price the legs</span> : res.value.toFixed(2)}</div>
+                    </F>
+                    <F label="Spread can move against you" hint="What this trade is actually a bet on">
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input className="in" type="number" step="0.01" min="0" placeholder="0.00" value={sp.widen.v} onChange={(e) => patch(sp.id, { widen: { ...sp.widen, v: e.target.value } })} />
+                        <select className="in" style={{ width: 80 }} value={sp.widen.unit} onChange={(e) => patch(sp.id, { widen: { ...sp.widen, unit: e.target.value } })}>
+                          <option value="pts">pts</option><option value="%">%</option>
+                        </select>
+                      </div>
+                    </F>
+                  </div>
+                  <div className="strip">
+                    <div className="kpi"><label>Both legs move {mvTxt} together</label><b className={res.correlatedLoss ? "bad" : ""}>{money(-res.correlatedLoss)}</b>
+                      <span className="faint" style={{ fontSize: 11 }}>{res.residual.length ? `includes ${res.residual.map((r) => r.leg.product).join(", ")} unhedged` : "the legs nearly cancel"}</span></div>
+                    <div className="kpi"><label>{noWiden ? "Spread moves against you" : `Spread moves ${wTxt} against you`}</label><b className={res.widening ? "bad" : "faint"}>{noWiden ? "—" : money(-res.widening)}</b>
+                      <span className="faint" style={{ fontSize: 11 }}>{noWiden ? "not set" : `${qty(res.matched)} units`}</span></div>
+                    <div className="kpi"><label>This spread could lose</label><b className={res.loss ? "bad" : ""}>{money(-res.loss)}</b></div>
+                    <div className="kpi"><label>Stressed as separate positions</label><b className="faint">{money(-res.outright)}</b>
+                      <span className="faint" style={{ fontSize: 11 }}>what the accounts below show</span></div>
+                  </div>
+                  {noWiden && (
+                    <div className="pb warn" style={{ fontSize: 11 }}>
+                      Set how far the spread itself can move against you. Until you do, this figure is only the
+                      two legs moving together — and a spread trade loses money when the spread moves, not when oil does.
+                    </div>
+                  )}
+                  {res.unpriced.length > 0 && (
+                    <div className="pb warn" style={{ fontSize: 11 }}>
+                      No current price for {res.unpriced.join(", ")}, so the spread can't be priced and this is incomplete.
+                      Enter it on the account row below.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })
+      )}
+
+      <p className="faint" style={{ fontSize: 11, margin: "10px 12px" }}>
+        Margin is unchanged by any of this. Each account is margined on its own and can be stopped out on its own —
+        being hedged in one account will not stop another being liquidated, so the account tiles below stay exactly as they are.
+        This panel says what the trade can cost; those say what the broker will do.
+      </p>
+    </section>
+  );
+}
+
 // ---------- scenarios ----------
-function ScenarioTab({ pf, settings, view, setScen, setMark }) {
+function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark }) {
   const S = settings.scenario, L = settings.limits;
   const brokers = settings.brokers.filter((b) => view === "all" || b.id === view);
   const setMove = (key, patch) => setScen({ moves: { ...S.moves, [key]: { ...(S.moves[key] || { v: S.defV, unit: S.defUnit }), ...patch } } });
@@ -2672,6 +2887,16 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
   };
   const cap = (l, x) => (x === null ? (l.reason === "margin" ? "Set margin" : "Set price")
     : !isFinite(x) ? "No limit" : x <= 0 ? "0" : qty(x));
+  /*
+   * Which products are a leg of a spread.
+   *
+   * The row's own Scenario P&L stays as it is — it is the right number for margin, which is
+   * what this table is for. But read alone it says a hedged leg can lose $1,222, so the row
+   * says which spread it belongs to and sends the trader to the figure that accounts for the
+   * other leg.
+   */
+  const legOf = {};
+  (settings.spreads || []).map(normaliseSpread).forEach((sp) => sp.legs.forEach((l) => { legOf[legKey(l)] = sp; }));
 
   return (
     <>
@@ -2696,6 +2921,8 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
           </div>
         </div>
       </section>
+
+      <SpreadsPanel pf={pf} settings={settings} setSettings={setSettings} fills={fills} view={view} />
 
       {brokers.map((b) => {
         const { acc, target, res, st, minMove, callMove, stopMove, optionsOn } = scenarioFor(pf, settings, b);
@@ -2789,7 +3016,16 @@ function ScenarioTab({ pf, settings, view, setScen, setMark }) {
                       : ["dim", "Flat"];
                     return (
                       <tr key={l.key}>
-                        <td className="txt"><b>{l.product}</b></td>
+                        <td className="txt"><b>{l.product}</b>
+                          {legOf[l.key] && l.pos ? (
+                            // Naming the OTHER leg, not the spread — the spread's name is this
+                            // product plus the one the trader is looking for.
+                            <span className="faint" style={{ marginLeft: 6, fontSize: 10, fontWeight: 400 }}
+                              title={`This row is the right figure for ${b.name}'s margin: the other leg sits in a different account and no broker will net the two. See Spreads above for what the trade itself can cost.`}>
+                              hedged by {legOf[l.key].legs.filter((x) => legKey(x) !== l.key).map((x) => `${x.product} in ${settings.brokers.find((y) => y.id === x.broker)?.name || x.broker}`).join(", ")}
+                            </span>
+                          ) : null}
+                        </td>
                         {/*
                           * The planner sits BESIDE an open position rather than instead of it.
                           * Scaling into a trade you are already in is the ordinary case, and
