@@ -430,6 +430,12 @@ td.faded { opacity: .35; }
    (the heading text is copied onto each cell by useCardLabels). */
 @media (max-width: 760px) {
   .tw { overflow: visible; }
+  /* A scroll box becomes a stack of cards here, and `overflow: visible` above means the
+     max-height no longer clips — it just stops the box growing, so the cards spill out of
+     it and anything after the table is painted over them. Seen as a pager drawn across the
+     last day's rows; the same would happen under Closed trades. The cap belongs to the
+     scrolling layout, so it goes with it. */
+  .tw.tall { max-height: none; }
   .tw table, .tw tbody, .tw tr, .tw td { display: block; width: auto; }
   .tw thead { display: none; }
   .tw tbody tr {
@@ -694,3 +700,17 @@ table.daily tr.part td.txt { font-size: 12px; }
 table.daily tr.day { cursor: pointer; }
 table.daily .twist { display: inline-block; width: 11px; color: var(--faint); transition: transform .15s; }
 table.daily tr.day[aria-expanded="true"] .twist { transform: rotate(90deg); }
+
+/* ---------- Analysis: the daily table with its breakdowns beside it ----------
+   The daily table caps its own width, which left a band of empty panel down the right on a
+   wide screen while "By product" and "By month" sat below the fold. They belong next to it:
+   the table says what each day did, those say what across the whole book, and reading one
+   against the other is the point. Below 1100px they drop underneath, where the table needs
+   every pixel it can get. */
+.grid-daily { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
+.grid-daily > .panel { margin-top: 0; }
+.grid-daily .side-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.grid-daily .side-col > .panel { margin-top: 0; }
+/* In its own column the grid does the constraining, so the table fills what it is given. */
+.grid-daily table.daily { max-width: none; }
+@media (max-width: 1100px) { .grid-daily { grid-template-columns: minmax(0, 1fr); } }

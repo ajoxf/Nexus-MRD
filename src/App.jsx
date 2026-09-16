@@ -5189,18 +5189,27 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         {winLoss}
       </div>
 
-      {daily}
-
-      <div className="grid-settings">
-        <section className="panel">
-          <div className="ph"><h2>By product</h2></div>
-          <div className="pb"><DivergingBars rows={a.byProduct.map((g) => ({ key: g.key, value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"} · ${pct(g.trades ? g.wins / g.trades : null)} won` }))} /></div>
-        </section>
-        <section className="panel">
-          <div className="ph"><h2>By month<span className="dim">closed</span></h2></div>
-          <div className="pb"><DivergingBars rows={a.byMonth.map((g) => ({ key: monthName(g.key), value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"}` }))} /></div>
-        </section>
+      {/*
+        * The daily table, with the two breakdowns in the width it was not using.
+        *
+        * They answer the same question at different ranges — what did each day do, and what
+        * has each product and month done — so reading one against the other is the point,
+        * and it could not be done with the breakdowns below the fold.
+        */}
+      <div className="grid-daily">
+        {daily}
+        <div className="side-col">
+          <section className="panel">
+            <div className="ph"><h2>By product</h2></div>
+            <div className="pb"><DivergingBars rows={a.byProduct.map((g) => ({ key: g.key, value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"} · ${pct(g.trades ? g.wins / g.trades : null)} won` }))} /></div>
+          </section>
+          <section className="panel">
+            <div className="ph"><h2>By month<span className="dim">closed</span></h2></div>
+            <div className="pb"><DivergingBars rows={a.byMonth.map((g) => ({ key: monthName(g.key), value: g.net, sub: `${g.trades} ${g.trades === 1 ? "trade" : "trades"}` }))} /></div>
+          </section>
+        </div>
       </div>
+
 
       <section className="panel">
         <div className="ph"><h2>Product detail</h2></div>
