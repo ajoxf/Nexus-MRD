@@ -1,4 +1,4 @@
-import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts }
+import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv }
   from '../src/lib/history.js';
 let fail = 0;
 const eq = (name, got, want) => {
@@ -225,6 +225,58 @@ eq('the parts net to the whole', parts.reduce((a, r) => a + r.net, 0), dayRow.ne
 eq('the wins agree', parts.reduce((a, r) => a + r.wins, 0), dayRow.wins);
 eq('the losses agree', parts.reduce((a, r) => a + r.losses, 0), dayRow.losses);
 eq('the scratches agree', parts.reduce((a, r) => a + r.flat, 0), dayRow.flat);
+
+
+/*
+ * --- the daily table, and the CSV of it ---
+ *
+ * The file is the one that gets sent to an accountant, and nobody re-checks it against a
+ * screen they have closed. So it has to be the same numbers, in an order that makes the
+ * running total mean something, with nothing lost to a comma in a product name.
+ */
+const bookTrades = [
+  { closeTs: '2026-08-24T12:00:00Z', broker: 'o', product: 'CL', qty: 2, pnl: -5000 },
+  { closeTs: '2026-08-24T13:00:00Z', broker: 'o', product: 'HO', qty: 3, pnl: 4700 },
+  { closeTs: '2026-08-24T14:00:00Z', broker: 'o', product: 'HO', qty: 1, pnl: 0 },
+  { closeTs: '2026-08-25T12:00:00Z', broker: 'm', product: 'CL, spread', qty: 1, pnl: 120.005 },
+];
+const daily = dailyRows(bookTrades);
+eq('one row per trading day', daily.map((r) => r.d), ['2026-08-24', '2026-08-25']);
+eq('trades counts scratches too', daily[0].trades, 3);
+eq('the running total accumulates in date order', daily.map((r) => Math.round(r.run * 100) / 100), [-300, -179.99]);
+eq('and the last running total is the book', Math.round(daily[1].run * 100) / 100,
+   Math.round(bookTrades.reduce((a, t) => a + t.pnl, 0) * 100) / 100);
+
+const csv = dailyCsv(bookTrades, (id) => (id === 'o' ? 'Orient' : 'MT5'));
+const lines = csv.split('\n');
+eq('a header, two days and three product rows', lines.length, 1 + 2 + 3);
+eq('the header names every column', lines[0],
+   'Date,Scope,Broker,Product,Trades,Lots,Won,Lost,Scratched,P&L,Running');
+eq('day rows are marked as such', lines[1].split(',')[1], 'Day');
+eq('a day names no product', lines[1].split(',').slice(2, 4), ['', '']);
+eq('the day carries its running total', lines[1].split(',')[10], '-300');
+eq('product rows name their broker', lines[2].split(',')[2], 'Orient');
+eq('a product carries no running total', lines[2].split(',')[10], '');
+
+// A comma in a product name must not become a column break.
+const spreadLine = lines.find((l) => l.includes('spread'));
+eq('a product with a comma is quoted', spreadLine.includes('"CL, spread"'), true);
+eq('so the row still has eleven columns', spreadLine.match(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/g).length, 10);
+
+// Money is rounded like money, not left at floating-point length.
+eq('P&L is rounded to the cent', lines[lines.length - 1].split(',').slice(-2)[0], '120.01');
+
+// Oldest first regardless, because Running only reads forwards.
+eq('the file is chronological', [lines[1].split(',')[0], lines[4].split(',')[0]], ['2026-08-24', '2026-08-25']);
+
+// The parts must still net to the day, in the file as on the screen.
+const dayNet = Number(lines[1].split(',')[9]);
+const prodNet = [lines[2], lines[3]].reduce((a, l) => a + Number(l.split(',')[9]), 0);
+eq('the product rows net to their day', prodNet, dayNet);
+
+// Nothing to export is a header and nothing else, not a crash.
+eq('an empty book is just the header', dailyCsv([]).split('\n').length, 1);
+eq('and no rows', dailyRows([]), []);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

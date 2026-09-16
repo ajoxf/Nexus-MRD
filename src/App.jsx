@@ -8,7 +8,7 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -138,15 +138,20 @@ const basis = (b) => (b.method === "leverage" ? `Leverage 1:${n(b.leverage)}` : 
 const matchOf = (b) => b?.match || (b?.method === "leverage" ? "average" : "fifo");
 
 // Downloads every fill as CSV (used as a backup before deleting anything).
+/** Hand the browser a file. One place, so every export behaves the same way. */
+function saveCsv(text, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = name;
+  a.click();
+}
+
 function downloadBackup(fills, brokers, label = "all") {
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const esc = (v) => (/[",\n]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? ""));
   const lines = ["Date,Broker,Symbol,Side,Qty,Price,Fee,Fill ID,Position,Account,Source"];
   [...fills].sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach((x) => lines.push([x.ts, bname(x.broker), x.product, x.side, +x.qty, +x.price, +x.fee || 0, x.ref, x.position || "", x.account || "", x.source || ""].map(esc).join(",")));
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
-  a.download = `nexus_backup_${label}_${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
+  saveCsv(lines.join("\n"), `nexus_backup_${label}_${new Date().toISOString().slice(0, 10)}.csv`);
 }
 // Asks once — offering the backup in the same breath — then runs the delete.
 async function safeDelete({ fills, brokers, label, what, run, ask }) {
@@ -2445,6 +2450,9 @@ function Book({ pf, settings, view }) {
   const [openKey, setOpenKey] = useState(null);
   const rows = bookRows(pf, view);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   const open = rows.filter((r) => r.open);
   const longLots = sum(open.filter((r) => r.open.side === "Long"), (r) => r.open.lots);
   const shortLots = sum(open.filter((r) => r.open.side === "Short"), (r) => r.open.lots);
@@ -2585,6 +2593,9 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   // stress: same adverse move on every position in scope; report the worst account afterwards
   const recent = pf.book.closed.filter((c) => all || c.broker === view).slice(0, 6);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
 
   return (
     <div className="grid-dash">
@@ -3433,7 +3444,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
     } catch (e) { setResult(["bad", `Import failed: ${e.message}`]); }
     setBusy(false);
   };
-  const download = (text, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" })); a.download = name; a.click(); };
+  const download = saveCsv;
 
 
   // Dates are compared on the local calendar day, so "from 10 Sep to 10 Sep" keeps that whole day.
@@ -3742,6 +3753,9 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
   }, [fills]);
   const legsFor = (broker, orders) => (orders || []).flatMap((o) => legsByOrder[`${broker}|${o}`] || []);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   const closed = pf.book.closed.filter((c) => (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product));
   const total = sum(closed, (c) => c.pnl);
   const wins = closed.filter((c) => c.pnl > 0), losses = closed.filter((c) => c.pnl < 0);
@@ -4953,13 +4967,11 @@ function DailyPnl({ pf, settings, view }) {
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
   const parts = useMemo(() => dayProducts(closed), [closed]);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
-  const rows = useMemo(() => {
-    // Chronological first, so the running total accumulates the way the money did —
-    // the sort below only changes the order it is read in, never what it adds up to.
-    const byDay = winLossByDay(closed);
-    let run = 0;
-    return byDay.map((r) => { run += r.net; return { ...r, run, trades: r.wins + r.losses + r.flat }; });
-  }, [closed]);
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
+  // Shared with the CSV, so the file and the screen cannot say different things.
+  const rows = useMemo(() => dailyRows(closed), [closed]);
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
@@ -4994,14 +5006,31 @@ function DailyPnl({ pf, settings, view }) {
           {rows.length} trading {rows.length === 1 ? "day" : "days"} · {green} up, {rows.length - green} down ·
           best {signed(best.net)} on {day(best.d)} · worst {signed(worst.net)} on {day(worst.d)}
         </span>
-        <button type="button" className="btn ghost" onClick={flip}>
-          {newestFirst ? "Newest first" : "Oldest first"}
-        </button>
+        <span style={{ display: "flex", gap: 6 }}>
+          <button type="button" className="btn ghost" onClick={flip}>
+            {newestFirst ? "Newest first" : "Oldest first"}
+          </button>
+          {/*
+            * Every day and every product under it, not the twenty on screen. An export that
+            * quietly gave you the current page would be found out by whoever adds up the
+            * column, and only after it had gone somewhere.
+            */}
+          <button type="button" className="btn ghost" title="Every day and the products under it, oldest first, whatever is on screen"
+            onClick={() => saveCsv(dailyCsv(closed, bname), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
+            Export CSV
+          </button>
+        </span>
       </div>
       <div className="tw tall">
-        <table>
+        <table className="daily">
+          <colgroup>
+            <col style={{ width: "26%" }} /><col style={{ width: "9%" }} /><col style={{ width: "10%" }} />
+            <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "19%" }} /><col style={{ width: "20%" }} />
+          </colgroup>
           <thead><tr>
-            <th className="txt">Date</th><th>Trades</th><th>Won</th><th>Lost</th>
+            <th className="txt">Date</th><th>Trades</th>
+            <th title="Lots closed — the size of the round trips below, not lots traded, which would count both sides">Lots</th>
+            <th>Won</th><th>Lost</th>
             <th>P&amp;L</th><th title="Realized money from the first trading day to this one, in date order — not from the top of the page">Running</th>
           </tr></thead>
           <tbody>
@@ -5010,28 +5039,26 @@ function DailyPnl({ pf, settings, view }) {
               const prods = parts.get(r.d) || [];
               return (
                 <React.Fragment key={r.d}>
-                  <tr onClick={() => toggle(r.d)} style={{ cursor: "pointer" }} aria-expanded={on}
+                  <tr className="day" onClick={() => toggle(r.d)} aria-expanded={on}
                       title={on ? "Close this day" : "Open this day to see what it was made of"}>
-                    <td className="txt">
-                      <span className="faint" style={{ display: "inline-block", width: 12, transform: on ? "rotate(90deg)" : "none", transition: "transform .15s" }}>›</span>
-                      {day(r.d)}
-                    </td>
+                    <td className="txt"><span className="twist">›</span>{day(r.d)}</td>
                     <td>{r.trades}</td>
+                    <td>{qty(lotsOn(r.d))}</td>
                     <td className={r.wins ? "ok" : "faint"}>{r.wins}</td>
                     <td className={r.losses ? "bad" : "faint"}>{r.losses}</td>
                     <td className={pc(r.net)}><b>{signed(r.net)}</b></td>
                     <td className={pc(r.run)}>{signed(r.run)}</td>
                   </tr>
                   {on && prods.map((g) => (
-                    // Inline rather than a class: `.sub` already means a paragraph style
-                    // elsewhere in the stylesheet, and one tinted row does not earn a new rule.
-                    <tr key={g.key} style={{ background: "var(--panel2)" }}>
-                      <td className="txt" style={{ paddingLeft: 26 }}>
+                    <tr key={g.key} className="part" style={{ background: "var(--panel2)" }}>
+                      {/* The product name may be long and the column is fixed, so it is
+                          allowed to wrap rather than widen the table or be cut off. */}
+                      <td className="txt" style={{ paddingLeft: 24, whiteSpace: "normal" }}>
                         {g.product}
-                        {view === "all" && <span className="faint" style={{ fontSize: 10, marginLeft: 6 }}>{bname(g.broker)}</span>}
-                        <span className="faint" style={{ fontSize: 10, marginLeft: 6 }}>{qty(g.lots)} lots</span>
+                        {view === "all" && <span className="faint" style={{ fontSize: 10, marginLeft: 5 }}>{bname(g.broker)}</span>}
                       </td>
                       <td className="dim">{g.trades}</td>
+                      <td className="dim">{qty(g.lots)}</td>
                       <td className={g.wins ? "ok" : "faint"}>{g.wins}</td>
                       <td className={g.losses ? "bad" : "faint"}>{g.losses}</td>
                       <td className={pc(g.net)}>{signed(g.net)}</td>
@@ -5045,6 +5072,7 @@ function DailyPnl({ pf, settings, view }) {
           <tfoot><tr className="total">
             <td className="txt">All {rows.length} days</td>
             <td>{rows.reduce((a, r) => a + r.trades, 0)}</td>
+            <td>{qty(rows.reduce((a, r) => a + lotsOn(r.d), 0))}</td>
             <td className="ok">{rows.reduce((a, r) => a + r.wins, 0)}</td>
             <td className="bad">{rows.reduce((a, r) => a + r.losses, 0)}</td>
             <td className={pc(rows[rows.length - 1].run)}><b>{signed(rows[rows.length - 1].run)}</b></td>

@@ -323,3 +323,55 @@ export function dayProducts(closed) {
   }
   return out;
 }
+
+/*
+ * The daily table's rows, running total included.
+ *
+ * Shared by the screen and the CSV so the two cannot drift. A spreadsheet that disagrees
+ * with the page it was exported from is worse than no export: the file is the one that
+ * gets sent to an accountant, and nobody re-checks it against a screen they have closed.
+ *
+ * The running total accumulates in DATE order, always, whichever way the table happens to
+ * be sorted at the time. It only means anything read forwards.
+ */
+export function dailyRows(closed) {
+  let run = 0;
+  return winLossByDay(closed).map((r) => {
+    run += r.net;
+    return { ...r, run, trades: r.wins + r.losses + r.flat };
+  });
+}
+
+/** RFC4180 quoting: a product like "CL Nov26 - BZ, spread" must not become two columns. */
+const csvCell = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? ""));
+
+/*
+ * The daily table as a CSV, days and the products under them.
+ *
+ * Always oldest first, whatever the screen is showing, because the Running column reads
+ * down the file and is nonsense in any other order.
+ *
+ * One row per day, then one per product traded that day, told apart by the Scope column so
+ * the file can be pivoted (filter Scope = Product) or read straight down. Product rows
+ * carry no running total — a running total of one instrument among several is a figure
+ * that looks meaningful and is not.
+ *
+ * `nameOf` turns a broker id into the name the trader knows it by.
+ */
+export function dailyCsv(closed, nameOf = (id) => id) {
+  const parts = dayProducts(closed);
+  const head = ["Date", "Scope", "Broker", "Product", "Trades", "Lots", "Won", "Lost", "Scratched", "P&L", "Running"];
+  const out = [head.join(",")];
+  for (const r of dailyRows(closed)) {
+    const on = parts.get(r.d) || [];
+    const lots = round4(on.reduce((a, g) => a + g.lots, 0));
+    out.push([r.d, "Day", "", "", r.trades, lots, r.wins, r.losses, r.flat, round2(r.net), round2(r.run)].map(csvCell).join(","));
+    for (const g of on) {
+      out.push([r.d, "Product", nameOf(g.broker), g.product, g.trades, g.lots, g.wins, g.losses, g.flat, round2(g.net), ""].map(csvCell).join(","));
+    }
+  }
+  return out.join("\n");
+}
+
+/** Money to the cent. Exported figures are read as exact, so they are rounded like money. */
+function round2(v) { return isFinite(v) ? Math.round(v * 100) / 100 : 0; }

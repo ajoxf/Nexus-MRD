@@ -679,3 +679,18 @@ td.faded { opacity: .35; }
   .admin-metrics { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); }
   .admin-metrics .metric b { font-size: 21px; }
 }
+
+/* ---------- Daily P&L ----------
+   Seven columns in an auto-layout table that is 100% wide: every pixel of slack lands in
+   the first column, so Date sat in about half the table with the numbers bunched against
+   the right edge. Fixed layout and declared widths spread them evenly instead, and the
+   max-width stops the row stretching so far apart on a wide screen that a date and its
+   money stop reading as one line. */
+table.daily { table-layout: fixed; max-width: 1180px; }
+table.daily th, table.daily td { padding: 4px 8px; }
+/* The nested product rows are detail under a day, so they sit a size down and lighter. */
+table.daily tr.part td { font-size: 13px; }
+table.daily tr.part td.txt { font-size: 12px; }
+table.daily tr.day { cursor: pointer; }
+table.daily .twist { display: inline-block; width: 11px; color: var(--faint); transition: transform .15s; }
+table.daily tr.day[aria-expanded="true"] .twist { transform: rotate(90deg); }
