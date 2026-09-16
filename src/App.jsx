@@ -3638,7 +3638,10 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
 
       <section className="panel">
         <div className="ph">
-          <h2>{previewing ? "Preview" : "All fills"}<span className="dim">{previewing ? `${toImport.length} of ${parsed.rows.length} will be imported` : shown.length}</span></h2>
+          {/* "23" alone reads like the whole book when a filter is on. Say what it is out of. */}
+          <h2>{previewing ? "Preview" : filtered ? "Fills" : "All fills"}<span className="dim">{previewing
+            ? `${toImport.length} of ${parsed.rows.length} will be imported`
+            : filtered ? `${shown.length} of ${fills.filter((x) => !x.is_leg).length}` : shown.length}</span></h2>
           {!csv && (
             <div className="actions">
               <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter((x) => ({ ...x, broker: e.target.value, product: "" }))} aria-label="Filter by broker">
@@ -3655,7 +3658,22 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
               <input className="in" style={{ width: "auto", padding: "4px 8px" }} type="date" value={filter.to}
                 onChange={(e) => setFilter((x) => ({ ...x, to: e.target.value }))} aria-label="Fills up to this date" title="Up to this date" />
               {filtered && <button className="btn ghost" onClick={() => setFilter({ broker: "", product: "", side: "", from: "", to: "" })}>Clear filters</button>}
-              <button className="btn ghost" disabled={!fills.length} onClick={() => downloadBackup(fills, brokers)}>Export CSV</button>
+              {/*
+                * Exports WHAT IS ON SCREEN once a filter is on, and says so on the button.
+                *
+                * It used to hand over every fill in the book whatever was filtered, so
+                * narrowing to a week and pressing Export gave you the year — a file that
+                * looks like the answer to the question you just asked and is not. The full
+                * backup is still what you get with no filter set, and is still what
+                * safeDelete offers before deleting anything.
+                */}
+              <button className="btn ghost" disabled={!shown.length}
+                title={filtered
+                  ? `The ${shown.length} fills matching these filters, not the whole book`
+                  : "Every fill, oldest first"}
+                onClick={() => downloadBackup(filtered ? shown : fills, brokers, filtered ? "filtered" : "all")}>
+                {filtered ? `Export ${shown.length} shown` : "Export CSV"}
+              </button>
               <button className="btn ghost red" disabled={!shown.length || narrowed}
                 title={narrowed ? "Clear the product, side and date filters first — deleting only works on a whole broker" : undefined}
                 onClick={async () => {
