@@ -38,13 +38,26 @@ const DEFAULT_SETTINGS = {
    * Kept apart from `limits` and `scenario` for exactly that reason: a preference must
    * never be mistaken for a risk setting, in the code or by whoever reads it next.
    */
-  prefs: { hideClosedSummary: false },
+  prefs: { hideFigures: false },
   cash: [],
   statement: {},
   // One row per broker account per day, written live. See lib/history.js.
   history: [],
 };
 const LEVERAGES = [10, 20, 25, 30, 50, 100, 200, 300, 400, 500];
+
+/*
+ * Display preferences, with the two short-lived keys that preceded them folded in.
+ *
+ * `hideClosedSummary` and `hideTopFigures` were separate for a day. One control that puts
+ * every figure away, reachable from any tab, is what was actually wanted — so either of
+ * the old keys being set means the figures were meant to be hidden.
+ */
+function migratePrefs(D, prefs) {
+  const p = prefs || {};
+  const legacy = p.hideClosedSummary || p.hideTopFigures;
+  return { ...D.prefs, ...p, hideFigures: p.hideFigures ?? Boolean(legacy) };
+}
 
 // Upgrades settings saved by earlier versions (one account) to broker accounts.
 function migrate(s) {
@@ -53,7 +66,7 @@ function migrate(s) {
   // Accounts stored before currencies existed were all in dollars, which is what the
   // figures in them mean — so USD is a statement about the data, not a default.
   const withCurrency = (list) => list.map((b) => ({ ...b, currency: b.currency || "USD" }));
-  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, spreads: s.spreads || [], prefs: { ...D.prefs, ...(s.prefs || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
+  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, spreads: s.spreads || [], prefs: migratePrefs(D, s.prefs), cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
   const A = s.account || {};
   return {
     limits: { ...D.limits, ...Object.fromEntries(Object.entries(A).filter(([k]) => k in D.limits)) },
@@ -2280,6 +2293,14 @@ function Tracker({ user }) {
   const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
   const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
+  /*
+   * Hiding the figures across the top. Its own preference, deliberately separate from the
+   * one on Closed and Analysis: wanting the season's tally out of sight is not the same
+   * wish as wanting today's equity out of sight, and a trader may well want one and not
+   * the other.
+   */
+  const hideTop = Boolean(settings.prefs?.hideFigures);
+  const setHideTop = (v) => setSettings((s) => ({ ...s, prefs: { ...s.prefs, hideFigures: v } }));
 
   // scope for the top bar
   const scoped = view === "all" ? null : pf.acct(view);
@@ -2352,6 +2373,15 @@ function Tracker({ user }) {
             </div>
             <span className={`pill ${st.cls}`}><span className={st.cls}>{st.t}</span></span>
           </div>
+          {/*
+            * The money across the top, hideable.
+            *
+            * The TNE/IM gauge and its verdict beside it are NOT part of this and never hide.
+            * They are the one thing on this bar that says whether the account is in trouble,
+            * they carry no figure anybody flinches at, and a risk platform that can be put
+            * into a state where nothing warns you is not one worth selling.
+            */}
+          {!hideTop && <>
           <div className="kpi"><label>Total net equity</label><b>{money(k.TNE)}</b></div>
           <div className="kpi"><label>Initial margin</label><b>{money(k.IM)}</b></div>
           <div className="kpi"><label>Open P&L</label><b className={pc(k.upnl)}>{signed(k.upnl)}</b></div>
@@ -2359,8 +2389,15 @@ function Tracker({ user }) {
           <div className="kpi"><label>{scoped ? "Room to margin call" : "Least room to call"}</label><b className={k.room !== null && k.room <= 0 ? "bad" : ""}>{k.room !== null ? money(k.room) : "—"}</b></div>
           <div className="kpi hide-m"><label>Leverage used</label><b>{k.lev ? `${k.lev.toFixed(1)}×` : "—"}</b></div>
           <div className="kpi"><label>Slots left</label><b className={slotsLeft === 0 ? "bad" : slotsLeft <= 2 ? "warn" : ""}>{slotsLeft}<span className="faint" style={{ fontSize: 13 }}> / {L.maxTrades}</span></b></div>
+          </>}
         </div>
         <div className="topright">
+          <button className="btn ghost" aria-pressed={hideTop} onClick={() => setHideTop(!hideTop)}
+            title={hideTop
+              ? "Show the figures again: equity, margin and P&L across the top, and the summary rows on Closed and Analysis."
+              : "Put the figures away everywhere — across the top, and the summary rows on Closed and Analysis. The TNE/IM gauge and its verdict stay: nothing that warns you is ever hidden."}>
+            {hideTop ? "Show figures" : "Hide figures"}
+          </button>
           <span title={save[0]}><span className="dot" style={{ background: save[1] }} /><span className="savetxt">{save[0]}</span></span>
           {auth.enabled && (
             <>
@@ -3711,13 +3748,15 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
   const today = sum(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)), (r) => r.pnl);
   const products = [...new Set(pf.book.closed.filter((c) => !filter.broker || c.broker === filter.broker).map((c) => c.product))].sort();
   /*
-   * The running total is on screen all day, and a season's drawdown in red at the top of
-   * the page is not information anybody needs repeated — it is just there. Hiding it is a
-   * display choice and nothing more: the trades, the fees and every figure worked out from
-   * them are untouched, and the tally is one click away.
+   * A season's drawdown in red at the top of the page is not information anybody needs
+   * repeated — it is just there. "Hide figures" in the header puts it away, along with the
+   * money across the top and the performance row on Analysis: one switch, reachable from
+   * any tab, because wanting the numbers out of sight is not a per-page mood.
+   *
+   * A display choice and nothing more. The trades, the fees and every figure worked out
+   * from them are untouched.
    */
-  const hidden = Boolean(settings.prefs?.hideClosedSummary);
-  const setHidden = (v) => setSettings((st) => ({ ...st, prefs: { ...st.prefs, hideClosedSummary: v } }));
+  const hidden = Boolean(settings.prefs?.hideFigures);
   return (
     <section className="panel">
       {!hidden && (
@@ -3733,12 +3772,6 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
       <div className="ph">
         <h2>Closed trades<span className="dim">FIFO-matched for futures brokers, per ticket for MT5 hedging</span></h2>
         <div className="actions">
-          <button type="button" className="btn ghost" aria-pressed={hidden} onClick={() => setHidden(!hidden)}
-            title={hidden
-              ? "Show the realized P&L, win rate and averages across the trades below."
-              : "Hide the summary figures. Nothing is deleted or recalculated — only this row goes."}>
-            {hidden ? "Show summary" : "Hide summary"}
-          </button>
           <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter({ broker: e.target.value, product: "" })} aria-label="Filter by broker">
             <option value="">All brokers</option>{settings.brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
@@ -4983,9 +5016,8 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const a = useMemo(() => analyse(closed), [closed]);
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
-  // One preference for both summary rows — see ClosedTab, which reads the same key.
-  const hidden = Boolean(settings.prefs?.hideClosedSummary);
-  const setHidden = (v) => setSettings((st) => ({ ...st, prefs: { ...st.prefs, hideClosedSummary: v } }));
+  // The one preference, set by "Hide figures" in the header — which is on every tab.
+  const hidden = Boolean(settings.prefs?.hideFigures);
 
   // Worth drawing before a single trade is closed: it answers "how much margin
   // was I carrying then", which is a question about open positions.
@@ -5036,15 +5068,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
       <section className="panel">
         <div className="ph">
           <h2>Performance<span className="dim">{a.n} closed trades · {qty(a.lots)} lots</span></h2>
-          <div className="actions">
-            <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
-            {/* Same preference as the Closed page, so putting the tally away puts it away
-                everywhere rather than in one place and not the other. */}
-            <button type="button" className="btn ghost" aria-pressed={hidden} onClick={() => setHidden(!hidden)}
-              title={hidden ? "Show the performance figures." : "Hide the performance figures. Nothing is deleted or recalculated — only this row goes."}>
-              {hidden ? "Show summary" : "Hide summary"}
-            </button>
-          </div>
+          <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
         </div>
         {!hidden && <div className="strip">
           <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(a.net)}>{signed(a.net)}</b></div>
