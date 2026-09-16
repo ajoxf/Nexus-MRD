@@ -8,7 +8,7 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -4944,9 +4944,15 @@ function WinLossDays({ pf, view }) {
  * Days with nothing closed are absent rather than shown as zero. A flat row reads like a day
  * that was traded and made nothing, which is a different thing from a day off.
  */
-function DailyPnl({ pf, view }) {
+function DailyPnl({ pf, settings, view }) {
   const [newestFirst, setNewestFirst] = useState(true);
+  const [page, setPage] = useState(0);
+  // Which days are open. A set, because opening one is no reason to close another —
+  // comparing two days side by side is the point of opening them at all.
+  const [open, setOpen] = useState(() => new Set());
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
+  const parts = useMemo(() => dayProducts(closed), [closed]);
+  const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
   const rows = useMemo(() => {
     // Chronological first, so the running total accumulates the way the money did —
     // the sort below only changes the order it is read in, never what it adds up to.
@@ -4957,7 +4963,22 @@ function DailyPnl({ pf, view }) {
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
-  const shown = newestFirst ? [...rows].reverse() : rows;
+  const ordered = newestFirst ? [...rows].reverse() : rows;
+  /*
+   * Twenty days to a page.
+   *
+   * A year of trading is 250 rows and nobody scrolls that to find last Tuesday. The totals
+   * under the table stay the total of EVERY day, not of the page — a footer that quietly
+   * re-totals itself as you page is how somebody reads a number off the screen, puts it in
+   * a statement, and finds out later it was a fifth of the truth.
+   */
+  const PAGE = 20;
+  const pages = Math.max(1, Math.ceil(ordered.length / PAGE));
+  const at = Math.min(page, pages - 1);
+  const from = at * PAGE;
+  const shown = ordered.slice(from, from + PAGE);
+  const flip = () => { setNewestFirst((v) => !v); setPage(0); };
+  const toggle = (d) => setOpen((o) => { const n = new Set(o); n.has(d) ? n.delete(d) : n.add(d); return n; });
   const day = (k) => {
     const [y, m, d] = k.split("-").map(Number);
     return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
@@ -4973,7 +4994,7 @@ function DailyPnl({ pf, view }) {
           {rows.length} trading {rows.length === 1 ? "day" : "days"} · {green} up, {rows.length - green} down ·
           best {signed(best.net)} on {day(best.d)} · worst {signed(worst.net)} on {day(worst.d)}
         </span>
-        <button type="button" className="btn ghost" onClick={() => setNewestFirst((v) => !v)}>
+        <button type="button" className="btn ghost" onClick={flip}>
           {newestFirst ? "Newest first" : "Oldest first"}
         </button>
       </div>
@@ -4981,19 +5002,45 @@ function DailyPnl({ pf, view }) {
         <table>
           <thead><tr>
             <th className="txt">Date</th><th>Trades</th><th>Won</th><th>Lost</th>
-            <th>P&amp;L</th><th title="Realized money from the first day shown to this one, in date order">Running</th>
+            <th>P&amp;L</th><th title="Realized money from the first trading day to this one, in date order — not from the top of the page">Running</th>
           </tr></thead>
           <tbody>
-            {shown.map((r) => (
-              <tr key={r.d}>
-                <td className="txt">{day(r.d)}</td>
-                <td>{r.trades}</td>
-                <td className={r.wins ? "ok" : "faint"}>{r.wins}</td>
-                <td className={r.losses ? "bad" : "faint"}>{r.losses}</td>
-                <td className={pc(r.net)}><b>{signed(r.net)}</b></td>
-                <td className={pc(r.run)}>{signed(r.run)}</td>
-              </tr>
-            ))}
+            {shown.map((r) => {
+              const on = open.has(r.d);
+              const prods = parts.get(r.d) || [];
+              return (
+                <React.Fragment key={r.d}>
+                  <tr onClick={() => toggle(r.d)} style={{ cursor: "pointer" }} aria-expanded={on}
+                      title={on ? "Close this day" : "Open this day to see what it was made of"}>
+                    <td className="txt">
+                      <span className="faint" style={{ display: "inline-block", width: 12, transform: on ? "rotate(90deg)" : "none", transition: "transform .15s" }}>›</span>
+                      {day(r.d)}
+                    </td>
+                    <td>{r.trades}</td>
+                    <td className={r.wins ? "ok" : "faint"}>{r.wins}</td>
+                    <td className={r.losses ? "bad" : "faint"}>{r.losses}</td>
+                    <td className={pc(r.net)}><b>{signed(r.net)}</b></td>
+                    <td className={pc(r.run)}>{signed(r.run)}</td>
+                  </tr>
+                  {on && prods.map((g) => (
+                    // Inline rather than a class: `.sub` already means a paragraph style
+                    // elsewhere in the stylesheet, and one tinted row does not earn a new rule.
+                    <tr key={g.key} style={{ background: "var(--panel2)" }}>
+                      <td className="txt" style={{ paddingLeft: 26 }}>
+                        {g.product}
+                        {view === "all" && <span className="faint" style={{ fontSize: 10, marginLeft: 6 }}>{bname(g.broker)}</span>}
+                        <span className="faint" style={{ fontSize: 10, marginLeft: 6 }}>{qty(g.lots)} lots</span>
+                      </td>
+                      <td className="dim">{g.trades}</td>
+                      <td className={g.wins ? "ok" : "faint"}>{g.wins}</td>
+                      <td className={g.losses ? "bad" : "faint"}>{g.losses}</td>
+                      <td className={pc(g.net)}>{signed(g.net)}</td>
+                      <td />
+                    </tr>
+                  ))}
+                </React.Fragment>
+              );
+            })}
           </tbody>
           <tfoot><tr className="total">
             <td className="txt">All {rows.length} days</td>
@@ -5005,6 +5052,23 @@ function DailyPnl({ pf, view }) {
           </tr></tfoot>
         </table>
       </div>
+      {pages > 1 && (
+        <div className="pb" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between", paddingTop: 8 }}>
+          <span className="faint" style={{ fontSize: 11 }}>
+            Showing {from + 1}–{Math.min(from + PAGE, ordered.length)} of {ordered.length} days ·
+            the total above is every day, not this page
+          </span>
+          <span style={{ display: "flex", gap: 6 }}>
+            <button type="button" className="btn ghost" disabled={at === 0} onClick={() => setPage(at - 1)}>
+              {newestFirst ? "Newer" : "Earlier"}
+            </button>
+            <span className="faint" style={{ fontSize: 11, alignSelf: "center" }}>{at + 1} / {pages}</span>
+            <button type="button" className="btn ghost" disabled={at >= pages - 1} onClick={() => setPage(at + 1)}>
+              {newestFirst ? "Older" : "Later"}
+            </button>
+          </span>
+        </div>
+      )}
     </>
   );
 }
@@ -5049,7 +5113,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         <h2>Daily P&amp;L<span className="dim">realized money, one row per day</span></h2>
         <span className="faint" style={{ fontSize: 11 }}>Net of commission · booked on the day each trade closed</span>
       </div>
-      <DailyPnl pf={pf} view={view} />
+      <DailyPnl pf={pf} settings={settings} view={view} />
     </section>
   );
 

@@ -279,3 +279,47 @@ export function tradedByDay(fills, brokerIds = null) {
   }
   return by;
 }
+
+/*
+ * What each day was actually made of: the products traded, and what each one did.
+ *
+ * The daily row answers "what did the day make". This answers the question straight after
+ * it — "made by what" — which is the one that changes tomorrow's trading. A day that nets
+ * -$300 across twenty trades can be one product bleeding steadily and another carrying it,
+ * and the daily row cannot tell those apart.
+ *
+ * Keyed by broker AND product. Two accounts trading the same symbol are two positions with
+ * two margins that no broker will net, so merging them under one name would invent a
+ * position the trader does not hold. The caller decides whether to print the broker.
+ *
+ * Ordered by what moved the needle: largest absolute P&L first, so the product that made or
+ * cost the day is the first line read, not the alphabetically luckiest one. `lots` is the
+ * size closed, which is what the round trips below it were worth — not lots traded, which
+ * would count both sides.
+ */
+export function dayProducts(closed) {
+  const by = new Map();
+  for (const t of closed || []) {
+    if (!t.closeTs) continue;
+    const d = dayKey(t.closeTs);
+    const day = by.get(d) || new Map();
+    const key = `${t.broker || "default"}|${t.product}`;
+    const row = day.get(key) || {
+      key, broker: t.broker || "default", product: t.product,
+      trades: 0, lots: 0, wins: 0, losses: 0, flat: 0, net: 0, won: 0, lost: 0,
+    };
+    row.trades += 1;
+    row.lots = round4(row.lots + Math.abs(Number(t.qty) || 0));
+    if (t.pnl > 0) { row.wins += 1; row.won += t.pnl; }
+    else if (t.pnl < 0) { row.losses += 1; row.lost += -t.pnl; }
+    else row.flat += 1;
+    row.net += t.pnl;
+    day.set(key, row);
+    by.set(d, day);
+  }
+  const out = new Map();
+  for (const [d, day] of by) {
+    out.set(d, [...day.values()].sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.product.localeCompare(b.product)));
+  }
+  return out;
+}
