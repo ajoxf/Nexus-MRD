@@ -3742,7 +3742,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
 
 // ---------- closed ----------
 function ClosedTab({ pf, settings, setSettings, view, fills }) {
-  const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "" });
+  const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "", from: "", to: "" });
   const [open, setOpen] = useState(null);
   // Spread legs, keyed by the broker order they belong to, so a closed trade can show
   // what its two instruments actually filled at going in and coming out.
@@ -3756,7 +3756,27 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
   // Summed from the products that made the day, so the day and the rows under it can never
   // disagree about size.
   const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
-  const closed = pf.book.closed.filter((c) => (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product));
+  /*
+   * Dates are matched on the CLOSE, and on the local calendar day.
+   *
+   * The close is the day the money was decided, which is how realized P&L is booked
+   * everywhere else here — filtering on the open would put a trade in a month it did not
+   * pay in. Several of the rows on this very screen opened in August and closed in
+   * September, so the two answers genuinely differ.
+   *
+   * Local day, so "from 12 Sep to 12 Sep" keeps the whole of the 12th rather than cutting
+   * it at midnight UTC.
+   */
+  const inRange = (c) => {
+    if (!filter.from && !filter.to) return true;
+    if (!c.closeTs) return false;
+    const d = dayKey(c.closeTs);
+    return (!filter.from || d >= filter.from) && (!filter.to || d <= filter.to);
+  };
+  const closed = pf.book.closed.filter((c) =>
+    (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product) && inRange(c));
+  const narrowed = Boolean(filter.broker || filter.product || filter.from || filter.to);
+  const allClosed = pf.book.closed.length;
   const total = sum(closed, (c) => c.pnl);
   const wins = closed.filter((c) => c.pnl > 0), losses = closed.filter((c) => c.pnl < 0);
   const today = sum(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)), (r) => r.pnl);
@@ -3783,15 +3803,42 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
           <div className="kpi"><label>Avg loss</label><b className="bad">{losses.length ? money(sum(losses, (c) => c.pnl) / losses.length) : "—"}</b></div>
         </div>
       )}
+      {/*
+        * Said out loud whenever a filter is on.
+        *
+        * Every figure in the row above is worked out from the filtered trades, so with a
+        * date range set "Realized P&L" is the range's, not the book's — and there is nothing
+        * on the tile to say which. A number read off a screen and put in a statement has to
+        * know what it covers. Today is the exception and says so: it is always today.
+        */}
+      {!hidden && narrowed && (
+        <div className="pb faint" style={{ fontSize: 11, paddingTop: 8, paddingBottom: 0 }}>
+          Filtered: {closed.length} of {allClosed} closed trades
+          {filter.from || filter.to
+            ? ` closed ${filter.from ? `on or after ${filter.from}` : ""}${filter.from && filter.to ? " and " : ""}${filter.to ? `on or before ${filter.to}` : ""}`
+            : ""}.
+          {" "}Every figure above covers only these — except Today, which is always today.
+        </div>
+      )}
       <div className="ph">
         <h2>Closed trades<span className="dim">FIFO-matched for futures brokers, per ticket for MT5 hedging</span></h2>
         <div className="actions">
-          <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter({ broker: e.target.value, product: "" })} aria-label="Filter by broker">
+          <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker}
+            /* Product is cleared with the broker because the product list is the broker's;
+               the dates are not, so they are kept. */
+            onChange={(e) => setFilter((x) => ({ ...x, broker: e.target.value, product: "" }))} aria-label="Filter by broker">
             <option value="">All brokers</option>{settings.brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
           <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.product} onChange={(e) => setFilter((x) => ({ ...x, product: e.target.value }))} aria-label="Filter by product">
             <option value="">All products</option>{products.map((p) => <option key={p}>{p}</option>)}
           </select>
+          <input className="in" style={{ width: "auto", padding: "4px 8px" }} type="date" value={filter.from}
+            onChange={(e) => setFilter((x) => ({ ...x, from: e.target.value }))}
+            aria-label="Closed on or after this date" title="Closed on or after this date" />
+          <input className="in" style={{ width: "auto", padding: "4px 8px" }} type="date" value={filter.to}
+            onChange={(e) => setFilter((x) => ({ ...x, to: e.target.value }))}
+            aria-label="Closed on or before this date" title="Closed on or before this date" />
+          {narrowed && <button className="btn ghost" onClick={() => setFilter({ broker: "", product: "", from: "", to: "" })}>Clear filters</button>}
         </div>
       </div>
       {closed.length === 0 ? <div className="empty">No closed trades yet.</div> : (
