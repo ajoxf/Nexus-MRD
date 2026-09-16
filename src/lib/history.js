@@ -222,14 +222,23 @@ export function realizedByDay(closed, days) {
  * A trade opened in March and closed in June is June's result: that is the day the money
  * was decided, and the day somebody reviewing a bad week would look for it.
  */
+/*
+ * Per day: how many trades won and lost, AND how much they won and lost.
+ *
+ * Both, because they are different questions and a chart drawn from one while captioned
+ * with the other misleads. Twenty small losses and six large ones can be the same money;
+ * counted, one day towers over the other. `won` and `lost` are positive magnitudes so a
+ * chart can size a bar by either without minding signs; `net` is the signed money and is
+ * net of commission, because the closed trades it sums already carry theirs.
+ */
 export function winLossByDay(closed) {
   const by = new Map();
   for (const t of closed || []) {
     if (!t.closeTs) continue;
     const d = dayKey(t.closeTs);
-    const row = by.get(d) || { d, wins: 0, losses: 0, flat: 0, net: 0 };
-    if (t.pnl > 0) row.wins += 1;
-    else if (t.pnl < 0) row.losses += 1;
+    const row = by.get(d) || { d, wins: 0, losses: 0, flat: 0, net: 0, won: 0, lost: 0 };
+    if (t.pnl > 0) { row.wins += 1; row.won += t.pnl; }
+    else if (t.pnl < 0) { row.losses += 1; row.lost += -t.pnl; }
     else row.flat += 1;
     row.net += t.pnl;
     by.set(d, row);

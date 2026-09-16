@@ -112,9 +112,9 @@ const wl = winLossByDay([
   { closeTs: '2026-09-04T12:00:00', broker: 'orient', pnl: 0, product: 'CL' },
 ]);
 eq('one row per day that had a close', wl.map((x) => x.d), ['2026-09-01', '2026-09-03', '2026-09-04']);
-eq('a day with one of each', wl[0], { d: '2026-09-01', wins: 1, losses: 1, flat: 0, net: 500 });
+eq('a day with one of each', wl[0], { d: '2026-09-01', wins: 1, losses: 1, flat: 0, net: 500, won: 800, lost: 300 });
 eq('a scratch counts as neither a win nor a loss',
-   wl[2], { d: '2026-09-04', wins: 1, losses: 0, flat: 1, net: 200 });
+   wl[2], { d: '2026-09-04', wins: 1, losses: 0, flat: 1, net: 200, won: 200, lost: 0 });
 eq('a trade with no close date is not a day', winLossByDay([{ pnl: 5 }]).length, 0);
 
 
@@ -141,6 +141,28 @@ eq('a fill with no product is not counted', tradedByDay([F('2026-09-05T09:00:00'
 eq('a zero-quantity fill is not a trade', tradedByDay([F('2026-09-05T09:00:00', 0, 'CL')]).size, 0);
 eq('a sell recorded as a negative quantity still counts its size',
    tradedByDay([F('2026-09-05T09:00:00', -4, 'CL')]).get('2026-09-05').total, 4);
+
+
+/*
+ * Money alongside the counts. A chart sized by one and captioned with the other misleads,
+ * so both have to be right and both have to reconcile: won less lost IS net, always.
+ */
+const money = winLossByDay([
+  { closeTs: '2026-09-10T12:00:00Z', pnl: 1000 },
+  { closeTs: '2026-09-10T13:00:00Z', pnl: -250 },
+  { closeTs: '2026-09-10T14:00:00Z', pnl: -50 },
+  { closeTs: '2026-09-10T15:00:00Z', pnl: 0 },
+])[0];
+eq('winnings are summed', money.won, 1000);
+eq('losses are summed as a positive magnitude', money.lost, 300);
+eq('won less lost is the net', money.won - money.lost, money.net);
+eq('a scratch adds to neither', [money.wins, money.losses, money.flat], [1, 2, 1]);
+// Twenty small losses and six big ones: the count says one day was far worse, the money says
+// they were the same. This is the reason the chart needs to be able to show either.
+// 20 x $200 = $4,000 against 6 x $1,000 = $6,000: three times the trades, less of the money.
+const many = winLossByDay(Array.from({ length: 20 }, () => ({ closeTs: '2026-09-11T12:00:00Z', pnl: -200 })))[0];
+const few = winLossByDay(Array.from({ length: 6 }, () => ({ closeTs: '2026-09-12T12:00:00Z', pnl: -1000 })))[0];
+eq('more trades does not mean more money lost', [many.losses > few.losses, many.lost < few.lost], [true, true]);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

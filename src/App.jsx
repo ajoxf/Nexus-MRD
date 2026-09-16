@@ -2377,7 +2377,7 @@ function Tracker({ user }) {
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} fills={fills} />}
+        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
@@ -4786,16 +4786,35 @@ function MarginHistory({ pf, fills, settings, view, history }) {
  * them in one column would make a 3-1 day and a 1-3 day the same height, which is exactly
  * the comparison somebody is here to make.
  */
+/*
+ * Winners and losers per day — counted, or weighed.
+ *
+ * The bars were always drawn exactly to scale. They were drawn to scale of the NUMBER of
+ * trades, while the tooltip led with the day's money, and the two do not track each other:
+ * twenty $200 losses is a towering bar and $4,000, six $1,000 losses is a third of the bar
+ * and half as much again in money. Anybody reading the picture against the caption
+ * reasonably concluded the picture was wrong.
+ *
+ * So it now says which it is drawing, and will draw the other. Money is the default,
+ * because the tooltip's headline figure is money and a chart should be a picture of its own
+ * caption.
+ */
 function WinLossDays({ pf, view }) {
   const [hover, setHover] = useState(null);
+  const [byMoney, setByMoney] = useState(true);
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
   const rows = useMemo(() => winLossByDay(closed), [closed]);
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
-  const W = 760, H = 190, pad = { l: 34, r: 12, t: 14, b: 40 };
-  const maxW = Math.max(1, ...rows.map((r) => r.wins));
-  const maxL = Math.max(1, ...rows.map((r) => r.losses));
+  // One pair of accessors, so every measurement below is in whichever unit is on show.
+  const up = (r) => (byMoney ? r.won : r.wins);
+  const dn = (r) => (byMoney ? r.lost : r.losses);
+  const axis = (v) => (byMoney ? money(v) : String(v));
+
+  const W = 760, H = 190, pad = { l: byMoney ? 54 : 34, r: 12, t: 14, b: 40 };
+  const maxW = Math.max(byMoney ? 0.01 : 1, ...rows.map(up));
+  const maxL = Math.max(byMoney ? 0.01 : 1, ...rows.map(dn));
   const top = pad.t, bottom = H - pad.b;
   // Zero sits proportionally, so one bad day does not squash every winning one flat.
   const zero = top + (bottom - top) * (maxW / (maxW + maxL));
@@ -4815,22 +4834,30 @@ function WinLossDays({ pf, view }) {
   return (
     <div>
       <div className="hist-legend">
-        <span><i style={{ background: "var(--ok)" }} />Winners</span>
-        <span><i style={{ background: "var(--bad)" }} />Losers</span>
+        <span><i style={{ background: "var(--ok)" }} />{byMoney ? "Won" : "Winners"}</span>
+        <span><i style={{ background: "var(--bad)" }} />{byMoney ? "Lost" : "Losers"}</span>
+        <span style={{ marginLeft: "auto" }}>
+          <button type="button" className="btn ghost" onClick={() => setByMoney((v) => !v)}
+            title={byMoney
+              ? "Bars sized by money won and lost. Switch to size them by the number of trades."
+              : "Bars sized by the number of trades. Switch to size them by money — a day of many small losses is not the same as a day of few large ones."}>
+            {byMoney ? "By money" : "By trade count"}
+          </button>
+        </span>
       </div>
       <div style={{ position: "relative" }}>
         <svg viewBox={`0 0 ${W} ${H}`} role="img" className="chart-svg"
           aria-label={`Winning and losing trades per day, ${longDay(days[0])} to ${longDay(days[days.length - 1])}`}
           onMouseMove={pick} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
           <line x1={pad.l} x2={W - pad.r} y1={zero} y2={zero} stroke="var(--line2)" strokeWidth="1" />
-          <text x={pad.l - 7} y={yUp(maxW) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{maxW}</text>
+          <text x={pad.l - 7} y={yUp(maxW) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{axis(maxW)}</text>
           <text x={pad.l - 7} y={zero + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">0</text>
-          <text x={pad.l - 7} y={yDn(maxL) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{maxL}</text>
+          <text x={pad.l - 7} y={yDn(maxL) + 3.5} textAnchor="end" fontSize="10" fill="var(--faint)">{axis(maxL)}</text>
 
           {rows.map((r) => (
             <g key={r.d} opacity={hover && hover !== r.d ? 0.45 : 1}>
-              {r.wins > 0 && <rect x={x(r.d) - bw / 2} y={yUp(r.wins)} width={bw} height={Math.max(1, zero - yUp(r.wins))} fill="var(--ok)" />}
-              {r.losses > 0 && <rect x={x(r.d) - bw / 2} y={zero} width={bw} height={Math.max(1, yDn(r.losses) - zero)} fill="var(--bad)" />}
+              {up(r) > 0 && <rect x={x(r.d) - bw / 2} y={yUp(up(r))} width={bw} height={Math.max(1, zero - yUp(up(r)))} fill="var(--ok)" />}
+              {dn(r) > 0 && <rect x={x(r.d) - bw / 2} y={zero} width={bw} height={Math.max(1, yDn(dn(r)) - zero)} fill="var(--bad)" />}
             </g>
           ))}
 
@@ -4848,28 +4875,117 @@ function WinLossDays({ pf, view }) {
         {h && (
           <div className="chart-tip" style={{ left: `${(x(h.d) / W) * 100}%` }}>
             <b>{longDay(h.d)}</b>
-            <span className="tip-row ok"><i>Won</i><b>{h.wins}</b></span>
-            <span className="tip-row bad"><i>Lost</i><b>{h.losses}</b></span>
+            {/* Both readings, always. The bar can only be drawn to one of them, and a
+                trader comparing the picture with the caption needs to see which. */}
+            <span className="tip-row ok"><i>Won</i><b>{h.wins} · {money(h.won)}</b></span>
+            <span className="tip-row bad"><i>Lost</i><b>{h.losses} · {money(h.lost)}</b></span>
             {h.flat > 0 && <span className="tip-row"><i>Scratched</i><b>{h.flat}</b></span>}
             <span className="tip-row tip-total"><i>On the day</i><b>{signed(h.net)}</b></span>
           </div>
         )}
       </div>
       <p className="hist-note">
-        Every trade counted on the day it closed — that is the day the money was decided.
+        {byMoney
+          ? "Bars are the money won and lost each day, so a day of a few large losses outweighs a day of many small ones."
+          : "Bars are the NUMBER of trades won and lost, not the money — twenty small losses tower over six large ones."}{" "}
+        Booked on the day each trade closed, that being the day the money was decided.
         Only closed trades appear; an open position is not yet a winner or a loser.
       </p>
     </div>
   );
 }
 
-function AnalysisTab({ pf, settings, view, fills }) {
+
+/*
+ * Realized money, one row per day.
+ *
+ * The charts on this page answer "what shape is the book in". This answers a plainer
+ * question a trader asks every evening — what did today make — and the one after it: what
+ * has the month made so far. So the running total is beside the day, not in a separate tile.
+ *
+ * NET OF FEES, like every other realized figure here. `winLossByDay` sums the closed
+ * trades' own P&L, which already carries their commission, and that agrees to the cent with
+ * the realized ledger the top bar's "Today" is worked out from. Two figures on one screen
+ * disagreeing about what a day made is the fastest way to lose a trader's trust in all of it.
+ *
+ * Days with nothing closed are absent rather than shown as zero. A flat row reads like a day
+ * that was traded and made nothing, which is a different thing from a day off.
+ */
+function DailyPnl({ pf, view }) {
+  const [newestFirst, setNewestFirst] = useState(true);
+  const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
+  const rows = useMemo(() => {
+    // Chronological first, so the running total accumulates the way the money did —
+    // the sort below only changes the order it is read in, never what it adds up to.
+    const byDay = winLossByDay(closed);
+    let run = 0;
+    return byDay.map((r) => { run += r.net; return { ...r, run, trades: r.wins + r.losses + r.flat }; });
+  }, [closed]);
+
+  if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
+
+  const shown = newestFirst ? [...rows].reverse() : rows;
+  const day = (k) => {
+    const [y, m, d] = k.split("-").map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
+  };
+  const best = rows.reduce((a, r) => (r.net > a.net ? r : a));
+  const worst = rows.reduce((a, r) => (r.net < a.net ? r : a));
+  const green = rows.filter((r) => r.net > 0).length;
+
+  return (
+    <>
+      <div className="ph" style={{ background: "transparent", borderBottom: 0 }}>
+        <span className="faint" style={{ fontSize: 11 }}>
+          {rows.length} trading {rows.length === 1 ? "day" : "days"} · {green} up, {rows.length - green} down ·
+          best {signed(best.net)} on {day(best.d)} · worst {signed(worst.net)} on {day(worst.d)}
+        </span>
+        <button type="button" className="btn ghost" onClick={() => setNewestFirst((v) => !v)}>
+          {newestFirst ? "Newest first" : "Oldest first"}
+        </button>
+      </div>
+      <div className="tw tall">
+        <table>
+          <thead><tr>
+            <th className="txt">Date</th><th>Trades</th><th>Won</th><th>Lost</th>
+            <th>P&amp;L</th><th title="Realized money from the first day shown to this one, in date order">Running</th>
+          </tr></thead>
+          <tbody>
+            {shown.map((r) => (
+              <tr key={r.d}>
+                <td className="txt">{day(r.d)}</td>
+                <td>{r.trades}</td>
+                <td className={r.wins ? "ok" : "faint"}>{r.wins}</td>
+                <td className={r.losses ? "bad" : "faint"}>{r.losses}</td>
+                <td className={pc(r.net)}><b>{signed(r.net)}</b></td>
+                <td className={pc(r.run)}>{signed(r.run)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot><tr className="total">
+            <td className="txt">All {rows.length} days</td>
+            <td>{rows.reduce((a, r) => a + r.trades, 0)}</td>
+            <td className="ok">{rows.reduce((a, r) => a + r.wins, 0)}</td>
+            <td className="bad">{rows.reduce((a, r) => a + r.losses, 0)}</td>
+            <td className={pc(rows[rows.length - 1].run)}><b>{signed(rows[rows.length - 1].run)}</b></td>
+            <td />
+          </tr></tfoot>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const brokers = settings.brokers;
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
   const a = useMemo(() => analyse(closed), [closed]);
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
+  // One preference for both summary rows — see ClosedTab, which reads the same key.
+  const hidden = Boolean(settings.prefs?.hideClosedSummary);
+  const setHidden = (v) => setSettings((st) => ({ ...st, prefs: { ...st.prefs, hideClosedSummary: v } }));
 
   // Worth drawing before a single trade is closed: it answers "how much margin
   // was I carrying then", which is a question about open positions.
@@ -4895,9 +5011,20 @@ function AnalysisTab({ pf, settings, view, fills }) {
     </section>
   );
 
+  const daily = (
+    <section className="panel">
+      <div className="ph">
+        <h2>Daily P&amp;L<span className="dim">realized money, one row per day</span></h2>
+        <span className="faint" style={{ fontSize: 11 }}>Net of commission · booked on the day each trade closed</span>
+      </div>
+      <DailyPnl pf={pf} view={view} />
+    </section>
+  );
+
   if (!a.n) return (
     <>
       {history}
+      {daily}
       <section className="panel"><div className="ph"><h2>Analysis</h2></div>
         <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
       </section>
@@ -4909,9 +5036,17 @@ function AnalysisTab({ pf, settings, view, fills }) {
       <section className="panel">
         <div className="ph">
           <h2>Performance<span className="dim">{a.n} closed trades · {qty(a.lots)} lots</span></h2>
-          <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
+          <div className="actions">
+            <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
+            {/* Same preference as the Closed page, so putting the tally away puts it away
+                everywhere rather than in one place and not the other. */}
+            <button type="button" className="btn ghost" aria-pressed={hidden} onClick={() => setHidden(!hidden)}
+              title={hidden ? "Show the performance figures." : "Hide the performance figures. Nothing is deleted or recalculated — only this row goes."}>
+              {hidden ? "Show summary" : "Hide summary"}
+            </button>
+          </div>
         </div>
-        <div className="strip">
+        {!hidden && <div className="strip">
           <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(a.net)}>{signed(a.net)}</b></div>
           <div className="kpi"><label>Win rate</label><b>{pct(a.winRate)}</b><span className="faint" style={{ fontSize: 11 }}>{a.wins} won · {a.losses} lost</span></div>
           <div className="kpi"><label>Profit factor</label><b className={a.profitFactor !== null && a.profitFactor < 1 ? "bad" : a.profitFactor >= 1.5 ? "ok" : ""}>{ratio(a.profitFactor)}</b><span className="faint" style={{ fontSize: 11 }}>won ÷ lost</span></div>
@@ -4921,7 +5056,7 @@ function AnalysisTab({ pf, settings, view, fills }) {
           <div className="kpi"><label>Largest drawdown</label><b className={a.maxDD ? "bad" : ""}>{a.maxDD ? money(-a.maxDD) : "—"}</b><span className="faint" style={{ fontSize: 11 }}>peak to trough</span></div>
           <div className="kpi"><label>Typical hold</label><b>{holdTxt(a.medianHours)}</b><span className="faint" style={{ fontSize: 11 }}>median, open to close</span></div>
           <div className="kpi hide-m"><label>Longest streak</label><b><span className="ok">{a.winStreak}W</span> <span className="faint">/</span> <span className="bad">{a.lossStreak}L</span></b></div>
-        </div>
+        </div>}
       </section>
 
       {/*
@@ -4937,6 +5072,8 @@ function AnalysisTab({ pf, settings, view, fills }) {
         {history}
         {winLoss}
       </div>
+
+      {daily}
 
       <div className="grid-settings">
         <section className="panel">

@@ -105,7 +105,20 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
 
     // 2) Adding to the position
     if (Math.sign(q) === Math.sign(st.pos)) {
-      st.lots.push(newLot(f, q, price, 0));
+      /*
+       * The commission on THIS fill belongs to the lot it opens.
+       *
+       * It used to be passed as 0, so a fill that added to a position paid a commission that
+       * reached the realized ledger and the cycle but never any closed trade — and every
+       * figure worked out from `closed` was short by exactly that fee. On a scale-in of two
+       * lots at $5 a side it read $385 where the money was $380, and the Closed page
+       * disagreed with the top bar about the same day. The realized ledger was right
+       * throughout; it is the per-trade attribution that dropped it.
+       *
+       * Nothing is double counted: the ledger entry above is per fill and independent of
+       * lots, and on this path the cycle is never itself pushed as a closed trade.
+       */
+      st.lots.push(newLot(f, q, price, fee));
       note(c.openOrders, f.order_id);
       st.pos = r9(st.pos + q);
       st.avg = fifo || f.position ? lotsAvg(st.lots, price) : (Math.abs(st.pos - q) * st.avg + Math.abs(q) * price) / Math.abs(st.pos);
