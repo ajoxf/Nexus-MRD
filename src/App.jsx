@@ -33,6 +33,12 @@ const DEFAULT_SETTINGS = {
    * automatically. A spread changes no margin figure — it answers what the trade can cost.
    */
   spreads: [],
+  /*
+   * Display preferences. Nothing here changes a number — only whether it is on screen.
+   * Kept apart from `limits` and `scenario` for exactly that reason: a preference must
+   * never be mistaken for a risk setting, in the code or by whoever reads it next.
+   */
+  prefs: { hideClosedSummary: false },
   cash: [],
   statement: {},
   // One row per broker account per day, written live. See lib/history.js.
@@ -47,7 +53,7 @@ function migrate(s) {
   // Accounts stored before currencies existed were all in dollars, which is what the
   // figures in them mean — so USD is a statement about the data, not a default.
   const withCurrency = (list) => list.map((b) => ({ ...b, currency: b.currency || "USD" }));
-  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, spreads: s.spreads || [], cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
+  if (s.brokers) return { limits: { ...D.limits, ...s.limits }, brokers: withCurrency(s.brokers), marks: s.marks || {}, view: s.view || "all", scenario: { ...D.scenario, ...(s.scenario || {}) }, spreads: s.spreads || [], prefs: { ...D.prefs, ...(s.prefs || {}) }, cash: s.cash || [], statement: s.statement || {}, history: s.history || [] };
   const A = s.account || {};
   return {
     limits: { ...D.limits, ...Object.fromEntries(Object.entries(A).filter(([k]) => k in D.limits)) },
@@ -56,6 +62,7 @@ function migrate(s) {
     view: "all",
     scenario: { ...D.scenario },
     spreads: [],
+    prefs: { ...D.prefs },
     cash: [],
     statement: {},
     history: [],
@@ -2369,7 +2376,7 @@ function Tracker({ user }) {
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
-        {tab === "closed" && <ClosedTab pf={pf} settings={settings} view={view} fills={fills} />}
+        {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} view={view} fills={fills} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
@@ -3686,7 +3693,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
 }
 
 // ---------- closed ----------
-function ClosedTab({ pf, settings, view, fills }) {
+function ClosedTab({ pf, settings, setSettings, view, fills }) {
   const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "" });
   const [open, setOpen] = useState(null);
   // Spread legs, keyed by the broker order they belong to, so a closed trade can show
@@ -3703,19 +3710,35 @@ function ClosedTab({ pf, settings, view, fills }) {
   const wins = closed.filter((c) => c.pnl > 0), losses = closed.filter((c) => c.pnl < 0);
   const today = sum(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)), (r) => r.pnl);
   const products = [...new Set(pf.book.closed.filter((c) => !filter.broker || c.broker === filter.broker).map((c) => c.product))].sort();
+  /*
+   * The running total is on screen all day, and a season's drawdown in red at the top of
+   * the page is not information anybody needs repeated — it is just there. Hiding it is a
+   * display choice and nothing more: the trades, the fees and every figure worked out from
+   * them are untouched, and the tally is one click away.
+   */
+  const hidden = Boolean(settings.prefs?.hideClosedSummary);
+  const setHidden = (v) => setSettings((st) => ({ ...st, prefs: { ...st.prefs, hideClosedSummary: v } }));
   return (
     <section className="panel">
-      <div className="strip">
-        <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b></div>
-        <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b></div>
-        <div className="kpi"><label>Closed trades</label><b>{closed.length}</b></div>
-        <div className="kpi"><label>Win rate</label><b>{closed.length ? pct(wins.length / closed.length) : "—"}</b></div>
-        <div className="kpi"><label>Avg win</label><b className="ok">{wins.length ? money(sum(wins, (c) => c.pnl) / wins.length) : "—"}</b></div>
-        <div className="kpi"><label>Avg loss</label><b className="bad">{losses.length ? money(sum(losses, (c) => c.pnl) / losses.length) : "—"}</b></div>
-      </div>
+      {!hidden && (
+        <div className="strip">
+          <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b></div>
+          <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b></div>
+          <div className="kpi"><label>Closed trades</label><b>{closed.length}</b></div>
+          <div className="kpi"><label>Win rate</label><b>{closed.length ? pct(wins.length / closed.length) : "—"}</b></div>
+          <div className="kpi"><label>Avg win</label><b className="ok">{wins.length ? money(sum(wins, (c) => c.pnl) / wins.length) : "—"}</b></div>
+          <div className="kpi"><label>Avg loss</label><b className="bad">{losses.length ? money(sum(losses, (c) => c.pnl) / losses.length) : "—"}</b></div>
+        </div>
+      )}
       <div className="ph">
         <h2>Closed trades<span className="dim">FIFO-matched for futures brokers, per ticket for MT5 hedging</span></h2>
         <div className="actions">
+          <button type="button" className="btn ghost" aria-pressed={hidden} onClick={() => setHidden(!hidden)}
+            title={hidden
+              ? "Show the realized P&L, win rate and averages across the trades below."
+              : "Hide the summary figures. Nothing is deleted or recalculated — only this row goes."}>
+            {hidden ? "Show summary" : "Hide summary"}
+          </button>
           <select className="in" style={{ width: "auto", padding: "4px 8px" }} value={filter.broker} onChange={(e) => setFilter({ broker: e.target.value, product: "" })} aria-label="Filter by broker">
             <option value="">All brokers</option>{settings.brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
