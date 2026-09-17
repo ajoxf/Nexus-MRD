@@ -3943,7 +3943,47 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
         <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
           setSettings={setSettings} />
       ))}
+
+      <BuildStamp />
     </div>
+  );
+}
+
+/*
+ * Which build this browser is actually running.
+ *
+ * "Is the fix live yet?" cost several rounds of guessing, because nothing on screen said.
+ * A fix could be written, pushed, built and served, and the only way to tell whether it had
+ * arrived was to hunt for the behaviour it changed — and a stale cached bundle looks
+ * exactly like a bug that was never fixed.
+ *
+ * Copyable, because the point is to be able to say which build you are on.
+ */
+function BuildStamp() {
+  const [copied, setCopied] = useState(false);
+  const built = new Date(__BUILD_TIME__);
+  const stamp = `${__BUILD_COMMIT__} · ${built.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return (
+    <section className="panel">
+      <div className="ph"><h2>Version</h2><span className="faint" style={{ fontSize: 11 }}>What this browser is running</span></div>
+      <div className="pb">
+        <div className="fg c2" style={{ alignItems: "end" }}>
+          <F label="Build" hint={`Built ${built.toLocaleString()}`}>
+            <input className="in" readOnly value={stamp} onFocus={(e) => e.target.select()}
+              style={{ fontFamily: "var(--num)", fontSize: 12 }} aria-label="Build identifier" />
+          </F>
+          <button className="btn ghost" onClick={async () => {
+            try { await navigator.clipboard.writeText(stamp); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+            catch { setCopied(false); }
+          }}>{copied ? "Copied" : "Copy"}</button>
+        </div>
+        <p className="faint" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
+          If something that was fixed still looks broken, check this first: a page held in the
+          browser's cache shows the old build and is indistinguishable from the fix not working.
+          A hard refresh — Ctrl+Shift+R, or Cmd+Shift+R on a Mac — fetches the current one.
+        </p>
+      </div>
+    </section>
   );
 }
 
