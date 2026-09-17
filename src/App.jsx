@@ -2461,7 +2461,7 @@ function Book({ pf, settings, view }) {
   const avg = (v, q) => (q ? px(v / q) : "—");
 
   return (
-    <section className="panel o0b book">
+    <section className="panel o3 book">
       {/*
         * The last tally "Hide figures" had not reached. The whole row goes, not just the two
         * money tiles, exactly as the header and the Closed and Analysis rows do — a switch
@@ -2611,33 +2611,12 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   return (
     <div className="grid-dash">
       <div className="col">
-        <Book pf={pf} settings={settings} view={view} />
-        {all && (
-          <section className="panel o0">
-            <div className="ph"><h2>Broker accounts<span className="dim">{pf.accounts.length}</span></h2><button className="btn ghost" onClick={goSettings}>Manage</button></div>
-            <div className="tw">
-              <table>
-                <thead><tr><th className="txt">Broker</th><th className="txt">Margin basis</th><th>Capital</th><th>TNE</th><th>Initial margin</th><th>TNE / IM</th><th>Room to call</th><th>Open P&L</th><th>Positions</th></tr></thead>
-                <tbody>
-                  {pf.accounts.map((a) => {
-                    const s = statusOf(a.ratio, a, pf.minR);
-                    return (
-                      <tr key={a.id} className="clickable" onClick={() => setView(a.id)} title={`Show ${a.name} only`}>
-                        <td className="txt"><b>{a.name}</b></td>
-                        <td className="txt dim">{basis(a)}</td>
-                        <td>{money(n(a.capital))}</td><td>{money(a.TNE)}</td><td>{money(a.IM)}</td>
-                        <td><b className={s.cls === "dim" ? "faint" : s.cls}>{ratioTxt(a.ratio)}</b>{isFinite(a.ratio) && <span className={`pill ${s.cls}`} style={{ marginLeft: 6 }}><span className={s.cls}>{s.t}</span></span>}</td>
-                        <td className={a.IM > 0 && a.lossToCall <= 0 ? "bad" : ""}>{a.IM > 0 ? money(a.lossToCall) : "—"}</td>
-                        <td className={pc(a.upnl)}>{signed(a.upnl)}</td><td>{a.rows.length}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-
+      {/*
+        * Ordered the way the morning is read: what am I holding, what did I just close,
+        * then the book behind both. Book by product is the reference view — every product
+        * ever traded, open and closed side by side — so it sits under the two that answer
+        * "right now", rather than above them.
+        */}
         <section className="panel o1">
           <div className="ph">
             <h2>Open positions<span className="dim">{rows.length}{!all && ` · ${bname(view)}`}</span></h2>
@@ -2681,7 +2660,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
           )}
         </section>
 
-        <section className="panel o5">
+        <section className="panel o2">
           <div className="ph"><h2>Recently closed</h2><span className="dim">Realized today <b className={`num ${pc(sum(accts, (a) => a.realizedToday))}`}>{signed(sum(accts, (a) => a.realizedToday))}</b></span></div>
           {recent.length === 0 ? <div className="empty">Closed trades appear here once they're squared off.</div> : (
             <div className="tw">
@@ -2696,10 +2675,37 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
             </div>
           )}
         </section>
+        <Book pf={pf} settings={settings} view={view} />
+        {all && (
+          <section className="panel o5">
+            <div className="ph"><h2>Broker accounts<span className="dim">{pf.accounts.length}</span></h2><button className="btn ghost" onClick={goSettings}>Manage</button></div>
+            <div className="tw">
+              <table>
+                <thead><tr><th className="txt">Broker</th><th className="txt">Margin basis</th><th>Capital</th><th>TNE</th><th>Initial margin</th><th>TNE / IM</th><th>Room to call</th><th>Open P&L</th><th>Positions</th></tr></thead>
+                <tbody>
+                  {pf.accounts.map((a) => {
+                    const s = statusOf(a.ratio, a, pf.minR);
+                    return (
+                      <tr key={a.id} className="clickable" onClick={() => setView(a.id)} title={`Show ${a.name} only`}>
+                        <td className="txt"><b>{a.name}</b></td>
+                        <td className="txt dim">{basis(a)}</td>
+                        <td>{money(n(a.capital))}</td><td>{money(a.TNE)}</td><td>{money(a.IM)}</td>
+                        <td><b className={s.cls === "dim" ? "faint" : s.cls}>{ratioTxt(a.ratio)}</b>{isFinite(a.ratio) && <span className={`pill ${s.cls}`} style={{ marginLeft: 6 }}><span className={s.cls}>{s.t}</span></span>}</td>
+                        <td className={a.IM > 0 && a.lossToCall <= 0 ? "bad" : ""}>{a.IM > 0 ? money(a.lossToCall) : "—"}</td>
+                        <td className={pc(a.upnl)}>{signed(a.upnl)}</td><td>{a.rows.length}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
       </div>
 
       <div className="col">
-        <section className="panel o2" style={{ borderColor: warnings.length ? (bad ? "#E7A1A5" : "#E8CD99") : undefined, borderTop: warnings.length ? `3px solid var(--${bad ? "bad" : "warn"})` : undefined }}>
+        <section className="panel o0" style={{ borderColor: warnings.length ? (bad ? "#E7A1A5" : "#E8CD99") : undefined, borderTop: warnings.length ? `3px solid var(--${bad ? "bad" : "warn"})` : undefined }}>
           <div className="ph"><h2>Warnings<span className="dim">{warnings.length || ""}</span></h2>{warnings.length === 0 && <span className="ok" style={{ fontSize: 12 }}>All clear</span>}</div>
           {warnings.length > 0 && <ul className="warns">{warnings.map(([lvl, m], i) => <li key={i}><span className="dot" style={{ background: `var(--${lvl})` }} />{m}</li>)}</ul>}
         </section>
