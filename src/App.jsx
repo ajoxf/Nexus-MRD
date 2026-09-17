@@ -2462,12 +2462,23 @@ function Book({ pf, settings, view }) {
 
   return (
     <section className="panel o0b book">
-      <div className="booktiles">
-        <div className="tile"><label>Open positions</label><b>{open.length}</b><small>{open.length ? `${qty(longLots)} lots long · ${qty(shortLots)} lots short` : "You're flat"}</small></div>
-        <div className="tile"><label>Open P&amp;L</label><b className={pc(upnl)}>{signed(upnl)}</b><small>At the current prices you've entered</small></div>
-        <div className="tile"><label>Closed trades</label><b>{trades}</b><small>{qty(sum(rows, (r) => r.lots))} lots squared off</small></div>
-        <div className="tile"><label>Realized P&amp;L</label><b className={pc(realized)}>{signed(realized)}</b><small>After fees</small></div>
-      </div>
+      {/*
+        * The last tally "Hide figures" had not reached. The whole row goes, not just the two
+        * money tiles, exactly as the header and the Closed and Analysis rows do — a switch
+        * that puts some of the numbers away and leaves others is worse than one that does
+        * nothing, because you stop knowing what it did.
+        *
+        * The table below stays: it is the book, not a tally of it, and hiding it would leave
+        * the page empty.
+        */}
+      {!Boolean(settings.prefs?.hideFigures) && (
+        <div className="booktiles">
+          <div className="tile"><label>Open positions</label><b>{open.length}</b><small>{open.length ? `${qty(longLots)} lots long · ${qty(shortLots)} lots short` : "You're flat"}</small></div>
+          <div className="tile"><label>Open P&amp;L</label><b className={pc(upnl)}>{signed(upnl)}</b><small>At the current prices you've entered</small></div>
+          <div className="tile"><label>Closed trades</label><b>{trades}</b><small>{qty(sum(rows, (r) => r.lots))} lots squared off</small></div>
+          <div className="tile"><label>Realized P&amp;L</label><b className={pc(realized)}>{signed(realized)}</b><small>After fees</small></div>
+        </div>
+      )}
       <div className="ph"><h2>Book by product<span className="dim">Open position and closed trades, side by side. Click an open position to see its lots.</span></h2></div>
       {rows.length === 0 ? <div className="empty">Nothing traded yet. Upload a fills file to get started.</div> : (
         <div className="tw">
