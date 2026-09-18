@@ -3508,6 +3508,20 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         return Boolean(r.is_leg) !== Boolean(was.is_leg);
       })
     : [];
+  /*
+   * What the repair is actually repairing, so the button says it.
+   *
+   * It said "with position tickets" whatever it was about to do, which was wrong and
+   * confusing the first time it was used to un-double a spread: the number was right and
+   * the words described a different fix entirely.
+   */
+  const repairKind = (() => {
+    const tickets = toRepair.some((r) => r.position);
+    const legs = toRepair.some((r) => r.is_leg);
+    if (tickets && legs) return "position tickets and spread legs";
+    if (legs) return `spread leg${toRepair.length === 1 ? "" : "s"} counted as products`;
+    return "position tickets";
+  })();
   // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)
   const cashKey = (c) => `${c.broker}|${c.type}|${(+c.amount).toFixed(2)}|${String(c.ts).slice(0, 16)}`;
   const cashNew = parsed ? (() => { const have = new Set((settings.cash || []).map(cashKey)); return parsed.cash.filter((c) => !have.has(cashKey(c))); })() : [];
@@ -3733,7 +3747,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
                 </div>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} with position tickets` : "Nothing new to import"}</button>
+                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} · ${repairKind}` : "Nothing new to import"}</button>
                 <button className="btn ghost" onClick={reset}>Cancel</button>
               </div>
             </>
