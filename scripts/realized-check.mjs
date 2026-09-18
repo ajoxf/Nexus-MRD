@@ -1,5 +1,5 @@
 import { computeBook } from '../src/lib/positions.js';
-import { dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal } from '../src/lib/history.js';
+import { dailyRows, dailyCsv, dayProducts, moneyByDay, moneyByProduct, filterLedger, ledgerTotal } from '../src/lib/history.js';
 
 /*
  * REALIZED MONEY MUST BE THE SAME NUMBER EVERYWHERE.
@@ -114,6 +114,91 @@ is('an empty book has no days', dailyRows([], []), []);
 is('no ledger, no money', ledgerTotal([]), 0);
 is('undefined is the same as empty', [...moneyByDay(undefined)], []);
 is('a commission-only day still appears', dailyRows([], [{ ts: '2026-09-16T10:00:00Z', broker: 'o', product: 'X', pnl: -5, fee: true }]).map((r) => [r.d, r.net, r.trades]), [['2026-09-16', -5, 0]]);
+
+
+console.log('\n-- every figure on a page must add up to every other figure on it --');
+/*
+ * The point of a breakdown is checking a total against its parts. When the day row moved to
+ * the ledger and the products under it did not, opening a day showed $2,982.50 breaking
+ * into one product at -$1,000 and the other $3,995 nowhere. A breakdown that does not
+ * reconcile is worse than none: it makes the total look wrong when it is right.
+ */
+const MIX = [
+  F({ product: 'X', side: 'Buy', qty: 5, price: 100, fee: -12.5, ts: '2026-09-16T09:00:00Z', ref: 1 }),
+  F({ product: 'X', side: 'Sell', qty: 2, price: 102, fee: -5, ts: '2026-09-16T15:00:00Z', ref: 2 }),
+  F({ product: 'Y', side: 'Buy', qty: 1, price: 50, ts: '2026-09-16T09:00:00Z', ref: 3 }),
+  F({ product: 'Y', side: 'Sell', qty: 1, price: 49, ts: '2026-09-16T16:00:00Z', ref: 4 }),
+];
+const mb = book(MIX);
+const mixRows = dailyRows(mb.closed, mb.realized);
+const mixParts = dayProducts(mb.closed, mb.realized);
+for (const r of mixRows) {
+  const kids = mixParts.get(r.d) || [];
+  near(`the products under ${r.d} add up to the day`, kids.reduce((a, g) => a + g.net, 0), r.net);
+}
+near('and the days add up to the ledger', mixRows.reduce((a, r) => a + r.net, 0), ledgerTotal(mb.realized));
+near('which is also the per-product total', [...moneyByProduct(mb.realized).values()].reduce((a, v) => a + v, 0), ledgerTotal(mb.realized));
+
+// A product with money but no finished trade must still get a row, or the parts go missing.
+const day = mixParts.get('2026-09-16');
+is('both products appear', day.map((g) => g.product).sort(), ['X', 'Y']);
+const X = day.find((g) => g.product === 'X');
+near('X carries its money', X.net, 3982.5);
+is('while admitting no trade of its finished', [X.trades, X.wins, X.losses], [0, 0, 0]);
+const Y = day.find((g) => g.product === 'Y');
+near('Y carries its money', Y.net, -1000);
+is('and its one finished loser', [Y.trades, Y.wins, Y.losses], [1, 0, 1]);
+
+// The CSV is read in a spreadsheet, where somebody will total the column.
+const mixCsv = dailyCsv(mb.closed, mb.realized, () => 'Orient').split('\n').filter(Boolean).slice(1).map((l) => l.split(','));
+const dayCells = mixCsv.filter((c) => c[1] === 'Day'), prodCells = mixCsv.filter((c) => c[1] === 'Product');
+near('the CSV day rows total the ledger', dayCells.reduce((a, c) => a + Number(c[9]), 0), ledgerTotal(mb.realized));
+near('and so do its product rows', prodCells.reduce((a, c) => a + Number(c[9]), 0), ledgerTotal(mb.realized));
+
+
+console.log('\n-- nothing is counted twice, on four thousand random books --');
+/*
+ * The strongest statement available about double counting, and it needs no fixtures.
+ *
+ * For a book that ends FLAT, three numbers arrived at independently must agree:
+ *   the ledger (one entry per fill), the closed round trips (one row per finished trade),
+ *   and raw cash — sell proceeds less buy cost plus fees, which no part of the engine
+ *   touches. Count anything twice, or lose it, and they part company.
+ *
+ * Deterministic: the same seed every run, so a failure is reproducible rather than a
+ * story about a random book nobody can find again.
+ */
+let seed = 12345;
+const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+const anyOf = (a) => a[Math.floor(rnd() * a.length)];
+let worst = 0, flatBooks = 0;
+for (let run = 0; run < 4000; run++) {
+  const method = anyOf(['fifo', 'average']);
+  const size = anyOf([1, 100, 1000]);
+  const n = 2 + Math.floor(rnd() * 8);
+  const rf = [];
+  let pos = 0;
+  for (let i = 0; i < n; i++) {
+    const q = 1 + Math.floor(rnd() * 3);
+    const side = pos > 0 && rnd() < 0.6 ? 'Sell' : pos < 0 && rnd() < 0.6 ? 'Buy' : anyOf(['Buy', 'Sell']);
+    rf.push(F({ product: 'P', side, qty: q, price: +(50 + rnd() * 100).toFixed(2), fee: -+(rnd() * 5).toFixed(2),
+      ts: new Date(Date.UTC(2026, 8, 1 + i, 10)).toISOString(), ref: `f${i}` }));
+    pos += side === 'Buy' ? q : -q;
+  }
+  if (pos !== 0) rf.push(F({ product: 'P', side: pos > 0 ? 'Sell' : 'Buy', qty: Math.abs(pos),
+    price: +(50 + rnd() * 100).toFixed(2), fee: -+(rnd() * 5).toFixed(2),
+    ts: new Date(Date.UTC(2026, 8, 1 + n, 10)).toISOString(), ref: 'fz' }));
+  const rb = computeBook(rf, () => size, () => method);
+  if (rb.open.length) continue;
+  flatBooks++;
+  const led = rb.realized.reduce((a, r) => a + r.pnl, 0);
+  const rounds = rb.closed.reduce((a, c) => a + c.pnl, 0);
+  const cash = rf.reduce((a, f) => a + (f.side === 'Sell' ? 1 : -1) * f.qty * f.price * size + f.fee, 0);
+  worst = Math.max(worst, Math.abs(led - rounds), Math.abs(led - cash));
+}
+is('four thousand books, all squared off', flatBooks, 4000);
+ok(`ledger, round trips and raw cash never differ by more than ${worst.toExponential(1)}`);
+if (worst > 0.005) bad('they must agree to the cent', worst, 0);
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

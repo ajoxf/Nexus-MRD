@@ -4569,11 +4569,33 @@ const HOUR = 3600e3;
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const monthName = (ym) => `${MONTHS[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
 
-function analyse(closed) {
+/*
+ * `realized` is the ledger. Everything about MONEY is taken from it; everything about
+ * TRADES — counts, win rate, gross won and lost, profit factor, streaks, the equity curve —
+ * stays on the finished round trips, because an unfinished trade has no result.
+ *
+ * Without the ledger the headline said one thing and every panel under it another: the
+ * strip showed money booked against positions still held, and "By product", "By month" and
+ * Product detail showed only what had finished. Nothing on the page added up to anything
+ * else on it, which is no way to check a figure.
+ */
+function analyse(closed, realized) {
   const t = [...closed].sort((a, b) => new Date(a.closeTs) - new Date(b.closeTs));
+  // Ledger money per product and per month, to lay over the round-trip groups below.
+  const moneyBy = (keyOf) => {
+    const m = new Map();
+    for (const r of realized || []) {
+      if (!r || !r.ts || !r.product) continue;
+      const k = keyOf(r);
+      m.set(k, (m.get(k) || 0) + (Number(r.pnl) || 0));
+    }
+    return m;
+  };
   const wins = t.filter((x) => x.pnl > 0), losses = t.filter((x) => x.pnl < 0);
   const grossWin = sum(wins, (x) => x.pnl), grossLoss = Math.abs(sum(losses, (x) => x.pnl));
-  const net = sum(t, (x) => x.pnl);
+  // The ledger's money, not the round trips'. See the note above the function.
+  const net = round2c((realized || []).reduce((a, r) => a + (Number(r.pnl) || 0), 0));
+  const netFromTrades = sum(t, (x) => x.pnl);
 
   // Equity curve and the deepest fall from a peak along the way.
   let run = 0, peak = 0, maxDD = 0, ddAt = null;
@@ -4592,34 +4614,46 @@ function analyse(closed) {
     winStreak = Math.max(winStreak, cw); lossStreak = Math.max(lossStreak, cl);
   });
 
+  /*
+   * `keyOf` is handed { product, when } — never a raw row. A ledger entry dates itself with
+   * `ts` and a closed trade with `closeTs`, and feeding one to a key written for the other
+   * is how "Invalid time value" took the whole page down.
+   */
   const group = (keyOf) => {
     const m = {};
+    const at = (k) => (m[k] ||= { key: k, trades: 0, lots: 0, wins: 0, net: 0, gw: 0, gl: 0 });
+    // Money first, so a product with realized money but no finished trade still gets a row.
+    moneyBy((r) => keyOf({ product: r.product, when: r.ts })).forEach((net, k) => { at(k).net = net; });
     t.forEach((x) => {
-      const k = keyOf(x);
-      const g = (m[k] ||= { key: k, trades: 0, lots: 0, wins: 0, net: 0, gw: 0, gl: 0 });
-      g.trades++; g.lots += x.qty; g.net += x.pnl;
+      const g = at(keyOf({ product: x.product, when: x.closeTs }));
+      g.trades++; g.lots += x.qty;
       if (x.pnl > 0) { g.wins++; g.gw += x.pnl; } else if (x.pnl < 0) g.gl += Math.abs(x.pnl);
     });
-    return Object.values(m).sort((a, b) => b.net - a.net);
+    return Object.values(m).map((g) => ({ ...g, net: round2c(g.net) })).sort((a, b) => b.net - a.net);
   };
+  /** A month key that cannot throw: an unreadable date is filed under "unknown", not fatal. */
+  const monthOf = (when) => { const d = new Date(when); return isFinite(d) ? d.toISOString().slice(0, 7) : "unknown"; };
 
   const held = t.map((x) => (new Date(x.closeTs) - new Date(x.openTs)) / HOUR).filter((h) => isFinite(h) && h >= 0);
   const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const i = s.length >> 1;
     return s.length % 2 ? s[i] : (s[i - 1] + s[i]) / 2; };
 
   return {
-    trades: t, n: t.length, net, wins: wins.length, losses: losses.length,
+    trades: t, n: t.length, net, netFromTrades, wins: wins.length, losses: losses.length,
     winRate: t.length ? wins.length / t.length : null,
     grossWin, grossLoss,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
-    expectancy: t.length ? net / t.length : null,
+    // What a FINISHED trade has been worth on average, so it divides the finished trades'
+    // money by their count. Dividing the ledger by the trade count mixes two bases and can
+    // report an expectancy larger than any trade ever made.
+    expectancy: t.length ? netFromTrades / t.length : null,
     avgWin: wins.length ? grossWin / wins.length : 0,
     avgLoss: losses.length ? grossLoss / losses.length : 0,
     topWins: [...t].filter((x) => x.pnl > 0).sort((a, b) => b.pnl - a.pnl).slice(0, 5),
     topLosses: [...t].filter((x) => x.pnl < 0).sort((a, b) => a.pnl - b.pnl).slice(0, 5),
     curve, peak, maxDD, ddAt, winStreak, lossStreak,
     byProduct: group((x) => x.product),
-    byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
+    byMonth: group((x) => monthOf(x.when)).sort((a, b) => a.key.localeCompare(b.key)),
     lots: sum(t, (x) => x.qty),
     medianHours: median(held),
   };
@@ -5192,7 +5226,7 @@ function DailyPnl({ pf, settings, view, ledger }) {
   // comparing two days side by side is the point of opening them at all.
   const [open, setOpen] = useState(() => new Set());
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
-  const parts = useMemo(() => dayProducts(closed), [closed]);
+  const parts = useMemo(() => dayProducts(closed, ledger), [closed, ledger]);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
   // Summed from the products that made the day, so the day and the rows under it can never
   // disagree about size.
@@ -5332,11 +5366,12 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const brokers = settings.brokers;
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
-  const a = useMemo(() => analyse(closed), [closed]);
-  // Money from the ledger; every other figure in the strip is per-trade and stays on `a`.
   const ledger = useMemo(() => filterLedger(pf.book.realized, { broker: view === "all" ? "" : view }), [pf.book.realized, view]);
-  const netMoney = ledgerTotal(ledger);
-  const onOpen = round2c(netMoney - a.net);
+  const a = useMemo(() => analyse(closed, ledger), [closed, ledger]);
+  // `a.net` is now the ledger's money and every panel below is grouped from the same place,
+  // so the strip, By product, By month and Product detail all add up to each other.
+  const netMoney = a.net;
+  const onOpen = round2c(netMoney - a.netFromTrades);
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
   // The one preference, set by "Hide figures" in the header — which is on every tab.

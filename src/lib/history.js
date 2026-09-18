@@ -297,29 +297,49 @@ export function tradedByDay(fills, brokerIds = null) {
  * size closed, which is what the round trips below it were worth — not lots traded, which
  * would count both sides.
  */
-export function dayProducts(closed) {
+export function dayProducts(closed, realized) {
   const by = new Map();
-  for (const t of closed || []) {
-    if (!t.closeTs) continue;
-    const d = dayKey(t.closeTs);
+  const at = (d, broker, product) => {
     const day = by.get(d) || new Map();
-    const key = `${t.broker || "default"}|${t.product}`;
+    const key = `${broker || "default"}|${product}`;
     const row = day.get(key) || {
-      key, broker: t.broker || "default", product: t.product,
+      key, broker: broker || "default", product,
       trades: 0, lots: 0, wins: 0, losses: 0, flat: 0, net: 0, won: 0, lost: 0,
     };
+    day.set(key, row);
+    by.set(d, day);
+    return row;
+  };
+
+  /*
+   * MONEY FROM THE LEDGER, for the same reason the day above it takes its money there: a
+   * partial close on a position still held is money with no finished trade behind it.
+   *
+   * This was missed when the day row moved and the products under it did not, so opening a
+   * day showed parts that did not add up to it — a day of $2,982.50 breaking into one
+   * product at -$1,000, with the other $3,995 nowhere. A breakdown that does not reconcile
+   * with the thing it breaks down is worse than none.
+   */
+  for (const r of realized || []) {
+    if (!r || !r.ts || !r.product) continue;
+    at(dayKey(r.ts), r.broker, r.product).net += Number(r.pnl) || 0;
+  }
+
+  // Trades, lots, wins and losses are per-trade, so they come from the finished ones.
+  for (const t of closed || []) {
+    if (!t.closeTs) continue;
+    const row = at(dayKey(t.closeTs), t.broker, t.product);
     row.trades += 1;
     row.lots = round4(row.lots + Math.abs(Number(t.qty) || 0));
     if (t.pnl > 0) { row.wins += 1; row.won += t.pnl; }
     else if (t.pnl < 0) { row.losses += 1; row.lost += -t.pnl; }
     else row.flat += 1;
-    row.net += t.pnl;
-    day.set(key, row);
-    by.set(d, day);
   }
+
   const out = new Map();
   for (const [d, day] of by) {
-    out.set(d, [...day.values()].sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.product.localeCompare(b.product)));
+    const rows = [...day.values()].map((r) => ({ ...r, net: round2(r.net), won: round2(r.won), lost: round2(r.lost) }));
+    out.set(d, rows.sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.product.localeCompare(b.product)));
   }
   return out;
 }
@@ -370,7 +390,7 @@ const csvCell = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace
  * `nameOf` turns a broker id into the name the trader knows it by.
  */
 export function dailyCsv(closed, realized, nameOf = (id) => id) {
-  const parts = dayProducts(closed);
+  const parts = dayProducts(closed, realized);
   const head = ["Date", "Scope", "Broker", "Product", "Trades", "Lots", "Won", "Lost", "Scratched", "P&L", "Running"];
   const out = [head.join(",")];
   for (const r of dailyRows(closed, realized)) {

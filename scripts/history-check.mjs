@@ -172,12 +172,14 @@ eq('more trades does not mean more money lost', [many.losses > few.losses, many.
  * on the day, and made of one product paying for another — which the daily row alone
  * cannot show and is the reason the row opens.
  */
-const mixed = dayProducts([
+const MIXED_TRADES = [
   { closeTs: '2026-08-24T12:00:00Z', broker: 'o', product: 'CL', qty: 2, pnl: -5000 },
   { closeTs: '2026-08-24T13:00:00Z', broker: 'o', product: 'CL', qty: 1, pnl: -1200 },
   { closeTs: '2026-08-24T14:00:00Z', broker: 'o', product: 'HO', qty: 3, pnl: 5900 },
   { closeTs: '2026-08-24T15:00:00Z', broker: 'o', product: 'HO', qty: 1, pnl: 0 },
-]).get('2026-08-24');
+];
+const led = (ts) => ts.map((t) => ({ ts: t.closeTs, broker: t.broker, product: t.product, pnl: t.pnl }));
+const mixed = dayProducts(MIXED_TRADES, led(MIXED_TRADES)).get('2026-08-24');
 // CL lost $6,200 and HO made $5,900, so CL is the bigger mover and leads — ordering is by
 // the size of the move, not by its sign and not by the name.
 eq('a day breaks into its products', mixed.map((r) => r.product), ['CL', 'HO']);
@@ -188,30 +190,30 @@ eq('wins and losses are counted per product', mixed.map((r) => [r.wins, r.losses
 eq('and the trade counts add up to the day', mixed.reduce((a, r) => a + r.trades, 0), 4);
 
 // A losing product can be the biggest mover; ordering is by size, not by sign.
-const worst = dayProducts([
+const WORST_TRADES = [
   { closeTs: '2026-08-25T12:00:00Z', broker: 'o', product: 'A', qty: 1, pnl: 100 },
   { closeTs: '2026-08-25T13:00:00Z', broker: 'o', product: 'B', qty: 1, pnl: -9000 },
-]).get('2026-08-25');
+]; const worst = dayProducts(WORST_TRADES, led(WORST_TRADES)).get('2026-08-25');
 eq('the biggest loser leads when it is the biggest move', worst[0].product, 'B');
 
 /*
  * Two accounts, one symbol. Never merged: they are two positions carrying two margins that
  * no broker will net, so one line would name a position the trader does not hold.
  */
-const twoAccounts = dayProducts([
+const TWOACC = [
   { closeTs: '2026-08-26T12:00:00Z', broker: 'mt5-a', product: 'USOIL', qty: 1, pnl: 500 },
   { closeTs: '2026-08-26T13:00:00Z', broker: 'mt5-b', product: 'USOIL', qty: 1, pnl: -200 },
-]).get('2026-08-26');
+]; const twoAccounts = dayProducts(TWOACC, led(TWOACC)).get('2026-08-26');
 eq('the same symbol in two accounts stays two lines', twoAccounts.length, 2);
 eq('each naming its account', twoAccounts.map((r) => r.broker).sort(), ['mt5-a', 'mt5-b']);
 
 // --- nothing to break on ---
-eq('no closed trades, no days', dayProducts([]).size, 0);
-eq('undefined is the same as none', dayProducts(undefined).size, 0);
-eq('a trade with no close date belongs to no day', dayProducts([{ product: 'X', qty: 1, pnl: 5 }]).size, 0);
+eq('no closed trades, no days', dayProducts([], []).size, 0);
+eq('undefined is the same as none', dayProducts(undefined, undefined).size, 0);
+eq('a trade with no close date belongs to no day', dayProducts([{ product: 'X', qty: 1, pnl: 5 }], []).size, 0);
 // A sell stored as a negative quantity is still size, exactly as tradedByDay treats it.
-eq('a negative quantity still counts as size',
-  dayProducts([{ closeTs: '2026-08-27T12:00:00Z', broker: 'o', product: 'X', qty: -2, pnl: 5 }]).get('2026-08-27')[0].lots, 2);
+const NEGQ = [{ closeTs: '2026-08-27T12:00:00Z', broker: 'o', product: 'X', qty: -2, pnl: 5 }];
+eq('a negative quantity still counts as size', dayProducts(NEGQ, led(NEGQ)).get('2026-08-27')[0].lots, 2);
 
 // --- it must agree with the daily row it opens from, on the same trades ---
 const sameTrades = [
@@ -220,7 +222,7 @@ const sameTrades = [
   { closeTs: '2026-08-28T14:00:00Z', broker: 'o', product: 'A', qty: 1, pnl: 0 },
 ];
 const dayRow = winLossByDay(sameTrades)[0];
-const parts = dayProducts(sameTrades).get('2026-08-28');
+const parts = dayProducts(sameTrades, led(sameTrades)).get('2026-08-28');
 eq('the parts net to the whole', parts.reduce((a, r) => a + r.net, 0), dayRow.net);
 eq('the wins agree', parts.reduce((a, r) => a + r.wins, 0), dayRow.wins);
 eq('the losses agree', parts.reduce((a, r) => a + r.losses, 0), dayRow.losses);
