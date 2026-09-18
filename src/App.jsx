@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
+import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
@@ -2415,7 +2416,7 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
-        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
+        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
@@ -2446,19 +2447,52 @@ function bookRows(pf, view) {
   return Object.values(by).sort((a, b) => (!!b.open - !!a.open) || a.product.localeCompare(b.product));
 }
 
-function Book({ pf, settings, view }) {
+function Book({ pf, settings, view, addFills, reloadFills }) {
+  const ask = useConfirm();
   const [openKey, setOpenKey] = useState(null);
+  const [sel, setSel] = useState(() => new Set());
+  const [basis, setBasis] = useState("entry");
+  const [statedPx, setStatedPx] = useState("");
+  const [busy, setBusy] = useState(false);
   const rows = bookRows(pf, view);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
-  // Summed from the products that made the day, so the day and the rows under it can never
-  // disagree about size.
-  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   const open = rows.filter((r) => r.open);
   const longLots = sum(open.filter((r) => r.open.side === "Long"), (r) => r.open.lots);
   const shortLots = sum(open.filter((r) => r.open.side === "Short"), (r) => r.open.lots);
   const trades = sum(rows, (r) => r.trades), realized = sum(rows, (r) => r.pnl), upnl = sum(open, (r) => r.open.upnl);
   const all = view === "all";
   const avg = (v, q) => (q ? px(v / q) : "—");
+
+  /*
+   * Flattening. The plan is built from the same rows the table is drawing, so the money on the
+   * confirm screen is the money the book will show afterwards — there is no second calculation
+   * that could disagree with the first.
+   */
+  const canFlatten = typeof addFills === "function" && open.length > 0;
+  const chosen = open.filter((r) => sel.has(r.key)).map((r) => r.open);
+  const plan = chosen.length ? flattenPlan(chosen, { at: basis, price: statedPx }) : [];
+  const planReady = plan.length === chosen.length && chosen.length > 0;
+  const bookedPnl = planPnl(plan);
+  const toggle = (k) => setSel((cur) => { const next = new Set(cur); next.has(k) ? next.delete(k) : next.add(k); return next; });
+  const priceLine = (p) => `${p.product} · ${p.side === "Long" ? "sell" : "buy"} ${qty(p.lots)} at ${px(p.exit)} · ${signed(p.pnl)}`;
+
+  const doFlatten = async () => {
+    if (!planReady || busy) return;
+    const r = await ask({
+      title: `Flatten ${plan.length} position${plan.length === 1 ? "" : "s"}?`,
+      body: `This writes ${planFills(plan).length} offsetting fill${planFills(plan).length === 1 ? "" : "s"}, dated now, and books ${signed(bookedPnl)} of realized P&L.`,
+      detail: plan.map(priceLine).join("\n"),
+      confirmLabel: "Write the fills",
+    });
+    if (!r?.ok) return;
+    setBusy(true);
+    try {
+      await addFills(planFills(plan));
+      await reloadFills?.();
+      setSel(new Set());
+      setStatedPx("");
+    } finally { setBusy(false); }
+  };
 
   return (
     <section className="panel o3 book">
@@ -2480,12 +2514,34 @@ function Book({ pf, settings, view }) {
         </div>
       )}
       <div className="ph"><h2>Book by product<span className="dim">Open position and closed trades, side by side. Click an open position to see its lots.</span></h2></div>
+      {canFlatten && (
+        <div className="flatbar">
+          {chosen.length === 0 ? (
+            <span className="faint">Tick a position to flatten it — for a contract you rolled, or a spread you legged out of somewhere else.</span>
+          ) : (
+            <>
+              <span><b>{chosen.length}</b> selected</span>
+              <label className="radio"><input type="radio" name="flatbasis" checked={basis === "entry"} onChange={() => setBasis("entry")} /> <span>At its own entry price <span className="faint">— books nothing</span></span></label>
+              <label className="radio"><input type="radio" name="flatbasis" checked={basis === "mark"} onChange={() => setBasis("mark")} /> <span>At the current price <span className="faint">— books today&rsquo;s open P&amp;L</span></span></label>
+              <label className="radio"><input type="radio" name="flatbasis" checked={basis === "price"} onChange={() => setBasis("price")} /> <span>At</span></label>
+              <input className="pxin" type="text" inputMode="decimal" placeholder="price" value={statedPx}
+                onChange={(e) => { setStatedPx(e.target.value); setBasis("price"); }} aria-label="Flatten at this price" />
+              <span className={planReady ? (bookedPnl === 0 ? "dim" : pc(bookedPnl)) : "faint"}>
+                {planReady ? <>Books <b>{signed(bookedPnl)}</b></> : "Enter a price"}
+              </span>
+              <button className="btn" disabled={!planReady || busy} onClick={doFlatten}>{busy ? "Writing…" : "Flatten"}</button>
+              <button className="btn ghost" onClick={() => setSel(new Set())}>Clear</button>
+            </>
+          )}
+        </div>
+      )}
       {rows.length === 0 ? <div className="empty">Nothing traded yet. Upload a fills file to get started.</div> : (
         <div className="tw">
           <table className="booktable">
             <thead>
-              <tr className="grp"><th colSpan={all ? 2 : 1}></th><th colSpan={4} className="gOpen">Open now</th><th colSpan={5} className="gClosed">Closed trades</th></tr>
+              <tr className="grp"><th colSpan={(all ? 2 : 1) + (canFlatten ? 1 : 0)}></th><th colSpan={4} className="gOpen">Open now</th><th colSpan={5} className="gClosed">Closed trades</th></tr>
               <tr>
+                {canFlatten && <th className="tick" title="Flatten"><span className="sr">Flatten</span></th>}
                 {all && <th className="txt">Broker</th>}<th className="txt">Product</th>
                 <th className="gOpen">Position</th><th className="gOpen">Avg price</th><th className="gOpen">Current</th><th className="gOpen">Open P&amp;L</th>
                 <th className="gClosed">Avg buy</th><th className="gClosed">Avg sell</th><th className="gClosed">Realized</th><th className="gClosed">Trades</th><th className="gClosed">Lots</th>
@@ -2496,6 +2552,11 @@ function Book({ pf, settings, view }) {
                 const o = r.open, isOpen = openKey === r.key;
                 return [
                   <tr key={r.key} className={o ? "clickable" : ""} onClick={() => o && setOpenKey(isOpen ? null : r.key)} aria-expanded={o ? isOpen : undefined}>
+                    {canFlatten && (
+                      <td className="tick" onClick={(e) => e.stopPropagation()}>
+                        {o ? <input type="checkbox" checked={sel.has(r.key)} onChange={() => toggle(r.key)} aria-label={`Flatten ${r.product}`} /> : null}
+                      </td>
+                    )}
                     {all && <td className="txt dim">{bname(r.broker)}</td>}
                     <td className="txt"><b>{r.product}</b>{o && <span className="faint" style={{ marginLeft: 6 }}>{isOpen ? "▾" : "▸"}</span>}</td>
                     <td>{o ? <><Side s={o.side} /> <b>{qty(o.lots)}</b></> : <span className="faint">Flat</span>}</td>
@@ -2510,7 +2571,7 @@ function Book({ pf, settings, view }) {
                   </tr>,
                   isOpen && o && (
                     <tr key={r.key + "-lots"} className="lotsrow">
-                      <td colSpan={all ? 11 : 10}>
+                      <td colSpan={(all ? 11 : 10) + (canFlatten ? 1 : 0)}>
                         <div className="lots">
                           <div className="faint" style={{ marginBottom: 4 }}>Open lots, oldest first{settings.brokers.find((b) => b.id === r.broker)?.method === "leverage" ? "" : " (these close first under FIFO)"}</div>
                           <table>
@@ -2539,7 +2600,7 @@ function Book({ pf, settings, view }) {
   );
 }
 
-function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSettings, goScen }) {
+function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, reloadFills, goFills, goSettings, goScen }) {
   const L = settings.limits;
   const all = view === "all";
   const rows = all ? pf.rows : pf.rows.filter((r) => r.broker === view);
@@ -2675,7 +2736,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
             </div>
           )}
         </section>
-        <Book pf={pf} settings={settings} view={view} />
+        <Book pf={pf} settings={settings} view={view} addFills={addFills} reloadFills={reloadFills} />
         {all && (
           <section className="panel o5">
             <div className="ph"><h2>Broker accounts<span className="dim">{pf.accounts.length}</span></h2><button className="btn ghost" onClick={goSettings}>Manage</button></div>

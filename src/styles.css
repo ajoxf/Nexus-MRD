@@ -217,6 +217,14 @@ tr.clickable:hover td { background: var(--accent-soft) !important; }
 .lotsrow td { background: var(--hover) !important; padding: 8px 12px 12px 28px; }
 .lots table { width: auto; min-width: 60%; background: #fff; border: 1px solid var(--line); border-radius: 3px; }
 .lots th { position: static; }
+
+/* Flattening an open position: the control bar above the book table, and its tick column. */
+.flatbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; font-size: 12px; border-bottom: 1px solid var(--line); background: var(--panel2); }
+.flatbar .radio { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.flatbar .pxin { width: 84px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 3px; font: inherit; font-variant-numeric: tabular-nums; }
+.flatbar .btn { padding: 5px 12px; font-size: 12px; }
+.booktable th.tick, .booktable td.tick { width: 26px; padding-left: 10px; padding-right: 0; text-align: center; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 760px) { .booktiles { grid-template-columns: 1fr 1fr; } .tile:nth-child(2) { border-right: 0; } .tile { border-bottom: 1px solid var(--line); } .tile b { font-size: 24px; } }
 
 .panel.reset { border-top: 3px solid #E7A1A5; }
@@ -391,7 +399,7 @@ td.faded { opacity: .35; }
 .modal-h.danger { box-shadow: inset 3px 0 0 var(--bad); }
 .modal-b { padding: 16px 22px; display: grid; gap: 10px; }
 .modal-b p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); }
-.modal-b p.detail { font-size: 12px; color: var(--dim); }
+.modal-b p.detail { font-size: 12px; color: var(--dim); white-space: pre-line; }
 .modal-b .check { margin-top: 2px; }
 .modal-f { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 22px; background: var(--panel2); border-top: 1px solid var(--line); }
 .modal-f .btn { min-width: 88px; }

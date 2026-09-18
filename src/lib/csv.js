@@ -74,7 +74,7 @@ const TT_FILLS_HEADERS = ["Date", "Time", "Exchange", "Contract", "B/S", "FillQt
 const ttFillsRow = (r) =>
   r.length >= 13 &&
   // Date: TT writes 11Sep26, but a file opened and re-saved in Excel may hold 9/11/26.
-  /^(\d{1,2}[A-Za-z]{3}\d{2,4}|\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4})$/.test((r[0] || "").trim()) &&
+  /^(\d{1,2}[ \/.-]?[A-Za-z]{3}[a-z]*[ \/.-]?\d{2,4}|\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4})$/.test((r[0] || "").trim()) &&
   /^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(am|pm)?$/i.test((r[1] || "").trim()) && // 11:56:49.536
   /^[BS]$/i.test((r[4] || "").trim()) &&                       // B / S
   (r[5] || "") !== "" && !isNaN(Number(r[5])) &&               // FillQty
@@ -286,25 +286,34 @@ export function parseDate(dateStr, timeStr, dateFormat = "auto") {
   // ISO timestamps with a zone (e.g. Nexus backups: 2026-09-11T03:29:55.955Z)
   if (/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/i.test(s)) { const d = new Date(s); return isNaN(d) ? null : d; }
   const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  // A clock reading outside 0-23:59 is not a time, it is a damaged column: Excel reformats TT's
+  // HH:MM:SS.mmm to MM:SS.m and drops the hour, so "41:28.9" arrives where "17:41:28.936" was sent.
+  // new Date(y, m, d, 41, 28) does NOT complain - it rolls 41 hours forward and files the fill on
+  // the wrong day. Refuse it, so a broken export shows up as an import error instead of as P&L.
   const timeOf = (rest) => {
     const t = (rest || "").trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?\s*(am|pm)?/i);
     if (!t) return [0, 0, 0, 0];
     let hh = +t[1];
     if (t[5]) { const pm = /pm/i.test(t[5]); if (pm && hh < 12) hh += 12; if (!pm && hh === 12) hh = 0; }
+    if (hh > 23 || +t[2] > 59 || (t[3] && +t[3] > 59)) return null;
     return [hh, +t[2], t[3] ? +t[3] : 0, t[4] ? +String(t[4]).slice(0, 3).padEnd(3, "0") : 0];
+  };
+  const at = (y, mon, day, rest) => {
+    const hms = timeOf(rest);
+    if (!hms) return null;
+    const d = new Date(y, mon, day, ...hms);
+    return isNaN(d) ? null : d;
   };
   // Month names: 11Sep26 (TT / Orient), 11-Sep-2026, 11 Sep 2026
   let mn = s.match(/^(\d{1,2})[ \-\/]?([A-Za-z]{3})[a-z]*[ \-\/]?(\d{2}|\d{4})(?:[ T,]+(.*))?$/);
   if (mn && MON[mn[2].toLowerCase()]) {
     const y = mn[3].length === 2 ? 2000 + +mn[3] : +mn[3];
-    const d = new Date(y, MON[mn[2].toLowerCase()] - 1, +mn[1], ...timeOf(mn[4]));
-    return isNaN(d) ? null : d;
+    return at(y, MON[mn[2].toLowerCase()] - 1, +mn[1], mn[4]);
   }
   // Year first: 2026-09-11, 2026.09.11 (MT5), 2026/09/11
   let m = s.match(/^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})(?:[ T](.*))?$/);
   if (m) {
-    const d = new Date(+m[1], +m[2] - 1, +m[3], ...timeOf(m[4]));
-    return isNaN(d) ? null : d;
+    return at(+m[1], +m[2] - 1, +m[3], m[4]);
   }
   m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})(.*)$/);
   if (m) {
@@ -316,8 +325,7 @@ export function parseDate(dateStr, timeStr, dateFormat = "auto") {
     else if (a > 12) { day = a; mon = b; }
     else if (b > 12) { mon = a; day = b; }
     else { mon = a; day = b; }
-    const d = new Date(y, mon - 1, day, ...timeOf(rest));
-    return isNaN(d) ? null : d;
+    return at(y, mon - 1, day, rest);
   }
   const d = new Date(s);
   return isNaN(d) ? null : d;
@@ -341,6 +349,24 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
   if (map.offset) {
     const offs = rows.map((r) => num(r[map.offset])).filter((v) => isFinite(v)).sort((a, b) => a - b);
     if (offs.length) offsetMs = Math.round(offs[Math.floor(offs.length / 2)] / 60) * 60 * 1000;
+  }
+
+  // A whole file whose times have lost their hour cannot be salvaged row by row. Excel's "MM:SS.m"
+  // keeps the minutes and seconds but throws the hour away, so EVERY fill is mis-timed, not only the
+  // ones that roll past midnight - and the order fills happened in is what FIFO matching runs on.
+  // Stop at the door and say so, rather than importing a book that is quietly in the wrong sequence.
+  if (map.time) {
+    const times = rows.map((r) => String(r[map.time] ?? "").trim()).filter(Boolean);
+    const mangled = times.filter((t) => { const m = t.match(/^(\d{1,2}):(\d{2})(\.\d+)?$/); return m && (+m[1] > 23 || +m[2] > 59); });
+    if (mangled.length) {
+      errors.push(
+        `The time column has lost its hour on ${mangled.length} of ${times.length} rows (e.g. "${mangled[0]}", which is minutes and seconds only). ` +
+        `This happens when the export is opened and saved in Excel, which reformats 17:41:28.936 as 41:28.9. ` +
+        `Without the hour the fills cannot be put in the order they happened, so nothing was imported. ` +
+        `Re-export from TT straight to this page, or format the time column as Text before saving.`
+      );
+      return { fills: [], errors, ignored: rows.length, feesArePositiveCosts: positiveCosts };
+    }
   }
 
   rows.forEach((row, i) => {
