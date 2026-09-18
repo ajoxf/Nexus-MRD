@@ -8,7 +8,7 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, dayPnl } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, addDays, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, dayPnl } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -292,6 +292,8 @@ function portfolio(fills, settings, now = new Date()) {
       TNE: sum(accounts, (a) => a.TNE), IM: sum(accounts, (a) => a.IM), upnl, realizedToday,
       realizedAll: sum(accounts, (a) => a.realizedAll),
       todayPnl: sum(accounts, (a) => a.dayPnl), dayBasis,
+      // The oldest previous close behind the combined figure, so the tile can say how far back it reaches.
+      daySince: accounts.map((a) => a.daySince).filter(Boolean).sort()[0] || null,
       notional: sum(accounts, (a) => a.notional), totalRisk: sum(accounts, (a) => a.totalRisk),
       lossToCall: withPos.length ? Math.min(...withPos.map((a) => a.lossToCall)) : null,
     },
@@ -2425,10 +2427,26 @@ function Tracker({ user }) {
           <div className="kpi"><label>Today</label><b className={pc(k.today)}>{signed(k.today)}</b>
             {/* The day's change in equity where there is a previous close to measure against;
                 realized money only before there is one. Never a guess. */}
-            {(scoped ? scoped.dayBasis : pf.total.dayBasis) !== "change" && (
-              <span className="faint" style={{ fontSize: 11 }}
-                title="No previous day recorded yet, so this is realized money only. From tomorrow it is the day's change in equity.">realized only</span>
-            )}</div>
+            {(() => {
+              const basis = scoped ? scoped.dayBasis : pf.total.dayBasis;
+              if (basis !== "change") return (
+                <span className="faint" style={{ fontSize: 11 }}
+                  title="No previous day recorded yet, so this is realized money only. From tomorrow it is the day's change in equity.">realized only</span>
+              );
+              /*
+               * Snapshots are only written while the app is open, so after a weekend away
+               * the nearest close is Friday's and this figure spans three days. It still
+               * measures a real change — it is just not "today", and the tile has to say so
+               * rather than let a Monday morning read as one session's loss.
+               */
+              const since = scoped ? scoped.daySince : pf.total.daySince;
+              const yday = since && addDays(dayKey(new Date()), -1);
+              if (!since || since === yday) return null;
+              return <span className="warn" style={{ fontSize: 11 }}
+                title={`Nexus records a daily snapshot only while it is open, and the last one is from ${since}. This is the change since then, not since yesterday.`}>
+                since {new Date(`${since}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}
+              </span>;
+            })()}</div>
           <div className="kpi"><label>{scoped ? "Room to margin call" : "Least room to call"}</label><b className={k.room !== null && k.room <= 0 ? "bad" : ""}>{k.room !== null ? money(k.room) : "—"}</b></div>
           <div className="kpi hide-m"><label>Leverage used</label><b>{k.lev ? `${k.lev.toFixed(1)}×` : "—"}</b></div>
           <div className="kpi"><label>Slots left</label><b className={slotsLeft === 0 ? "bad" : slotsLeft <= 2 ? "warn" : ""}>{slotsLeft}<span className="faint" style={{ fontSize: 13 }}> / {L.maxTrades}</span></b></div>
