@@ -407,9 +407,30 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
     const ts = d.toISOString();
     let ref = map.ref ? String(row[map.ref] ?? "").trim() : "";
     const orderId = ref;
-    // Order IDs are shared by a spread and its legs (and by partial fills), so a fill is identified by
-    // ID + symbol + side + price + time. Rows identical on all of these are true duplicates.
-    if (ref) ref = `${ref}|${product}|${side}|${price}|${d.getTime()}`;
+    /*
+     * Order IDs are shared by a spread and its legs, and by partial fills, so a fill is
+     * identified by ID + symbol + side + price + time.
+     *
+     * But rows identical on all of those are NOT necessarily duplicates, which is what this
+     * used to assume. An order for two lots often fills as two one-lot rows at the same
+     * instant and the same price under one order id — and every row after the first was
+     * classified a file duplicate and silently dropped, because only rows marked "new" are
+     * imported. The lots simply never arrived. A trader who uploaded everything would find
+     * part of a day missing and nothing to say why.
+     *
+     * So repeats are numbered. The FIRST keeps the plain reference it always had, so every
+     * fill already stored still matches itself on a re-import and is recognised rather than
+     * doubled; only the second and later ones carry a suffix, and they arrive as the new
+     * fills they always were.
+     *
+     * Re-importing the same file is still safe: the same rows in the same order produce the
+     * same numbers, so they match what is stored.
+     */
+    if (ref) {
+      const base = `${ref}|${product}|${side}|${price}|${d.getTime()}`;
+      seen[base] = (seen[base] || 0) + 1;
+      ref = seen[base] > 1 ? `${base}#${seen[base]}` : base;
+    }
     if (!ref) {
       const key = `${broker}|${ts}|${product}|${side}|${qty}|${price}`;
       seen[key] = (seen[key] || 0) + 1;

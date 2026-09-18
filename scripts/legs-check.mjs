@@ -1,4 +1,4 @@
-import { rowsToFills, legBelongsTo, isSpreadSymbol } from '../src/lib/csv.js';
+import { rowsToFills, legBelongsTo, isSpreadSymbol, classifyFills } from '../src/lib/csv.js';
 import { computeBook } from '../src/lib/positions.js';
 
 /*
@@ -110,6 +110,38 @@ console.log('\n-- the spread names themselves --');
   is(`${p} reads as a spread`, isSpreadSymbol(p), true));
 ['CL Oct26', 'BZ Oct26', 'HO Oct26', 'GC Dec26'].forEach((p) =>
   is(`${p} reads as an outright`, isSpreadSymbol(p), false));
+
+
+console.log('\n-- PARTIAL FILLS: an order that fills in pieces --');
+/*
+ * An order for several lots often fills as several one-lot rows, at the same instant and
+ * the same price, under one order id. Those rows are identical on id, symbol, side, price
+ * and time — and every one after the first was called a file duplicate and silently
+ * dropped, because only rows marked "new" are imported. The lots never arrived. Somebody
+ * who uploaded everything would find part of a day missing, with nothing to say why.
+ */
+const PARTIAL = [
+  row('17Aug26', '09:15:02.114', 'CL Nov26 - BZ Nov26 Inter-Product', 'B', 1, -8.20, 'ORD1'),
+  row('17Aug26', '09:15:02.114', 'CL Nov26 - BZ Nov26 Inter-Product', 'B', 1, -8.20, 'ORD1'),
+  row('17Aug26', '09:15:02.114', 'CL Nov26 - BZ Nov26 Inter-Product', 'B', 1, -8.20, 'ORD1'),
+];
+const pf3 = parse(PARTIAL, MAP).fills;
+is('all three pieces survive the read', pf3.length, 3);
+is('each with its own reference', new Set(pf3.map((f) => f.ref)).size, 3);
+is('the first keeps the plain one it always had', pf3[0].ref.includes('#'), false);
+is('so a fill already stored still matches itself', pf3.slice(1).every((f) => f.ref.includes('#')), true);
+const fresh = classifyFills(pf3, []);
+is('a fresh import takes all three', fresh.counts, { new: 3, stored: 0, fileDup: 0, manual: 0 });
+const again = classifyFills(pf3, pf3);
+is('re-importing recognises all three', again.counts, { new: 0, stored: 3, fileDup: 0, manual: 0 });
+is('and duplicates none of them', again.rows.filter((r) => r.status === 'new').length, 0);
+// The lots must reach the book, which is the whole point.
+is('three lots land in the position, not one',
+   computeBook(pf3, () => 1000, () => 'fifo').open[0].lots, 3);
+
+// A genuine re-read of the same file after a partial import still lines up.
+const half = classifyFills(pf3, [pf3[0]]);
+is('with only the first stored, the other two are new', half.counts, { new: 2, stored: 1, fileDup: 0, manual: 0 });
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

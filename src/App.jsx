@@ -5260,7 +5260,7 @@ function WinLossDays({ pf, view }) {
  * Days with nothing closed are absent rather than shown as zero. A flat row reads like a day
  * that was traded and made nothing, which is a different thing from a day off.
  */
-function DailyPnl({ pf, settings, view, ledger }) {
+function DailyPnl({ pf, settings, view, ledger, tradedDays }) {
   const [newestFirst, setNewestFirst] = useState(true);
   const [page, setPage] = useState(0);
   // Which days are open. A set, because opening one is no reason to close another —
@@ -5273,7 +5273,7 @@ function DailyPnl({ pf, settings, view, ledger }) {
   // disagree about size.
   const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   // Shared with the CSV, so the file and the screen cannot say different things.
-  const rows = useMemo(() => dailyRows(closed, ledger), [closed, ledger]);
+  const rows = useMemo(() => dailyRows(closed, ledger, tradedDays), [closed, ledger, tradedDays]);
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
@@ -5318,7 +5318,7 @@ function DailyPnl({ pf, settings, view, ledger }) {
             * column, and only after it had gone somewhere.
             */}
           <button type="button" className="btn ghost" title="Every day and the products under it, oldest first, whatever is on screen"
-            onClick={() => saveCsv(dailyCsv(closed, ledger, bname), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
+            onClick={() => saveCsv(dailyCsv(closed, ledger, bname, tradedDays), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
             Export CSV
           </button>
         </span>
@@ -5408,6 +5408,14 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
   const ledger = useMemo(() => filterLedger(pf.book.realized, { broker: view === "all" ? "" : view }), [pf.book.realized, view]);
+  /*
+   * Days the desk actually traded on, so a day of nothing but opening fills still gets a
+   * row. Legs are excluded, as everywhere — the spread is the trade.
+   */
+  const tradedDays = useMemo(
+    () => [...tradedByDay((fills || []).filter((f) => !f.is_leg && (view === "all" || f.broker === view))).keys()],
+    [fills, view],
+  );
   const a = useMemo(() => analyse(closed, ledger), [closed, ledger]);
   // `a.net` is now the ledger's money and every panel below is grouped from the same place,
   // so the strip, By product, By month and Product detail all add up to each other.
@@ -5448,7 +5456,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         <h2>Daily P&amp;L<span className="dim">realized money, one row per day</span></h2>
         <span className="faint" style={{ fontSize: 11 }}>Net of commission · booked on the day each trade closed</span>
       </div>
-      <DailyPnl pf={pf} settings={settings} view={view} ledger={ledger} />
+      <DailyPnl pf={pf} settings={settings} view={view} ledger={ledger} tradedDays={tradedDays} />
     </section>
   );
 

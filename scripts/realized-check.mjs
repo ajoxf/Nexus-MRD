@@ -1,5 +1,5 @@
 import { computeBook } from '../src/lib/positions.js';
-import { dailyRows, dailyCsv, dayProducts, moneyByDay, moneyByProduct, filterLedger, ledgerTotal } from '../src/lib/history.js';
+import { dailyRows, dailyCsv, dayProducts, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, tradedByDay } from '../src/lib/history.js';
 
 /*
  * REALIZED MONEY MUST BE THE SAME NUMBER EVERYWHERE.
@@ -199,6 +199,32 @@ for (let run = 0; run < 4000; run++) {
 is('four thousand books, all squared off', flatBooks, 4000);
 ok(`ledger, round trips and raw cash never differ by more than ${worst.toExponential(1)}`);
 if (worst > 0.005) bad('they must agree to the cent', worst, 0);
+
+
+console.log('\n-- a day you traded on and made nothing still gets a row --');
+/*
+ * The first day of a book is usually all opening fills. On a broker that bills commission
+ * separately those realize nothing, so the day had no money, no finished trade and no row —
+ * and the table appeared to begin a day late. A day you traded and made nothing is not the
+ * same as a day you did not trade.
+ */
+const OPENED = [
+  F({ product: 'CL - BZ', side: 'Buy', qty: 2, price: -8.2, ts: '2026-08-17T09:15:00Z', ref: 1 }),
+  F({ product: 'CL - BZ', side: 'Buy', qty: 1, price: -8.3, ts: '2026-08-18T09:15:00Z', ref: 2 }),
+  F({ product: 'CL - BZ', side: 'Sell', qty: 1, price: -8.0, ts: '2026-08-18T15:15:00Z', ref: 3 }),
+];
+const ob = book(OPENED);
+const days = [...tradedByDay(OPENED).keys()];
+is('without the traded days the table starts on the 18th',
+   dailyRows(ob.closed, ob.realized).map((r) => r.d), ['2026-08-18']);
+is('with them it starts where the trading did',
+   dailyRows(ob.closed, ob.realized, days).map((r) => r.d), ['2026-08-17', '2026-08-18']);
+const first = dailyRows(ob.closed, ob.realized, days)[0];
+is('and the first day reads as what it was: traded, nothing realized', [first.net, first.trades], [0, 0]);
+near('the running total is unaffected', dailyRows(ob.closed, ob.realized, days).slice(-1)[0].run, ledgerTotal(ob.realized));
+// The CSV has to agree with the screen.
+const openCsv = dailyCsv(ob.closed, ob.realized, () => 'Orient', days).split('\n').filter(Boolean);
+is('the CSV carries the day too', openCsv.some((l) => l.startsWith('2026-08-17,Day')), true);
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

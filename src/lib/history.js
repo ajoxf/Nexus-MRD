@@ -354,16 +354,23 @@ export function dayProducts(closed, realized) {
  * The running total accumulates in DATE order, always, whichever way the table happens to
  * be sorted at the time. It only means anything read forwards.
  */
-export function dailyRows(closed, realized) {
+export function dailyRows(closed, realized, tradedDays) {
   const money = moneyByDay(realized);
   const counts = new Map(winLossByDay(closed).map((r) => [r.d, r]));
   /*
-   * Every day that has either. A day can have money and no finished trade — a partial close
-   * on a position still held, or commission on a position just opened — and it has to appear
-   * or the table quietly says nothing happened. A day can also have a trade finish with no
-   * money of its own, when the P&L was booked on earlier days.
+   * Every day that has any of the three.
+   *
+   * Money with no finished trade — a partial close on a position still held, or commission
+   * on one just opened. A finished trade with no money of its own, when the P&L was booked
+   * on earlier days. And a day that was TRADED and realized nothing at all, which on a
+   * broker that bills commission separately is what opening a position looks like.
+   *
+   * That last one is why the table appeared to begin a day late: the first day of a book is
+   * usually all opening fills, so it had no money, no finished trade, and no row. A day you
+   * traded on and made nothing is not the same as a day you did not trade, and a table you
+   * are reconciling against a statement has to show the difference.
    */
-  const days = [...new Set([...money.keys(), ...counts.keys()])].sort();
+  const days = [...new Set([...money.keys(), ...counts.keys(), ...(tradedDays || [])])].sort();
   let run = 0;
   return days.map((d) => {
     const c = counts.get(d) || { d, wins: 0, losses: 0, flat: 0, won: 0, lost: 0 };
@@ -389,11 +396,11 @@ const csvCell = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace
  *
  * `nameOf` turns a broker id into the name the trader knows it by.
  */
-export function dailyCsv(closed, realized, nameOf = (id) => id) {
+export function dailyCsv(closed, realized, nameOf = (id) => id, tradedDays) {
   const parts = dayProducts(closed, realized);
   const head = ["Date", "Scope", "Broker", "Product", "Trades", "Lots", "Won", "Lost", "Scratched", "P&L", "Running"];
   const out = [head.join(",")];
-  for (const r of dailyRows(closed, realized)) {
+  for (const r of dailyRows(closed, realized, tradedDays)) {
     const on = parts.get(r.d) || [];
     const lots = round4(on.reduce((a, g) => a + g.lots, 0));
     out.push([r.d, "Day", "", "", r.trades, lots, r.wins, r.losses, r.flat, round2(r.net), round2(r.run)].map(csvCell).join(","));
