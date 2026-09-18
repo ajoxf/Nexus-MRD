@@ -1,3 +1,4 @@
+import { defaultSize } from "./contracts.js";
 // Turns fills (across all broker accounts) into open positions, closed positions and realized P&L.
 //
 // Matching, per broker account:
@@ -32,7 +33,7 @@ export const withCommission = (fills, byId) =>
 
 // sizeOf: (broker, product) => contract size | methodOf: (broker) => "fifo" | "average"
 export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
-  const sizeFn = typeof sizeOf === "function" ? sizeOf : (_b, p) => +sizeOf[p]?.size || 1000;
+  const sizeFn = typeof sizeOf === "function" ? sizeOf : (_b, p) => +sizeOf[p]?.size || defaultSize(p);
   // Legs of a spread trade are kept for reference only — the spread is the trade, so counting
   // its legs too would book the same risk twice.
   const sorted = [...fills].filter((f) => !f.is_leg).sort(
@@ -67,7 +68,7 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
 
   for (const f of sorted) {
     const broker = f.broker || "default";
-    const size = +sizeFn(broker, f.product) || 1000;
+    const size = +sizeFn(broker, f.product) || defaultSize(f.product);
     const fifo = methodOf(broker) === "fifo";
     const price = +f.price;
     const q = f.side === "Buy" ? +f.qty : -f.qty;

@@ -1,3 +1,4 @@
+import { defaultSize } from "./contracts.js";
 /*
  * Spreads: one trade held as two or more legs, often in two different accounts.
  *
@@ -59,15 +60,16 @@ export const legKey = (leg) => `${leg.broker}|${leg.product}`;
  * `ratio` is the hedge ratio — how many of this leg make one unit of the spread. It
  * defaults to 1, which is what a barrel-for-barrel oil spread is.
  */
-export function resolveLeg(leg, { pos = 0, size = 1000, mark = null } = {}) {
+export function resolveLeg(leg, { pos = 0, size = null, mark = null } = {}) {
   const ratio = num(leg.ratio) > 0 ? num(leg.ratio) : 1;
-  const notional = round9(pos * (num(size) || 1000));
+  const lot = num(size) || defaultSize(leg.product);
+  const notional = round9(pos * lot);
   return {
     ...leg,
     key: legKey(leg),
     ratio,
     pos,
-    size: num(size) || 1000,
+    size: lot,
     mark: mark === null || mark === undefined || !isFinite(mark) ? null : +mark,
     notional,
     // Units of the spread this leg is worth: 0.12 lots of 1000 at a ratio of 1 is 120.

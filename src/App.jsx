@@ -11,6 +11,7 @@ import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/
 import { authErrorCopy } from "./lib/auth-errors.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
+import { defaultSize, sizeOf } from "./lib/contracts.js";
 
 // ---------- defaults ----------
 const ORIENT_PRODUCTS = {
@@ -198,7 +199,7 @@ function funding(settings, brokerId, now = new Date()) {
 function portfolio(fills, settings, now = new Date()) {
   const { limits: L, brokers: B, marks: M } = settings;
   const byId = Object.fromEntries(B.map((b) => [b.id, b]));
-  const book = computeBook(withCommission(fills, byId), (b, p) => n(byId[b]?.products?.[p]?.size) || 1000, (b) => matchOf(byId[b]));
+  const book = computeBook(withCommission(fills, byId), (b, p) => sizeOf(byId[b]?.products?.[p], p), (b) => matchOf(byId[b]));
   const minR = n(L.minRatio) / 100;
 
   const rows = book.open.map((p) => {
@@ -208,7 +209,7 @@ function portfolio(fills, settings, now = new Date()) {
     const dir = p.side === "Long" ? 1 : -1;
     const mark = has(M[key]?.price) ? n(M[key].price) : p.avg;
     const stop = M[key]?.stop, hasStop = has(stop);
-    const size = n(spec.size) || 1000;
+    const size = sizeOf(spec, p.product);
     const lev = n(spec.lev) || n(br.leverage) || 1;
     const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
@@ -2816,7 +2817,7 @@ function SpreadsPanel({ pf, settings, setSettings, fills, view }) {
       const spec = settings.brokers.find((b) => b.id === leg.broker)?.products?.[leg.product] || {};
       const pos = row ? (row.side === "Long" ? row.lots : -row.lots) : 0;
       const mark = row ? row.mark : has(settings.marks[key]?.price) ? n(settings.marks[key].price) : null;
-      return resolveLeg(leg, { pos, size: row ? row.size : n(spec.size) || 1000, mark });
+      return resolveLeg(leg, { pos, size: row ? row.size : sizeOf(spec, leg.product), mark });
     });
 
   /*
