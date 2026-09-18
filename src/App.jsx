@@ -8,7 +8,7 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -121,6 +121,8 @@ const pct = (v) => (isFinite(v) ? (v * 100).toFixed(1) + "%" : "—");
 const ratioTxt = (r) => (isFinite(r) ? (r * 100).toFixed(0) + "%" : "—");
 const px = (v) => (isFinite(v) ? (+v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 }) : "—");
 const qty = (v) => String(+(+v).toFixed(4));
+/** Money to the cent, so a floating-point residue never prints as a stray penny. */
+const round2c = (v) => (isFinite(v) ? Math.round(v * 100) / 100 : 0);
 // Holding time in the unit a trader would say it in: minutes, hours, then days.
 const holdTxt = (h) => {
   if (h === null || !isFinite(h)) return "—";
@@ -2434,6 +2436,19 @@ function bookRows(pf, view) {
   const by = {};
   const get = (broker, product) => (by[`${broker}|${product}`] ||= { key: `${broker}|${product}`, broker, product, open: null, trades: 0, lots: 0, buyQ: 0, buyV: 0, sellQ: 0, sellV: 0, pnl: 0, fees: 0 });
   pf.rows.forEach((r) => { if (view === "all" || r.broker === view) get(r.broker, r.product).open = r; });
+  /*
+   * Realized money per product comes from the LEDGER, not from the round trips below.
+   * A partial close on a position still held is money in the account with no finished trade
+   * behind it, and summing round trips reports it as zero. `trades`, `lots` and the average
+   * buy and sell stay on the round trips, which is what those words mean.
+   */
+  const money = moneyByProduct(pf.book.realized);
+  money.forEach((net, key) => {
+    const [broker, ...rest] = key.split("|");
+    const product = rest.join("|");
+    if (view !== "all" && broker !== view) return;
+    get(broker, product).realized = net;
+  });
   pf.book.closed.forEach((c) => {
     if (view !== "all" && c.broker !== view) return;
     const g = get(c.broker, c.product);
@@ -2443,6 +2458,8 @@ function bookRows(pf, view) {
     else { g.sellQ += q; g.sellV += entryV; g.buyQ += q; g.buyV += exitV; }
     g.trades++; g.lots += q; g.pnl += c.pnl; g.fees += c.fees || 0;
   });
+  // A product with ledger money but no finished trade still gets a row.
+  Object.values(by).forEach((g) => { if (g.realized === undefined) g.realized = 0; });
   return Object.values(by).sort((a, b) => (!!b.open - !!a.open) || a.product.localeCompare(b.product));
 }
 
@@ -2450,13 +2467,10 @@ function Book({ pf, settings, view }) {
   const [openKey, setOpenKey] = useState(null);
   const rows = bookRows(pf, view);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
-  // Summed from the products that made the day, so the day and the rows under it can never
-  // disagree about size.
-  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   const open = rows.filter((r) => r.open);
   const longLots = sum(open.filter((r) => r.open.side === "Long"), (r) => r.open.lots);
   const shortLots = sum(open.filter((r) => r.open.side === "Short"), (r) => r.open.lots);
-  const trades = sum(rows, (r) => r.trades), realized = sum(rows, (r) => r.pnl), upnl = sum(open, (r) => r.open.upnl);
+  const trades = sum(rows, (r) => r.trades), realized = sum(rows, (r) => r.realized), upnl = sum(open, (r) => r.open.upnl);
   const all = view === "all";
   const avg = (v, q) => (q ? px(v / q) : "—");
 
@@ -2504,7 +2518,11 @@ function Book({ pf, settings, view }) {
                     <td className={o ? pc(o.upnl) : "faint"}>{o ? signed(o.upnl) : "—"}</td>
                     <td>{avg(r.buyV, r.buyQ)}</td>
                     <td>{avg(r.sellV, r.sellQ)}</td>
-                    <td className={r.trades ? pc(r.pnl) : "faint"}>{r.trades ? <b>{signed(r.pnl)}</b> : "—"}</td>
+                    <td className={r.realized || r.trades ? pc(r.realized) : "faint"}
+                      title={r.trades && Math.abs(r.realized - r.pnl) > 0.005
+                        ? `${money(r.pnl)} from the ${r.trades} finished round trips, plus ${money(r.realized - r.pnl)} realized on the position still open`
+                        : undefined}>
+                      {r.realized || r.trades ? <b>{signed(r.realized)}</b> : "—"}</td>
                     <td className="dim">{r.trades || "—"}</td>
                     <td className="dim">{r.lots ? qty(r.lots) : "—"}</td>
                   </tr>,
@@ -2604,9 +2622,6 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   // stress: same adverse move on every position in scope; report the worst account afterwards
   const recent = pf.book.closed.filter((c) => all || c.broker === view).slice(0, 6);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
-  // Summed from the products that made the day, so the day and the rows under it can never
-  // disagree about size.
-  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
 
   return (
     <div className="grid-dash">
@@ -3788,9 +3803,6 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
   }, [fills]);
   const legsFor = (broker, orders) => (orders || []).flatMap((o) => legsByOrder[`${broker}|${o}`] || []);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
-  // Summed from the products that made the day, so the day and the rows under it can never
-  // disagree about size.
-  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   /*
    * Dates are matched on the CLOSE, and on the local calendar day.
    *
@@ -3812,9 +3824,21 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
     (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product) && inRange(c));
   const narrowed = Boolean(filter.broker || filter.product || filter.from || filter.to);
   const allClosed = pf.book.closed.length;
-  const total = sum(closed, (c) => c.pnl);
+  /*
+   * "Realized P&L" is MONEY, so it comes from the ledger, narrowed the same way the table
+   * is. Summing the round trips below it reported $0 for a day that made $3,995, because a
+   * partial close on a position still held finishes no trade — and the top bar, which has
+   * always summed the ledger, said $3,995 at the same moment.
+   *
+   * Win rate and the averages stay on the round trips: a trade that has not finished has no
+   * result to count. The two are different questions and the strip now says which is which.
+   */
+  const ledger = filterLedger(pf.book.realized, filter);
+  const total = ledgerTotal(ledger);
+  const fromTrades = sum(closed, (c) => c.pnl);
+  const onOpen = round2c(total - fromTrades);
   const wins = closed.filter((c) => c.pnl > 0), losses = closed.filter((c) => c.pnl < 0);
-  const today = sum(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)), (r) => r.pnl);
+  const today = ledgerTotal(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)));
   const products = [...new Set(pf.book.closed.filter((c) => !filter.broker || c.broker === filter.broker).map((c) => c.product))].sort();
   /*
    * A season's drawdown in red at the top of the page is not information anybody needs
@@ -3830,9 +3854,14 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
     <section className="panel">
       {!hidden && (
         <div className="strip">
-          <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b></div>
+          <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b>
+            {onOpen !== 0 && <span className="faint" style={{ fontSize: 11 }}
+              title="Money booked against positions you are still holding — a partial close finishes no trade, so it is not in the list below.">
+              incl. {signed(onOpen)} on open positions
+            </span>}</div>
           <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b></div>
-          <div className="kpi"><label>Closed trades</label><b>{closed.length}</b></div>
+          <div className="kpi"><label>Closed trades</label><b>{closed.length}</b>
+            <span className="faint" style={{ fontSize: 11 }}>{fromTrades === total ? "all of the money above" : `${signed(fromTrades)} of the money above`}</span></div>
           <div className="kpi"><label>Win rate</label><b>{closed.length ? pct(wins.length / closed.length) : "—"}</b></div>
           <div className="kpi"><label>Avg win</label><b className="ok">{wins.length ? money(sum(wins, (c) => c.pnl) / wins.length) : "—"}</b></div>
           <div className="kpi"><label>Avg loss</label><b className="bad">{losses.length ? money(sum(losses, (c) => c.pnl) / losses.length) : "—"}</b></div>
@@ -5080,7 +5109,7 @@ function WinLossDays({ pf, view }) {
  * Days with nothing closed are absent rather than shown as zero. A flat row reads like a day
  * that was traded and made nothing, which is a different thing from a day off.
  */
-function DailyPnl({ pf, settings, view }) {
+function DailyPnl({ pf, settings, view, ledger }) {
   const [newestFirst, setNewestFirst] = useState(true);
   const [page, setPage] = useState(0);
   // Which days are open. A set, because opening one is no reason to close another —
@@ -5093,7 +5122,7 @@ function DailyPnl({ pf, settings, view }) {
   // disagree about size.
   const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   // Shared with the CSV, so the file and the screen cannot say different things.
-  const rows = useMemo(() => dailyRows(closed), [closed]);
+  const rows = useMemo(() => dailyRows(closed, ledger), [closed, ledger]);
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
@@ -5138,7 +5167,7 @@ function DailyPnl({ pf, settings, view }) {
             * column, and only after it had gone somewhere.
             */}
           <button type="button" className="btn ghost" title="Every day and the products under it, oldest first, whatever is on screen"
-            onClick={() => saveCsv(dailyCsv(closed, bname), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
+            onClick={() => saveCsv(dailyCsv(closed, ledger, bname), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
             Export CSV
           </button>
         </span>
@@ -5228,6 +5257,10 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
   const a = useMemo(() => analyse(closed), [closed]);
+  // Money from the ledger; every other figure in the strip is per-trade and stays on `a`.
+  const ledger = useMemo(() => filterLedger(pf.book.realized, { broker: view === "all" ? "" : view }), [pf.book.realized, view]);
+  const netMoney = ledgerTotal(ledger);
+  const onOpen = round2c(netMoney - a.net);
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
   // The one preference, set by "Hide figures" in the header — which is on every tab.
@@ -5263,7 +5296,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         <h2>Daily P&amp;L<span className="dim">realized money, one row per day</span></h2>
         <span className="faint" style={{ fontSize: 11 }}>Net of commission · booked on the day each trade closed</span>
       </div>
-      <DailyPnl pf={pf} settings={settings} view={view} />
+      <DailyPnl pf={pf} settings={settings} view={view} ledger={ledger} />
     </section>
   );
 
@@ -5272,7 +5305,15 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
       {history}
       {daily}
       <section className="panel"><div className="ph"><h2>Analysis</h2></div>
-        <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
+        {/*
+          * Money without a finished trade is the ordinary case for anyone who scales in and
+          * out, so the empty state has to say so rather than imply nothing has happened.
+          */}
+        <div className="empty">
+          No closed trades yet — win rate, averages and the rest need finished round trips.
+          {netMoney !== 0 && <> {signed(netMoney)} has been realized against positions you are still
+          holding; it is in the Daily P&amp;L table above.</>}
+        </div>
       </section>
     </>
   );
@@ -5282,10 +5323,11 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
       <section className="panel">
         <div className="ph">
           <h2>Performance<span className="dim">{a.n} closed trades · {qty(a.lots)} lots</span></h2>
-          <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
+          <span className="faint" style={{ fontSize: 11 }}>Realized money, including what has been booked against positions still open. Win rate and the averages count finished trades only.</span>
         </div>
         {!hidden && <div className="strip">
-          <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(a.net)}>{signed(a.net)}</b></div>
+          <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(netMoney)}>{signed(netMoney)}</b>
+            {onOpen !== 0 && <span className="faint" style={{ fontSize: 11 }}>incl. {signed(onOpen)} on open positions</span>}</div>
           <div className="kpi"><label>Win rate</label><b>{pct(a.winRate)}</b><span className="faint" style={{ fontSize: 11 }}>{a.wins} won · {a.losses} lost</span></div>
           <div className="kpi"><label>Profit factor</label><b className={a.profitFactor !== null && a.profitFactor < 1 ? "bad" : a.profitFactor >= 1.5 ? "ok" : ""}>{ratio(a.profitFactor)}</b><span className="faint" style={{ fontSize: 11 }}>won ÷ lost</span></div>
           <div className="kpi"><label>Expectancy / trade</label><b className={pc(a.expectancy)}>{signed(a.expectancy || 0)}</b></div>

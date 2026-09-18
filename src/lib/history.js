@@ -334,11 +334,22 @@ export function dayProducts(closed) {
  * The running total accumulates in DATE order, always, whichever way the table happens to
  * be sorted at the time. It only means anything read forwards.
  */
-export function dailyRows(closed) {
+export function dailyRows(closed, realized) {
+  const money = moneyByDay(realized);
+  const counts = new Map(winLossByDay(closed).map((r) => [r.d, r]));
+  /*
+   * Every day that has either. A day can have money and no finished trade — a partial close
+   * on a position still held, or commission on a position just opened — and it has to appear
+   * or the table quietly says nothing happened. A day can also have a trade finish with no
+   * money of its own, when the P&L was booked on earlier days.
+   */
+  const days = [...new Set([...money.keys(), ...counts.keys()])].sort();
   let run = 0;
-  return winLossByDay(closed).map((r) => {
-    run += r.net;
-    return { ...r, run, trades: r.wins + r.losses + r.flat };
+  return days.map((d) => {
+    const c = counts.get(d) || { d, wins: 0, losses: 0, flat: 0, won: 0, lost: 0 };
+    const net = money.has(d) ? money.get(d) : 0;
+    run = round2(run + net);
+    return { ...c, d, net, run, trades: c.wins + c.losses + c.flat };
   });
 }
 
@@ -358,11 +369,11 @@ const csvCell = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace
  *
  * `nameOf` turns a broker id into the name the trader knows it by.
  */
-export function dailyCsv(closed, nameOf = (id) => id) {
+export function dailyCsv(closed, realized, nameOf = (id) => id) {
   const parts = dayProducts(closed);
   const head = ["Date", "Scope", "Broker", "Product", "Trades", "Lots", "Won", "Lost", "Scratched", "P&L", "Running"];
   const out = [head.join(",")];
-  for (const r of dailyRows(closed)) {
+  for (const r of dailyRows(closed, realized)) {
     const on = parts.get(r.d) || [];
     const lots = round4(on.reduce((a, g) => a + g.lots, 0));
     out.push([r.d, "Day", "", "", r.trades, lots, r.wins, r.losses, r.flat, round2(r.net), round2(r.run)].map(csvCell).join(","));
@@ -375,3 +386,68 @@ export function dailyCsv(closed, nameOf = (id) => id) {
 
 /** Money to the cent. Exported figures are read as exact, so they are rounded like money. */
 function round2(v) { return isFinite(v) ? Math.round(v * 100) / 100 : 0; }
+
+/*
+ * ---------------------------------------------------------------------------
+ * REALIZED MONEY COMES FROM THE LEDGER, NOT FROM ROUND TRIPS
+ * ---------------------------------------------------------------------------
+ * computeBook keeps two tallies. `realized` has one entry per fill — every P&L booking and
+ * every commission, the moment it happens. `closed` has one row per completed round trip.
+ *
+ * They are not the same money, and the difference is not small. Buy 5, sell 2 at a profit,
+ * keep 3: the ledger says $3,995 and there is no closed trade at all, because nothing has
+ * finished. Everything that summed `closed` therefore reported $0 for a day that made
+ * $3,995 — the Closed tab's total, the Analysis strip, the daily table, the Positions
+ * tiles — while the top bar, which sums the ledger, said $3,995. Two answers, both on
+ * screen, to "what have I made".
+ *
+ * A second, quieter error rode along with it. A round trip closed by three fills over three
+ * days books its whole P&L on the last of them, so the daily table put money on the wrong
+ * day. The ledger books each piece on the day it was actually made.
+ *
+ * So: money from the ledger, always. Trade statistics — win rate, average win, profit
+ * factor, streaks — stay on `closed`, because they are per-trade by nature and a trade that
+ * has not finished has no result yet. The two answer different questions and now say so.
+ */
+
+/** Realized money per local day, from the ledger. Map of dayKey -> net. */
+export function moneyByDay(realized) {
+  const by = new Map();
+  for (const r of realized || []) {
+    if (!r || !r.ts) continue;
+    const d = dayKey(r.ts);
+    by.set(d, (by.get(d) || 0) + (Number(r.pnl) || 0));
+  }
+  for (const [d, v] of by) by.set(d, round2(v));
+  return by;
+}
+
+/** Realized money per broker|product, from the ledger. Map of "broker|product" -> net. */
+export function moneyByProduct(realized) {
+  const by = new Map();
+  for (const r of realized || []) {
+    if (!r || !r.product) continue;
+    const k = `${r.broker || "default"}|${r.product}`;
+    by.set(k, (by.get(k) || 0) + (Number(r.pnl) || 0));
+  }
+  for (const [k, v] of by) by.set(k, round2(v));
+  return by;
+}
+
+/** Ledger entries narrowed the way the screens narrow them. Dates are local calendar days. */
+export function filterLedger(realized, { broker = "", product = "", from = "", to = "" } = {}) {
+  return (realized || []).filter((r) => {
+    if (!r || !r.ts) return false;
+    if (broker && (r.broker || "default") !== broker) return false;
+    if (product && r.product !== product) return false;
+    if (from || to) {
+      const d = dayKey(r.ts);
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+    }
+    return true;
+  });
+}
+
+/** The money in a set of ledger entries, to the cent. */
+export const ledgerTotal = (entries) => round2((entries || []).reduce((a, r) => a + (Number(r.pnl) || 0), 0));

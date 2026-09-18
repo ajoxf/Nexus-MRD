@@ -240,14 +240,20 @@ const bookTrades = [
   { closeTs: '2026-08-24T14:00:00Z', broker: 'o', product: 'HO', qty: 1, pnl: 0 },
   { closeTs: '2026-08-25T12:00:00Z', broker: 'm', product: 'CL, spread', qty: 1, pnl: 120.005 },
 ];
-const daily = dailyRows(bookTrades);
+/*
+ * A matching ledger. Money now comes from the ledger rather than from the round trips —
+ * a partial close on a position still held is money with no finished trade behind it — so
+ * these trades are paired with the ledger entries a flat book would have produced for them.
+ */
+const bookLedger = bookTrades.map((t) => ({ ts: t.closeTs, broker: t.broker, product: t.product, pnl: t.pnl }));
+const daily = dailyRows(bookTrades, bookLedger);
 eq('one row per trading day', daily.map((r) => r.d), ['2026-08-24', '2026-08-25']);
 eq('trades counts scratches too', daily[0].trades, 3);
 eq('the running total accumulates in date order', daily.map((r) => Math.round(r.run * 100) / 100), [-300, -179.99]);
 eq('and the last running total is the book', Math.round(daily[1].run * 100) / 100,
    Math.round(bookTrades.reduce((a, t) => a + t.pnl, 0) * 100) / 100);
 
-const csv = dailyCsv(bookTrades, (id) => (id === 'o' ? 'Orient' : 'MT5'));
+const csv = dailyCsv(bookTrades, bookLedger, (id) => (id === 'o' ? 'Orient' : 'MT5'));
 const lines = csv.split('\n');
 eq('a header, two days and three product rows', lines.length, 1 + 2 + 3);
 eq('the header names every column', lines[0],
