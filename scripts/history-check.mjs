@@ -1,4 +1,4 @@
-import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv }
+import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, previousClose, dayPnl }
   from '../src/lib/history.js';
 let fail = 0;
 const eq = (name, got, want) => {
@@ -283,6 +283,42 @@ eq('the product rows net to their day', prodNet, dayNet);
 // Nothing to export is a header and nothing else, not a crash.
 eq('an empty book is just the header', dailyCsv([]).split('\n').length, 1);
 eq('and no rows', dailyRows([]), []);
+
+
+/*
+ * --- what "Today" means ---
+ *
+ * It was today's realized money plus the ENTIRE unrealized P&L of every open position,
+ * however old. A position opened last week sitting $3,000 down therefore reported "Daily
+ * loss limit hit — stop trading today" on a day nothing was traded, and would go on saying
+ * it every morning until the position was closed. That figure drives a risk control.
+ *
+ * It is now the change in equity since the previous close, less money paid in or out today.
+ */
+const HIST = [
+  { d: '2026-09-15', b: 'o', tne: 50000 },
+  { d: '2026-09-16', b: 'o', tne: 52000 },
+  { d: '2026-09-16', b: 'm', tne: 10000 },
+];
+eq('the previous close is the latest day before today', previousClose(HIST, 'o', '2026-09-17'), { d: '2026-09-16', tne: 52000 });
+eq("today's own row is not its own previous close", previousClose(HIST, 'o', '2026-09-16'), { d: '2026-09-15', tne: 50000 });
+eq('an account with no history has none', previousClose(HIST, 'new', '2026-09-17'), null);
+eq('and neither does an empty history', previousClose([], 'o', '2026-09-17'), null);
+eq('nor an undefined one', previousClose(undefined, 'o', '2026-09-17'), null);
+
+const day = (o) => dayPnl({ history: HIST, brokerId: 'o', today: '2026-09-17', realizedToday: 0, ...o });
+// The case that misfired: equity unchanged, an old position still underwater, nothing traded.
+eq('a day where nothing happened is zero', day({ tne: 52000 }).pnl, 0);
+eq('and it says it measured a change', day({ tne: 52000 }).basis, 'change');
+eq('made $1,500 today', day({ tne: 53500 }).pnl, 1500);
+eq('lost $800 today', day({ tne: 51200 }).pnl, -800);
+// A deposit raises equity without making a penny.
+eq('a deposit today is not a profit', day({ tne: 62000, cashToday: 10000 }).pnl, 0);
+eq('a withdrawal today is not a loss', day({ tne: 47000, cashToday: -5000 }).pnl, 0);
+eq('a deposit and a real gain are told apart', day({ tne: 63500, cashToday: 10000 }).pnl, 1500);
+// Nothing to measure against: realized money, and the screen is told to say so.
+eq('with no previous close it falls back to realized', dayPnl({ tne: 52000, realizedToday: 250, history: [], brokerId: 'o', today: '2026-09-17' }), { pnl: 250, basis: 'realized', since: null });
+eq('and never guesses from the open P&L', dayPnl({ tne: 999999, realizedToday: 0, history: [], brokerId: 'o', today: '2026-09-17' }).pnl, 0);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

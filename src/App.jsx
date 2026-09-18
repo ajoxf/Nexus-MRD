@@ -8,7 +8,7 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal } from "./lib/history.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, dayPnl } from "./lib/history.js";
 import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
@@ -211,7 +211,23 @@ function portfolio(fills, settings, now = new Date()) {
     const stop = M[key]?.stop, hasStop = has(stop);
     const size = n(spec.size) || 1000;
     const lev = n(spec.lev) || n(br.leverage) || 1;
-    const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
+    /*
+     * Margin on a leverage account is charged on the CURRENT price, not the entry.
+     *
+     * This used to use p.avg while the Scenarios page used the live price, so the two
+     * disagreed the moment the market moved: on a position entered at 100 and marked at
+     * 110, "TNE / IM now -> after" read 3500% -> 3182% with a ZERO percent move. Nothing
+     * was being stressed and the ratio fell 318 points, because the two screens were
+     * charging margin on different prices.
+     *
+     * Confirmed with the desk: their MT5 CFDs float margin with the market, which is what
+     * the scenario already assumed. Fixed-margin brokers are unaffected — $2,500 a lot is
+     * $2,500 a lot whatever the price does.
+     *
+     * `mark` falls back to the entry price when no current price has been entered, so an
+     * unpriced position charges exactly what it used to.
+     */
+    const im = br.method === "leverage" ? (Math.abs(mark) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
     const risk = hasStop ? Math.max(0, dir * (mark - n(stop))) * size * p.lots : null;
     /*
@@ -239,8 +255,19 @@ function portfolio(fills, settings, now = new Date()) {
     const fund = funding(settings, b.id, now);
     const TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
+    /*
+     * The day's result: the change in this account's equity since its previous close, less
+     * any money paid in or taken out today. See lib/history.js — the old figure carried the
+     * whole unrealized P&L of every open position, so a week-old loser tripped the daily
+     * limit every morning.
+     */
+    const todayKey = dayKey(now);
+    const cashToday = sum(fund.list.filter((c) => c.type !== "charge" && dayKey(c.ts) === todayKey),
+      (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+    const day = dayPnl({ tne: TNE, realizedToday, history: settings.history, brokerId: b.id, today: todayKey, cashToday });
     return {
       ...b, capital: fund.base, fund, rows: rs, IM, upnl, realizedAll, realizedToday, TNE, callR, stopR,
+      dayPnl: day.pnl, dayBasis: day.basis, daySince: day.since,
       ratio: IM > 0 ? TNE / IM : Infinity,
       lossToCall: IM > 0 ? TNE - IM * callR : TNE,
       freeIM: (minR > 0 ? TNE / minR : TNE) - IM,
@@ -257,11 +284,14 @@ function portfolio(fills, settings, now = new Date()) {
   const withPos = accounts.filter((a) => a.IM > 0);
   const weakest = withPos.length ? withPos.reduce((w, a) => (a.ratio < w.ratio ? a : w)) : null;
   const realizedToday = sum(accounts, (a) => a.realizedToday), upnl = sum(accounts, (a) => a.upnl);
+  // "change" only where every account could be measured; otherwise the total is realized money.
+  const dayBasis = accounts.every((a) => a.dayBasis === "change") ? "change" : "realized";
   return {
     book, rows, accounts, acct, weakest, minR, capital,
     total: {
       TNE: sum(accounts, (a) => a.TNE), IM: sum(accounts, (a) => a.IM), upnl, realizedToday,
-      realizedAll: sum(accounts, (a) => a.realizedAll), todayPnl: realizedToday + upnl,
+      realizedAll: sum(accounts, (a) => a.realizedAll),
+      todayPnl: sum(accounts, (a) => a.dayPnl), dayBasis,
       notional: sum(accounts, (a) => a.notional), totalRisk: sum(accounts, (a) => a.totalRisk),
       lossToCall: withPos.length ? Math.min(...withPos.map((a) => a.lossToCall)) : null,
     },
@@ -2322,7 +2352,7 @@ function Tracker({ user }) {
   const ratio = focus ? focus.ratio : Infinity;
   const st = statusOf(ratio, focus, pf.minR);
   const k = scoped
-    ? { TNE: scoped.TNE, IM: scoped.IM, upnl: scoped.upnl, today: scoped.realizedToday + scoped.upnl, room: scoped.IM > 0 ? scoped.lossToCall : null, lev: scoped.TNE > 0 && scoped.notional ? scoped.notional / scoped.TNE : null }
+    ? { TNE: scoped.TNE, IM: scoped.IM, upnl: scoped.upnl, today: scoped.dayPnl, room: scoped.IM > 0 ? scoped.lossToCall : null, lev: scoped.TNE > 0 && scoped.notional ? scoped.notional / scoped.TNE : null }
     : { TNE: pf.total.TNE, IM: pf.total.IM, upnl: pf.total.upnl, today: pf.total.todayPnl, room: pf.total.lossToCall, lev: pf.total.TNE > 0 && pf.total.notional ? pf.total.notional / pf.total.TNE : null };
   const slotsLeft = Math.max(0, n(L.maxTrades) - pf.rows.length);
   const callR = focus?.callR ?? 1;
@@ -2392,7 +2422,13 @@ function Tracker({ user }) {
           <div className="kpi"><label>Total net equity</label><b>{money(k.TNE)}</b></div>
           <div className="kpi"><label>Initial margin</label><b>{money(k.IM)}</b></div>
           <div className="kpi"><label>Open P&L</label><b className={pc(k.upnl)}>{signed(k.upnl)}</b></div>
-          <div className="kpi"><label>Today</label><b className={pc(k.today)}>{signed(k.today)}</b></div>
+          <div className="kpi"><label>Today</label><b className={pc(k.today)}>{signed(k.today)}</b>
+            {/* The day's change in equity where there is a previous close to measure against;
+                realized money only before there is one. Never a guess. */}
+            {(scoped ? scoped.dayBasis : pf.total.dayBasis) !== "change" && (
+              <span className="faint" style={{ fontSize: 11 }}
+                title="No previous day recorded yet, so this is realized money only. From tomorrow it is the day's change in equity.">realized only</span>
+            )}</div>
           <div className="kpi"><label>{scoped ? "Room to margin call" : "Least room to call"}</label><b className={k.room !== null && k.room <= 0 ? "bad" : ""}>{k.room !== null ? money(k.room) : "—"}</b></div>
           <div className="kpi hide-m"><label>Leverage used</label><b>{k.lev ? `${k.lev.toFixed(1)}×` : "—"}</b></div>
           <div className="kpi"><label>Slots left</label><b className={slotsLeft === 0 ? "bad" : slotsLeft <= 2 ? "warn" : ""}>{slotsLeft}<span className="faint" style={{ fontSize: 13 }}> / {L.maxTrades}</span></b></div>
@@ -2588,7 +2624,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   }
 
   const capNow = pf.dailyCap ?? focus?.dailyCap ?? null;
-  const lossNow = pf.dailyCap !== null ? pf.total.todayPnl : (focus ? focus.realizedToday + focus.upnl : null);
+  const lossNow = pf.dailyCap !== null ? pf.total.todayPnl : (focus ? focus.dayPnl : null);
   const capScope = pf.dailyCap !== null ? " across all brokers" : ` on ${focus?.name ?? "this account"}`;
   if (capNow > 0 && lossNow !== null && lossNow <= -capNow) warnings.push(["bad", `Daily loss limit hit (${money(lossNow)}${capScope}). Stop trading today.`]);
   else if (capNow > 0 && lossNow !== null && lossNow <= -0.7 * capNow) warnings.push(["warn", `Today's loss is ${pct(-lossNow / capNow)} of your daily limit.`]);
@@ -2967,7 +3003,7 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
   // What is left of today's allowance: the limit, less whatever today has already lost.
   // Same fallback as the warnings: the combined limit, or this account's own.
   const dayCap = pf.dailyCap ?? scoped?.dailyCap ?? null;
-  const dayLoss = pf.dailyCap !== null ? pf.total.todayPnl : (scoped ? scoped.realizedToday + scoped.upnl : 0);
+  const dayLoss = pf.dailyCap !== null ? pf.total.todayPnl : (scoped ? scoped.dayPnl : 0);
   const dailyLeft = dayCap > 0 ? Math.max(0, dayCap - Math.max(0, -dayLoss)) : Infinity;
   const picked = Array.isArray(S.pick) ? S.pick : null;
   const isOn = (line) => (picked ? picked.includes(line.key) : !!line.pos);
@@ -3859,7 +3895,8 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
               title="Money booked against positions you are still holding — a partial close finishes no trade, so it is not in the list below.">
               incl. {signed(onOpen)} on open positions
             </span>}</div>
-          <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b></div>
+          <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b>
+            <span className="faint" style={{ fontSize: 11 }} title="Money realized today. The top bar's Today is the day's change in equity, which also counts how open positions moved.">realized today</span></div>
           <div className="kpi"><label>Closed trades</label><b>{closed.length}</b>
             <span className="faint" style={{ fontSize: 11 }}>{fromTrades === total ? "all of the money above" : `${signed(fromTrades)} of the money above`}</span></div>
           <div className="kpi"><label>Win rate</label><b>{closed.length ? pct(wins.length / closed.length) : "—"}</b></div>

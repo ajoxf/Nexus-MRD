@@ -451,3 +451,48 @@ export function filterLedger(realized, { broker = "", product = "", from = "", t
 
 /** The money in a set of ledger entries, to the cent. */
 export const ledgerTotal = (entries) => round2((entries || []).reduce((a, r) => a + (Number(r.pnl) || 0), 0));
+
+/*
+ * ---------------------------------------------------------------------------
+ * WHAT "TODAY" MEANS
+ * ---------------------------------------------------------------------------
+ * It used to be today's realized money PLUS the entire unrealized P&L of every open
+ * position, however old. A position opened last week and sitting $3,000 down therefore
+ * reported "Daily loss limit hit — stop trading today" on a day nothing was traded, and
+ * would go on reporting it every day until it was closed. A winning open position hid a
+ * genuinely bad day the same way. That figure drives a risk control, so it has to be the
+ * day's result and nothing else.
+ *
+ * The day's result is the change in equity since the previous close, less any money paid
+ * in or taken out today — a deposit is not a profit. The daily snapshot already records
+ * each account's TNE, so the previous close is there to be read.
+ *
+ * Before there is a previous snapshot — a new account, or the first day — there is nothing
+ * to measure the change against, so it falls back to realized money, which is always true
+ * even if it is incomplete. Never a guess.
+ */
+
+/** The most recent recorded TNE for an account STRICTLY BEFORE `today`. Null if none. */
+export function previousClose(history, brokerId, today) {
+  let best = null;
+  for (const r of history || []) {
+    if (!r || r.b !== brokerId || !r.d || r.d >= today) continue;
+    if (!best || r.d > best.d) best = r;
+  }
+  return best ? { d: best.d, tne: Number(best.tne) || 0 } : null;
+}
+
+/**
+ * The day's P&L for one account.
+ *
+ * `cashToday` is deposits less withdrawals dated today: paying money in raises equity
+ * without making a penny, so it comes straight back out.
+ *
+ * Returns { pnl, basis } — "change" when measured against a previous close, "realized"
+ * when there is none to measure against, so the screen can say which it is.
+ */
+export function dayPnl({ tne, realizedToday, history, brokerId, today, cashToday = 0 }) {
+  const prev = previousClose(history, brokerId, today);
+  if (!prev) return { pnl: round2(realizedToday || 0), basis: "realized", since: null };
+  return { pnl: round2((Number(tne) || 0) - prev.tne - (Number(cashToday) || 0)), basis: "change", since: prev.d };
+}
