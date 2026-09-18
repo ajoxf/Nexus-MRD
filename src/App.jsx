@@ -8,8 +8,8 @@ import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
-import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, addDays, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, dayPnl } from "./lib/history.js";
-import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, suspectLegs, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
+import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv } from "./lib/history.js";
+import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
 const ORIENT_PRODUCTS = {
@@ -121,8 +121,6 @@ const pct = (v) => (isFinite(v) ? (v * 100).toFixed(1) + "%" : "—");
 const ratioTxt = (r) => (isFinite(r) ? (r * 100).toFixed(0) + "%" : "—");
 const px = (v) => (isFinite(v) ? (+v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 }) : "—");
 const qty = (v) => String(+(+v).toFixed(4));
-/** Money to the cent, so a floating-point residue never prints as a stray penny. */
-const round2c = (v) => (isFinite(v) ? Math.round(v * 100) / 100 : 0);
 // Holding time in the unit a trader would say it in: minutes, hours, then days.
 const holdTxt = (h) => {
   if (h === null || !isFinite(h)) return "—";
@@ -161,8 +159,8 @@ async function safeDelete({ fills, brokers, label, what, run, ask }) {
   const n = fills.length;
   const { ok, checked } = await ask({
     title: `Delete ${what}?`,
-    body: `${n} fill${n === 1 ? "" : "s"} will be removed, along with the daily equity history and the saved column layout that go with them. Positions, closed trades and P&L are worked out from these fills, so they will change.`,
-    detail: "The history is a record of these fills and would otherwise be yesterday's figures for a book that no longer exists. Capital, margins, products and the funds ledger are kept. This cannot be undone from inside Nexus — the backup is a CSV you can import again.",
+    body: `${n} fill${n === 1 ? "" : "s"} will be removed. Positions, closed trades and P&L are worked out from these fills, so they will change.`,
+    detail: "This cannot be undone from inside Nexus. The backup is a CSV you can import again.",
     checkbox: { label: "Download a CSV backup first", defaultChecked: true },
     confirmLabel: `Delete ${n} fill${n === 1 ? "" : "s"}`,
     tone: "danger",
@@ -211,23 +209,7 @@ function portfolio(fills, settings, now = new Date()) {
     const stop = M[key]?.stop, hasStop = has(stop);
     const size = n(spec.size) || 1000;
     const lev = n(spec.lev) || n(br.leverage) || 1;
-    /*
-     * Margin on a leverage account is charged on the CURRENT price, not the entry.
-     *
-     * This used to use p.avg while the Scenarios page used the live price, so the two
-     * disagreed the moment the market moved: on a position entered at 100 and marked at
-     * 110, "TNE / IM now -> after" read 3500% -> 3182% with a ZERO percent move. Nothing
-     * was being stressed and the ratio fell 318 points, because the two screens were
-     * charging margin on different prices.
-     *
-     * Confirmed with the desk: their MT5 CFDs float margin with the market, which is what
-     * the scenario already assumed. Fixed-margin brokers are unaffected — $2,500 a lot is
-     * $2,500 a lot whatever the price does.
-     *
-     * `mark` falls back to the entry price when no current price has been entered, so an
-     * unpriced position charges exactly what it used to.
-     */
-    const im = br.method === "leverage" ? (Math.abs(mark) * size * p.lots) / lev : n(spec.margin) * p.lots;
+    const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
     const risk = hasStop ? Math.max(0, dir * (mark - n(stop))) * size * p.lots : null;
     /*
@@ -255,19 +237,8 @@ function portfolio(fills, settings, now = new Date()) {
     const fund = funding(settings, b.id, now);
     const TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
-    /*
-     * The day's result: the change in this account's equity since its previous close, less
-     * any money paid in or taken out today. See lib/history.js — the old figure carried the
-     * whole unrealized P&L of every open position, so a week-old loser tripped the daily
-     * limit every morning.
-     */
-    const todayKey = dayKey(now);
-    const cashToday = sum(fund.list.filter((c) => c.type !== "charge" && dayKey(c.ts) === todayKey),
-      (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
-    const day = dayPnl({ tne: TNE, realizedToday, history: settings.history, brokerId: b.id, today: todayKey, cashToday });
     return {
       ...b, capital: fund.base, fund, rows: rs, IM, upnl, realizedAll, realizedToday, TNE, callR, stopR,
-      dayPnl: day.pnl, dayBasis: day.basis, daySince: day.since,
       ratio: IM > 0 ? TNE / IM : Infinity,
       lossToCall: IM > 0 ? TNE - IM * callR : TNE,
       freeIM: (minR > 0 ? TNE / minR : TNE) - IM,
@@ -284,16 +255,11 @@ function portfolio(fills, settings, now = new Date()) {
   const withPos = accounts.filter((a) => a.IM > 0);
   const weakest = withPos.length ? withPos.reduce((w, a) => (a.ratio < w.ratio ? a : w)) : null;
   const realizedToday = sum(accounts, (a) => a.realizedToday), upnl = sum(accounts, (a) => a.upnl);
-  // "change" only where every account could be measured; otherwise the total is realized money.
-  const dayBasis = accounts.every((a) => a.dayBasis === "change") ? "change" : "realized";
   return {
     book, rows, accounts, acct, weakest, minR, capital,
     total: {
       TNE: sum(accounts, (a) => a.TNE), IM: sum(accounts, (a) => a.IM), upnl, realizedToday,
-      realizedAll: sum(accounts, (a) => a.realizedAll),
-      todayPnl: sum(accounts, (a) => a.dayPnl), dayBasis,
-      // The oldest previous close behind the combined figure, so the tile can say how far back it reaches.
-      daySince: accounts.map((a) => a.daySince).filter(Boolean).sort()[0] || null,
+      realizedAll: sum(accounts, (a) => a.realizedAll), todayPnl: realizedToday + upnl,
       notional: sum(accounts, (a) => a.notional), totalRisk: sum(accounts, (a) => a.totalRisk),
       lossToCall: withPos.length ? Math.min(...withPos.map((a) => a.lossToCall)) : null,
     },
@@ -2354,7 +2320,7 @@ function Tracker({ user }) {
   const ratio = focus ? focus.ratio : Infinity;
   const st = statusOf(ratio, focus, pf.minR);
   const k = scoped
-    ? { TNE: scoped.TNE, IM: scoped.IM, upnl: scoped.upnl, today: scoped.dayPnl, room: scoped.IM > 0 ? scoped.lossToCall : null, lev: scoped.TNE > 0 && scoped.notional ? scoped.notional / scoped.TNE : null }
+    ? { TNE: scoped.TNE, IM: scoped.IM, upnl: scoped.upnl, today: scoped.realizedToday + scoped.upnl, room: scoped.IM > 0 ? scoped.lossToCall : null, lev: scoped.TNE > 0 && scoped.notional ? scoped.notional / scoped.TNE : null }
     : { TNE: pf.total.TNE, IM: pf.total.IM, upnl: pf.total.upnl, today: pf.total.todayPnl, room: pf.total.lossToCall, lev: pf.total.TNE > 0 && pf.total.notional ? pf.total.notional / pf.total.TNE : null };
   const slotsLeft = Math.max(0, n(L.maxTrades) - pf.rows.length);
   const callR = focus?.callR ?? 1;
@@ -2424,29 +2390,7 @@ function Tracker({ user }) {
           <div className="kpi"><label>Total net equity</label><b>{money(k.TNE)}</b></div>
           <div className="kpi"><label>Initial margin</label><b>{money(k.IM)}</b></div>
           <div className="kpi"><label>Open P&L</label><b className={pc(k.upnl)}>{signed(k.upnl)}</b></div>
-          <div className="kpi"><label>Today</label><b className={pc(k.today)}>{signed(k.today)}</b>
-            {/* The day's change in equity where there is a previous close to measure against;
-                realized money only before there is one. Never a guess. */}
-            {(() => {
-              const basis = scoped ? scoped.dayBasis : pf.total.dayBasis;
-              if (basis !== "change") return (
-                <span className="faint" style={{ fontSize: 11 }}
-                  title="No previous day recorded yet, so this is realized money only. From tomorrow it is the day's change in equity.">realized only</span>
-              );
-              /*
-               * Snapshots are only written while the app is open, so after a weekend away
-               * the nearest close is Friday's and this figure spans three days. It still
-               * measures a real change — it is just not "today", and the tile has to say so
-               * rather than let a Monday morning read as one session's loss.
-               */
-              const since = scoped ? scoped.daySince : pf.total.daySince;
-              const yday = since && addDays(dayKey(new Date()), -1);
-              if (!since || since === yday) return null;
-              return <span className="warn" style={{ fontSize: 11 }}
-                title={`Nexus records a daily snapshot only while it is open, and the last one is from ${since}. This is the change since then, not since yesterday.`}>
-                since {new Date(`${since}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}
-              </span>;
-            })()}</div>
+          <div className="kpi"><label>Today</label><b className={pc(k.today)}>{signed(k.today)}</b></div>
           <div className="kpi"><label>{scoped ? "Room to margin call" : "Least room to call"}</label><b className={k.room !== null && k.room <= 0 ? "bad" : ""}>{k.room !== null ? money(k.room) : "—"}</b></div>
           <div className="kpi hide-m"><label>Leverage used</label><b>{k.lev ? `${k.lev.toFixed(1)}×` : "—"}</b></div>
           <div className="kpi"><label>Slots left</label><b className={slotsLeft === 0 ? "bad" : slotsLeft <= 2 ? "warn" : ""}>{slotsLeft}<span className="faint" style={{ fontSize: 13 }}> / {L.maxTrades}</span></b></div>
@@ -2490,19 +2434,6 @@ function bookRows(pf, view) {
   const by = {};
   const get = (broker, product) => (by[`${broker}|${product}`] ||= { key: `${broker}|${product}`, broker, product, open: null, trades: 0, lots: 0, buyQ: 0, buyV: 0, sellQ: 0, sellV: 0, pnl: 0, fees: 0 });
   pf.rows.forEach((r) => { if (view === "all" || r.broker === view) get(r.broker, r.product).open = r; });
-  /*
-   * Realized money per product comes from the LEDGER, not from the round trips below.
-   * A partial close on a position still held is money in the account with no finished trade
-   * behind it, and summing round trips reports it as zero. `trades`, `lots` and the average
-   * buy and sell stay on the round trips, which is what those words mean.
-   */
-  const money = moneyByProduct(pf.book.realized);
-  money.forEach((net, key) => {
-    const [broker, ...rest] = key.split("|");
-    const product = rest.join("|");
-    if (view !== "all" && broker !== view) return;
-    get(broker, product).realized = net;
-  });
   pf.book.closed.forEach((c) => {
     if (view !== "all" && c.broker !== view) return;
     const g = get(c.broker, c.product);
@@ -2512,8 +2443,6 @@ function bookRows(pf, view) {
     else { g.sellQ += q; g.sellV += entryV; g.buyQ += q; g.buyV += exitV; }
     g.trades++; g.lots += q; g.pnl += c.pnl; g.fees += c.fees || 0;
   });
-  // A product with ledger money but no finished trade still gets a row.
-  Object.values(by).forEach((g) => { if (g.realized === undefined) g.realized = 0; });
   return Object.values(by).sort((a, b) => (!!b.open - !!a.open) || a.product.localeCompare(b.product));
 }
 
@@ -2521,10 +2450,13 @@ function Book({ pf, settings, view }) {
   const [openKey, setOpenKey] = useState(null);
   const rows = bookRows(pf, view);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   const open = rows.filter((r) => r.open);
   const longLots = sum(open.filter((r) => r.open.side === "Long"), (r) => r.open.lots);
   const shortLots = sum(open.filter((r) => r.open.side === "Short"), (r) => r.open.lots);
-  const trades = sum(rows, (r) => r.trades), realized = sum(rows, (r) => r.realized), upnl = sum(open, (r) => r.open.upnl);
+  const trades = sum(rows, (r) => r.trades), realized = sum(rows, (r) => r.pnl), upnl = sum(open, (r) => r.open.upnl);
   const all = view === "all";
   const avg = (v, q) => (q ? px(v / q) : "—");
 
@@ -2572,11 +2504,7 @@ function Book({ pf, settings, view }) {
                     <td className={o ? pc(o.upnl) : "faint"}>{o ? signed(o.upnl) : "—"}</td>
                     <td>{avg(r.buyV, r.buyQ)}</td>
                     <td>{avg(r.sellV, r.sellQ)}</td>
-                    <td className={r.realized || r.trades ? pc(r.realized) : "faint"}
-                      title={r.trades && Math.abs(r.realized - r.pnl) > 0.005
-                        ? `${money(r.pnl)} from the ${r.trades} finished round trips, plus ${money(r.realized - r.pnl)} realized on the position still open`
-                        : undefined}>
-                      {r.realized || r.trades ? <b>{signed(r.realized)}</b> : "—"}</td>
+                    <td className={r.trades ? pc(r.pnl) : "faint"}>{r.trades ? <b>{signed(r.pnl)}</b> : "—"}</td>
                     <td className="dim">{r.trades || "—"}</td>
                     <td className="dim">{r.lots ? qty(r.lots) : "—"}</td>
                   </tr>,
@@ -2642,23 +2570,11 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   }
 
   const capNow = pf.dailyCap ?? focus?.dailyCap ?? null;
-  const lossNow = pf.dailyCap !== null ? pf.total.todayPnl : (focus ? focus.dayPnl : null);
+  const lossNow = pf.dailyCap !== null ? pf.total.todayPnl : (focus ? focus.realizedToday + focus.upnl : null);
   const capScope = pf.dailyCap !== null ? " across all brokers" : ` on ${focus?.name ?? "this account"}`;
   if (capNow > 0 && lossNow !== null && lossNow <= -capNow) warnings.push(["bad", `Daily loss limit hit (${money(lossNow)}${capScope}). Stop trading today.`]);
   else if (capNow > 0 && lossNow !== null && lossNow <= -0.7 * capNow) warnings.push(["warn", `Today's loss is ${pct(-lossNow / capNow)} of your daily limit.`]);
   if (pf.rows.length >= n(L.maxTrades)) warnings.push(["bad", `Maximum of ${L.maxTrades} open positions reached.`]);
-  /*
-   * The same trade counted twice. A file imported without its Ref column mapped brought the
-   * legs of every spread in as outright products, so both the spread and its two sides are
-   * in the book. Named, not removed: a real outright in the same contract is a position
-   * somebody might actually hold, and deleting it on a guess would be the worse mistake.
-   */
-  const legLike = suspectLegs([...new Set(fills.filter((f) => !f.is_leg).map((f) => f.product))]);
-  if (legLike.length) warnings.push(["warn",
-    `${legLike.map((x) => x.product).join(", ")} ${legLike.length === 1 ? "looks like a leg" : "look like legs"} of ${
-      [...new Set(legLike.flatMap((x) => x.spreads))].join(", ")}, counted as ${legLike.length === 1 ? "a product" : "products"} of ${
-      legLike.length === 1 ? "its" : "their"} own. If so, that trade is in your P&L twice — re-upload the file with its order-ID column mapped and the Import button will repair it. Ignore this if you really do hold ${
-      legLike.length === 1 ? "it" : "them"} outright.`]);
   // Say it on the dashboard too: a scenario that quietly leaves something out
   // is worse than one that admits it.
   const optsOn = [...new Set(scen.flatMap((x) => x.optionsOn.map((o) => o.product)))];
@@ -2688,6 +2604,9 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   // stress: same adverse move on every position in scope; report the worst account afterwards
   const recent = pf.book.closed.filter((c) => all || c.broker === view).slice(0, 6);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
 
   return (
     <div className="grid-dash">
@@ -3033,7 +2952,7 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
   // What is left of today's allowance: the limit, less whatever today has already lost.
   // Same fallback as the warnings: the combined limit, or this account's own.
   const dayCap = pf.dailyCap ?? scoped?.dailyCap ?? null;
-  const dayLoss = pf.dailyCap !== null ? pf.total.todayPnl : (scoped ? scoped.dayPnl : 0);
+  const dayLoss = pf.dailyCap !== null ? pf.total.todayPnl : (scoped ? scoped.realizedToday + scoped.upnl : 0);
   const dailyLeft = dayCap > 0 ? Math.max(0, dayCap - Math.max(0, -dayLoss)) : Infinity;
   const picked = Array.isArray(S.pick) ? S.pick : null;
   const isOn = (line) => (picked ? picked.includes(line.key) : !!line.pos);
@@ -3487,9 +3406,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   }, [fills]);
   const toRepair = parsed
     ? parsed.rows.filter((r) => {
-        if (r.status !== "stored") return false;
-        const was = storedByRef.get(`${r.broker || "default"}|${r.ref}`);
-        if (!was) return false;
+        if (r.status !== "stored" || !r.position) return false;
         /*
          * DIFFERENT, not merely missing.
          *
@@ -3498,30 +3415,9 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
          * the word "CLOSE". Repairing only blank tickets would leave exactly the rows that
          * need it most, because they do not look empty.
          */
-        if (r.position && was.position !== r.position) return true;
-        /*
-         * And the same for a leg. A file imported without its Ref column mapped brought the
-         * legs of every spread in as outright products, so the book counted each trade
-         * twice. Re-reading it now recognises them, and this carries that recognition onto
-         * the rows already stored — otherwise the fix could never reach a book that has one.
-         */
-        return Boolean(r.is_leg) !== Boolean(was.is_leg);
+        return storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position !== r.position;
       })
     : [];
-  /*
-   * What the repair is actually repairing, so the button says it.
-   *
-   * It said "with position tickets" whatever it was about to do, which was wrong and
-   * confusing the first time it was used to un-double a spread: the number was right and
-   * the words described a different fix entirely.
-   */
-  const repairKind = (() => {
-    const tickets = toRepair.some((r) => r.position);
-    const legs = toRepair.some((r) => r.is_leg);
-    if (tickets && legs) return "position tickets and spread legs";
-    if (legs) return `spread leg${toRepair.length === 1 ? "" : "s"} counted as products`;
-    return "position tickets";
-  })();
   // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)
   const cashKey = (c) => `${c.broker}|${c.type}|${(+c.amount).toFixed(2)}|${String(c.ts).slice(0, 16)}`;
   const cashNew = parsed ? (() => { const have = new Set((settings.cash || []).map(cashKey)); return parsed.cash.filter((c) => !have.has(cashKey(c))); })() : [];
@@ -3747,7 +3643,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
                 </div>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} · ${repairKind}` : "Nothing new to import"}</button>
+                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} with position tickets` : "Nothing new to import"}</button>
                 <button className="btn ghost" onClick={reset}>Cancel</button>
               </div>
             </>
@@ -3892,6 +3788,9 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
   }, [fills]);
   const legsFor = (broker, orders) => (orders || []).flatMap((o) => legsByOrder[`${broker}|${o}`] || []);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
+  // Summed from the products that made the day, so the day and the rows under it can never
+  // disagree about size.
+  const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   /*
    * Dates are matched on the CLOSE, and on the local calendar day.
    *
@@ -3913,21 +3812,9 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
     (!filter.broker || c.broker === filter.broker) && (!filter.product || c.product === filter.product) && inRange(c));
   const narrowed = Boolean(filter.broker || filter.product || filter.from || filter.to);
   const allClosed = pf.book.closed.length;
-  /*
-   * "Realized P&L" is MONEY, so it comes from the ledger, narrowed the same way the table
-   * is. Summing the round trips below it reported $0 for a day that made $3,995, because a
-   * partial close on a position still held finishes no trade — and the top bar, which has
-   * always summed the ledger, said $3,995 at the same moment.
-   *
-   * Win rate and the averages stay on the round trips: a trade that has not finished has no
-   * result to count. The two are different questions and the strip now says which is which.
-   */
-  const ledger = filterLedger(pf.book.realized, filter);
-  const total = ledgerTotal(ledger);
-  const fromTrades = sum(closed, (c) => c.pnl);
-  const onOpen = round2c(total - fromTrades);
+  const total = sum(closed, (c) => c.pnl);
   const wins = closed.filter((c) => c.pnl > 0), losses = closed.filter((c) => c.pnl < 0);
-  const today = ledgerTotal(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)));
+  const today = sum(pf.book.realized.filter((r) => isToday(r.ts) && (!filter.broker || r.broker === filter.broker)), (r) => r.pnl);
   const products = [...new Set(pf.book.closed.filter((c) => !filter.broker || c.broker === filter.broker).map((c) => c.product))].sort();
   /*
    * A season's drawdown in red at the top of the page is not information anybody needs
@@ -3943,15 +3830,9 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
     <section className="panel">
       {!hidden && (
         <div className="strip">
-          <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b>
-            {onOpen !== 0 && <span className="faint" style={{ fontSize: 11 }}
-              title="Money booked against positions you are still holding — a partial close finishes no trade, so it is not in the list below.">
-              incl. {signed(onOpen)} on open positions
-            </span>}</div>
-          <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b>
-            <span className="faint" style={{ fontSize: 11 }} title="Money realized today. The top bar's Today is the day's change in equity, which also counts how open positions moved.">realized today</span></div>
-          <div className="kpi"><label>Closed trades</label><b>{closed.length}</b>
-            <span className="faint" style={{ fontSize: 11 }}>{fromTrades === total ? "all of the money above" : `${signed(fromTrades)} of the money above`}</span></div>
+          <div className="kpi"><label>Realized P&L</label><b className={pc(total)}>{signed(total)}</b></div>
+          <div className="kpi"><label>Today</label><b className={pc(today)}>{signed(today)}</b></div>
+          <div className="kpi"><label>Closed trades</label><b>{closed.length}</b></div>
           <div className="kpi"><label>Win rate</label><b>{closed.length ? pct(wins.length / closed.length) : "—"}</b></div>
           <div className="kpi"><label>Avg win</label><b className="ok">{wins.length ? money(sum(wins, (c) => c.pnl) / wins.length) : "—"}</b></div>
           <div className="kpi"><label>Avg loss</label><b className="bad">{losses.length ? money(sum(losses, (c) => c.pnl) / losses.length) : "—"}</b></div>
@@ -4385,38 +4266,11 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
   const b = brokers.find((x) => x.id === bid);
   const mine = fills.filter((f) => f.broker === bid);
   const done = (t) => setMsg(["ok", t]);
-  /*
-   * Deleting fills takes the daily snapshots and the saved column layout with them.
-   *
-   * THE SNAPSHOTS are a record OF those fills — each day's closing equity. Left behind,
-   * they are yesterday's figures for a book that no longer exists, and "Today" is measured
-   * against them: delete a book whose P&L was doubled, re-upload it correctly, and the
-   * first morning reports a $70,000 loss that never happened and stops you trading. The
-   * Day by day chart rebuilds earlier days from the fills once they are back, so nothing
-   * that can be recovered is lost.
-   *
-   * THE SAVED LAYOUT is the other one. It is how this broker's file was read last time, and
-   * a stale one has now caused two wrong books: it aimed the MT5 ticket column at the
-   * Comment field, and it left the order-ID column unmapped so every spread leg came in as
-   * a product. Somebody deleting their fills to start again means it — the next upload
-   * should be read fresh.
-   */
-  const clearDerived = (brokerId) => setSettings((st) => ({
-    ...st,
-    history: (st.history || []).filter((r) => (brokerId ? r.b !== brokerId : false)),
-    brokers: st.brokers.map((x) => (!brokerId || x.id === brokerId ? { ...x, csv: undefined } : x)),
-  }));
   const delBroker = async () => {
-    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid), ask })) {
-      clearDerived(bid); await reloadFills();
-      done(`Deleted ${b?.name}'s fills, its daily history and its saved column layout. Capital, margins and products are kept, so you can re-upload.`);
-    }
+    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid), ask })) { await reloadFills(); done(`Deleted ${b?.name}'s fills. Its settings are kept, so you can re-upload.`); }
   };
   const delAll = async () => {
-    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills(), ask })) {
-      clearDerived(null); await reloadFills();
-      done("Deleted all fills, the daily history and every saved column layout. Broker accounts, capital, margins and the funds ledger are kept.");
-    }
+    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills(), ask })) { await reloadFills(); done("Deleted all fills. Broker settings are kept."); }
   };
   const resetSettings = async () => {
     if (fills.length) { setMsg(["bad", "Delete the fills first. Otherwise accounts would be recreated from them with default settings."]); return; }
@@ -4433,7 +4287,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
     <section className="panel reset">
       <div className="ph"><h2>Delete or reset data</h2><span className="faint" style={{ fontSize: 11 }}>For a wrong upload. A backup download is offered first.</span></div>
       <div className="pb fg">
-        <F label="Delete one broker's fills" hint={`${mine.length} fill${mine.length === 1 ? "" : "s"} stored. Its daily history and saved column layout go too, so the next upload is read fresh. Capital, margins and products are kept.`}>
+        <F label="Delete one broker's fills" hint={`${mine.length} fill${mine.length === 1 ? "" : "s"} stored. Settings and funds for this broker are kept.`}>
           <div style={{ display: "flex", gap: 6 }}>
             <select className="in" value={bid} onChange={(e) => { setBid(e.target.value); setMsg(null); }}>{brokers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
             <button className="btn danger" style={{ whiteSpace: "nowrap" }} disabled={!mine.length} onClick={delBroker}>Delete fills</button>
@@ -4610,33 +4464,11 @@ const HOUR = 3600e3;
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const monthName = (ym) => `${MONTHS[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
 
-/*
- * `realized` is the ledger. Everything about MONEY is taken from it; everything about
- * TRADES — counts, win rate, gross won and lost, profit factor, streaks, the equity curve —
- * stays on the finished round trips, because an unfinished trade has no result.
- *
- * Without the ledger the headline said one thing and every panel under it another: the
- * strip showed money booked against positions still held, and "By product", "By month" and
- * Product detail showed only what had finished. Nothing on the page added up to anything
- * else on it, which is no way to check a figure.
- */
-function analyse(closed, realized) {
+function analyse(closed) {
   const t = [...closed].sort((a, b) => new Date(a.closeTs) - new Date(b.closeTs));
-  // Ledger money per product and per month, to lay over the round-trip groups below.
-  const moneyBy = (keyOf) => {
-    const m = new Map();
-    for (const r of realized || []) {
-      if (!r || !r.ts || !r.product) continue;
-      const k = keyOf(r);
-      m.set(k, (m.get(k) || 0) + (Number(r.pnl) || 0));
-    }
-    return m;
-  };
   const wins = t.filter((x) => x.pnl > 0), losses = t.filter((x) => x.pnl < 0);
   const grossWin = sum(wins, (x) => x.pnl), grossLoss = Math.abs(sum(losses, (x) => x.pnl));
-  // The ledger's money, not the round trips'. See the note above the function.
-  const net = round2c((realized || []).reduce((a, r) => a + (Number(r.pnl) || 0), 0));
-  const netFromTrades = sum(t, (x) => x.pnl);
+  const net = sum(t, (x) => x.pnl);
 
   // Equity curve and the deepest fall from a peak along the way.
   let run = 0, peak = 0, maxDD = 0, ddAt = null;
@@ -4655,46 +4487,34 @@ function analyse(closed, realized) {
     winStreak = Math.max(winStreak, cw); lossStreak = Math.max(lossStreak, cl);
   });
 
-  /*
-   * `keyOf` is handed { product, when } — never a raw row. A ledger entry dates itself with
-   * `ts` and a closed trade with `closeTs`, and feeding one to a key written for the other
-   * is how "Invalid time value" took the whole page down.
-   */
   const group = (keyOf) => {
     const m = {};
-    const at = (k) => (m[k] ||= { key: k, trades: 0, lots: 0, wins: 0, net: 0, gw: 0, gl: 0 });
-    // Money first, so a product with realized money but no finished trade still gets a row.
-    moneyBy((r) => keyOf({ product: r.product, when: r.ts })).forEach((net, k) => { at(k).net = net; });
     t.forEach((x) => {
-      const g = at(keyOf({ product: x.product, when: x.closeTs }));
-      g.trades++; g.lots += x.qty;
+      const k = keyOf(x);
+      const g = (m[k] ||= { key: k, trades: 0, lots: 0, wins: 0, net: 0, gw: 0, gl: 0 });
+      g.trades++; g.lots += x.qty; g.net += x.pnl;
       if (x.pnl > 0) { g.wins++; g.gw += x.pnl; } else if (x.pnl < 0) g.gl += Math.abs(x.pnl);
     });
-    return Object.values(m).map((g) => ({ ...g, net: round2c(g.net) })).sort((a, b) => b.net - a.net);
+    return Object.values(m).sort((a, b) => b.net - a.net);
   };
-  /** A month key that cannot throw: an unreadable date is filed under "unknown", not fatal. */
-  const monthOf = (when) => { const d = new Date(when); return isFinite(d) ? d.toISOString().slice(0, 7) : "unknown"; };
 
   const held = t.map((x) => (new Date(x.closeTs) - new Date(x.openTs)) / HOUR).filter((h) => isFinite(h) && h >= 0);
   const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const i = s.length >> 1;
     return s.length % 2 ? s[i] : (s[i - 1] + s[i]) / 2; };
 
   return {
-    trades: t, n: t.length, net, netFromTrades, wins: wins.length, losses: losses.length,
+    trades: t, n: t.length, net, wins: wins.length, losses: losses.length,
     winRate: t.length ? wins.length / t.length : null,
     grossWin, grossLoss,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
-    // What a FINISHED trade has been worth on average, so it divides the finished trades'
-    // money by their count. Dividing the ledger by the trade count mixes two bases and can
-    // report an expectancy larger than any trade ever made.
-    expectancy: t.length ? netFromTrades / t.length : null,
+    expectancy: t.length ? net / t.length : null,
     avgWin: wins.length ? grossWin / wins.length : 0,
     avgLoss: losses.length ? grossLoss / losses.length : 0,
     topWins: [...t].filter((x) => x.pnl > 0).sort((a, b) => b.pnl - a.pnl).slice(0, 5),
     topLosses: [...t].filter((x) => x.pnl < 0).sort((a, b) => a.pnl - b.pnl).slice(0, 5),
     curve, peak, maxDD, ddAt, winStreak, lossStreak,
     byProduct: group((x) => x.product),
-    byMonth: group((x) => monthOf(x.when)).sort((a, b) => a.key.localeCompare(b.key)),
+    byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
     lots: sum(t, (x) => x.qty),
     medianHours: median(held),
   };
@@ -5260,20 +5080,20 @@ function WinLossDays({ pf, view }) {
  * Days with nothing closed are absent rather than shown as zero. A flat row reads like a day
  * that was traded and made nothing, which is a different thing from a day off.
  */
-function DailyPnl({ pf, settings, view, ledger, tradedDays }) {
+function DailyPnl({ pf, settings, view }) {
   const [newestFirst, setNewestFirst] = useState(true);
   const [page, setPage] = useState(0);
   // Which days are open. A set, because opening one is no reason to close another —
   // comparing two days side by side is the point of opening them at all.
   const [open, setOpen] = useState(() => new Set());
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
-  const parts = useMemo(() => dayProducts(closed, ledger), [closed, ledger]);
+  const parts = useMemo(() => dayProducts(closed), [closed]);
   const bname = (id) => settings.brokers.find((b) => b.id === id)?.name || id;
   // Summed from the products that made the day, so the day and the rows under it can never
   // disagree about size.
   const lotsOn = (d) => (parts.get(d) || []).reduce((a, g) => a + g.lots, 0);
   // Shared with the CSV, so the file and the screen cannot say different things.
-  const rows = useMemo(() => dailyRows(closed, ledger, tradedDays), [closed, ledger, tradedDays]);
+  const rows = useMemo(() => dailyRows(closed), [closed]);
 
   if (!rows.length) return <div className="empty">No trades have been closed yet.</div>;
 
@@ -5318,7 +5138,7 @@ function DailyPnl({ pf, settings, view, ledger, tradedDays }) {
             * column, and only after it had gone somewhere.
             */}
           <button type="button" className="btn ghost" title="Every day and the products under it, oldest first, whatever is on screen"
-            onClick={() => saveCsv(dailyCsv(closed, ledger, bname, tradedDays), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
+            onClick={() => saveCsv(dailyCsv(closed, bname), `nexus_daily_pnl_${view === "all" ? "all" : bname(view).replace(/\W+/g, "-")}_${rows[0].d}_to_${rows[rows.length - 1].d}.csv`)}>
             Export CSV
           </button>
         </span>
@@ -5407,20 +5227,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
   const brokers = settings.brokers;
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
-  const ledger = useMemo(() => filterLedger(pf.book.realized, { broker: view === "all" ? "" : view }), [pf.book.realized, view]);
-  /*
-   * Days the desk actually traded on, so a day of nothing but opening fills still gets a
-   * row. Legs are excluded, as everywhere — the spread is the trade.
-   */
-  const tradedDays = useMemo(
-    () => [...tradedByDay((fills || []).filter((f) => !f.is_leg && (view === "all" || f.broker === view))).keys()],
-    [fills, view],
-  );
-  const a = useMemo(() => analyse(closed, ledger), [closed, ledger]);
-  // `a.net` is now the ledger's money and every panel below is grouped from the same place,
-  // so the strip, By product, By month and Product detail all add up to each other.
-  const netMoney = a.net;
-  const onOpen = round2c(netMoney - a.netFromTrades);
+  const a = useMemo(() => analyse(closed), [closed]);
   const pct = (x) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
   const ratio = (x) => (x === null ? "—" : !isFinite(x) ? "No losses" : x.toFixed(2));
   // The one preference, set by "Hide figures" in the header — which is on every tab.
@@ -5456,7 +5263,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         <h2>Daily P&amp;L<span className="dim">realized money, one row per day</span></h2>
         <span className="faint" style={{ fontSize: 11 }}>Net of commission · booked on the day each trade closed</span>
       </div>
-      <DailyPnl pf={pf} settings={settings} view={view} ledger={ledger} tradedDays={tradedDays} />
+      <DailyPnl pf={pf} settings={settings} view={view} />
     </section>
   );
 
@@ -5465,15 +5272,7 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
       {history}
       {daily}
       <section className="panel"><div className="ph"><h2>Analysis</h2></div>
-        {/*
-          * Money without a finished trade is the ordinary case for anyone who scales in and
-          * out, so the empty state has to say so rather than imply nothing has happened.
-          */}
-        <div className="empty">
-          No closed trades yet — win rate, averages and the rest need finished round trips.
-          {netMoney !== 0 && <> {signed(netMoney)} has been realized against positions you are still
-          holding; it is in the Daily P&amp;L table above.</>}
-        </div>
+        <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
       </section>
     </>
   );
@@ -5483,11 +5282,10 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
       <section className="panel">
         <div className="ph">
           <h2>Performance<span className="dim">{a.n} closed trades · {qty(a.lots)} lots</span></h2>
-          <span className="faint" style={{ fontSize: 11 }}>Realized money, including what has been booked against positions still open. Win rate and the averages count finished trades only.</span>
+          <span className="faint" style={{ fontSize: 11 }}>Realized money only — open positions are not counted</span>
         </div>
         {!hidden && <div className="strip">
-          <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(netMoney)}>{signed(netMoney)}</b>
-            {onOpen !== 0 && <span className="faint" style={{ fontSize: 11 }}>incl. {signed(onOpen)} on open positions</span>}</div>
+          <div className="kpi"><label>Net realized P&amp;L</label><b className={pc(a.net)}>{signed(a.net)}</b></div>
           <div className="kpi"><label>Win rate</label><b>{pct(a.winRate)}</b><span className="faint" style={{ fontSize: 11 }}>{a.wins} won · {a.losses} lost</span></div>
           <div className="kpi"><label>Profit factor</label><b className={a.profitFactor !== null && a.profitFactor < 1 ? "bad" : a.profitFactor >= 1.5 ? "ok" : ""}>{ratio(a.profitFactor)}</b><span className="faint" style={{ fontSize: 11 }}>won ÷ lost</span></div>
           <div className="kpi"><label>Expectancy / trade</label><b className={pc(a.expectancy)}>{signed(a.expectancy || 0)}</b></div>

@@ -1,4 +1,4 @@
-import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, previousClose, dayPnl }
+import { dayKey, endOfDay, addDays, snapshotRows, mergeSnapshot, joinDay, reconstructionDays, buildSeries, valueOf, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv }
   from '../src/lib/history.js';
 let fail = 0;
 const eq = (name, got, want) => {
@@ -172,14 +172,12 @@ eq('more trades does not mean more money lost', [many.losses > few.losses, many.
  * on the day, and made of one product paying for another — which the daily row alone
  * cannot show and is the reason the row opens.
  */
-const MIXED_TRADES = [
+const mixed = dayProducts([
   { closeTs: '2026-08-24T12:00:00Z', broker: 'o', product: 'CL', qty: 2, pnl: -5000 },
   { closeTs: '2026-08-24T13:00:00Z', broker: 'o', product: 'CL', qty: 1, pnl: -1200 },
   { closeTs: '2026-08-24T14:00:00Z', broker: 'o', product: 'HO', qty: 3, pnl: 5900 },
   { closeTs: '2026-08-24T15:00:00Z', broker: 'o', product: 'HO', qty: 1, pnl: 0 },
-];
-const led = (ts) => ts.map((t) => ({ ts: t.closeTs, broker: t.broker, product: t.product, pnl: t.pnl }));
-const mixed = dayProducts(MIXED_TRADES, led(MIXED_TRADES)).get('2026-08-24');
+]).get('2026-08-24');
 // CL lost $6,200 and HO made $5,900, so CL is the bigger mover and leads — ordering is by
 // the size of the move, not by its sign and not by the name.
 eq('a day breaks into its products', mixed.map((r) => r.product), ['CL', 'HO']);
@@ -190,30 +188,30 @@ eq('wins and losses are counted per product', mixed.map((r) => [r.wins, r.losses
 eq('and the trade counts add up to the day', mixed.reduce((a, r) => a + r.trades, 0), 4);
 
 // A losing product can be the biggest mover; ordering is by size, not by sign.
-const WORST_TRADES = [
+const worst = dayProducts([
   { closeTs: '2026-08-25T12:00:00Z', broker: 'o', product: 'A', qty: 1, pnl: 100 },
   { closeTs: '2026-08-25T13:00:00Z', broker: 'o', product: 'B', qty: 1, pnl: -9000 },
-]; const worst = dayProducts(WORST_TRADES, led(WORST_TRADES)).get('2026-08-25');
+]).get('2026-08-25');
 eq('the biggest loser leads when it is the biggest move', worst[0].product, 'B');
 
 /*
  * Two accounts, one symbol. Never merged: they are two positions carrying two margins that
  * no broker will net, so one line would name a position the trader does not hold.
  */
-const TWOACC = [
+const twoAccounts = dayProducts([
   { closeTs: '2026-08-26T12:00:00Z', broker: 'mt5-a', product: 'USOIL', qty: 1, pnl: 500 },
   { closeTs: '2026-08-26T13:00:00Z', broker: 'mt5-b', product: 'USOIL', qty: 1, pnl: -200 },
-]; const twoAccounts = dayProducts(TWOACC, led(TWOACC)).get('2026-08-26');
+]).get('2026-08-26');
 eq('the same symbol in two accounts stays two lines', twoAccounts.length, 2);
 eq('each naming its account', twoAccounts.map((r) => r.broker).sort(), ['mt5-a', 'mt5-b']);
 
 // --- nothing to break on ---
-eq('no closed trades, no days', dayProducts([], []).size, 0);
-eq('undefined is the same as none', dayProducts(undefined, undefined).size, 0);
-eq('a trade with no close date belongs to no day', dayProducts([{ product: 'X', qty: 1, pnl: 5 }], []).size, 0);
+eq('no closed trades, no days', dayProducts([]).size, 0);
+eq('undefined is the same as none', dayProducts(undefined).size, 0);
+eq('a trade with no close date belongs to no day', dayProducts([{ product: 'X', qty: 1, pnl: 5 }]).size, 0);
 // A sell stored as a negative quantity is still size, exactly as tradedByDay treats it.
-const NEGQ = [{ closeTs: '2026-08-27T12:00:00Z', broker: 'o', product: 'X', qty: -2, pnl: 5 }];
-eq('a negative quantity still counts as size', dayProducts(NEGQ, led(NEGQ)).get('2026-08-27')[0].lots, 2);
+eq('a negative quantity still counts as size',
+  dayProducts([{ closeTs: '2026-08-27T12:00:00Z', broker: 'o', product: 'X', qty: -2, pnl: 5 }]).get('2026-08-27')[0].lots, 2);
 
 // --- it must agree with the daily row it opens from, on the same trades ---
 const sameTrades = [
@@ -222,7 +220,7 @@ const sameTrades = [
   { closeTs: '2026-08-28T14:00:00Z', broker: 'o', product: 'A', qty: 1, pnl: 0 },
 ];
 const dayRow = winLossByDay(sameTrades)[0];
-const parts = dayProducts(sameTrades, led(sameTrades)).get('2026-08-28');
+const parts = dayProducts(sameTrades).get('2026-08-28');
 eq('the parts net to the whole', parts.reduce((a, r) => a + r.net, 0), dayRow.net);
 eq('the wins agree', parts.reduce((a, r) => a + r.wins, 0), dayRow.wins);
 eq('the losses agree', parts.reduce((a, r) => a + r.losses, 0), dayRow.losses);
@@ -242,20 +240,14 @@ const bookTrades = [
   { closeTs: '2026-08-24T14:00:00Z', broker: 'o', product: 'HO', qty: 1, pnl: 0 },
   { closeTs: '2026-08-25T12:00:00Z', broker: 'm', product: 'CL, spread', qty: 1, pnl: 120.005 },
 ];
-/*
- * A matching ledger. Money now comes from the ledger rather than from the round trips —
- * a partial close on a position still held is money with no finished trade behind it — so
- * these trades are paired with the ledger entries a flat book would have produced for them.
- */
-const bookLedger = bookTrades.map((t) => ({ ts: t.closeTs, broker: t.broker, product: t.product, pnl: t.pnl }));
-const daily = dailyRows(bookTrades, bookLedger);
+const daily = dailyRows(bookTrades);
 eq('one row per trading day', daily.map((r) => r.d), ['2026-08-24', '2026-08-25']);
 eq('trades counts scratches too', daily[0].trades, 3);
 eq('the running total accumulates in date order', daily.map((r) => Math.round(r.run * 100) / 100), [-300, -179.99]);
 eq('and the last running total is the book', Math.round(daily[1].run * 100) / 100,
    Math.round(bookTrades.reduce((a, t) => a + t.pnl, 0) * 100) / 100);
 
-const csv = dailyCsv(bookTrades, bookLedger, (id) => (id === 'o' ? 'Orient' : 'MT5'));
+const csv = dailyCsv(bookTrades, (id) => (id === 'o' ? 'Orient' : 'MT5'));
 const lines = csv.split('\n');
 eq('a header, two days and three product rows', lines.length, 1 + 2 + 3);
 eq('the header names every column', lines[0],
@@ -285,42 +277,6 @@ eq('the product rows net to their day', prodNet, dayNet);
 // Nothing to export is a header and nothing else, not a crash.
 eq('an empty book is just the header', dailyCsv([]).split('\n').length, 1);
 eq('and no rows', dailyRows([]), []);
-
-
-/*
- * --- what "Today" means ---
- *
- * It was today's realized money plus the ENTIRE unrealized P&L of every open position,
- * however old. A position opened last week sitting $3,000 down therefore reported "Daily
- * loss limit hit — stop trading today" on a day nothing was traded, and would go on saying
- * it every morning until the position was closed. That figure drives a risk control.
- *
- * It is now the change in equity since the previous close, less money paid in or out today.
- */
-const HIST = [
-  { d: '2026-09-15', b: 'o', tne: 50000 },
-  { d: '2026-09-16', b: 'o', tne: 52000 },
-  { d: '2026-09-16', b: 'm', tne: 10000 },
-];
-eq('the previous close is the latest day before today', previousClose(HIST, 'o', '2026-09-17'), { d: '2026-09-16', tne: 52000 });
-eq("today's own row is not its own previous close", previousClose(HIST, 'o', '2026-09-16'), { d: '2026-09-15', tne: 50000 });
-eq('an account with no history has none', previousClose(HIST, 'new', '2026-09-17'), null);
-eq('and neither does an empty history', previousClose([], 'o', '2026-09-17'), null);
-eq('nor an undefined one', previousClose(undefined, 'o', '2026-09-17'), null);
-
-const day = (o) => dayPnl({ history: HIST, brokerId: 'o', today: '2026-09-17', realizedToday: 0, ...o });
-// The case that misfired: equity unchanged, an old position still underwater, nothing traded.
-eq('a day where nothing happened is zero', day({ tne: 52000 }).pnl, 0);
-eq('and it says it measured a change', day({ tne: 52000 }).basis, 'change');
-eq('made $1,500 today', day({ tne: 53500 }).pnl, 1500);
-eq('lost $800 today', day({ tne: 51200 }).pnl, -800);
-// A deposit raises equity without making a penny.
-eq('a deposit today is not a profit', day({ tne: 62000, cashToday: 10000 }).pnl, 0);
-eq('a withdrawal today is not a loss', day({ tne: 47000, cashToday: -5000 }).pnl, 0);
-eq('a deposit and a real gain are told apart', day({ tne: 63500, cashToday: 10000 }).pnl, 1500);
-// Nothing to measure against: realized money, and the screen is told to say so.
-eq('with no previous close it falls back to realized', dayPnl({ tne: 52000, realizedToday: 250, history: [], brokerId: 'o', today: '2026-09-17' }), { pnl: 250, basis: 'realized', since: null });
-eq('and never guesses from the open P&L', dayPnl({ tne: 999999, realizedToday: 0, history: [], brokerId: 'o', today: '2026-09-17' }).pnl, 0);
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

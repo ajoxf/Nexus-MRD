@@ -297,49 +297,29 @@ export function tradedByDay(fills, brokerIds = null) {
  * size closed, which is what the round trips below it were worth — not lots traded, which
  * would count both sides.
  */
-export function dayProducts(closed, realized) {
+export function dayProducts(closed) {
   const by = new Map();
-  const at = (d, broker, product) => {
-    const day = by.get(d) || new Map();
-    const key = `${broker || "default"}|${product}`;
-    const row = day.get(key) || {
-      key, broker: broker || "default", product,
-      trades: 0, lots: 0, wins: 0, losses: 0, flat: 0, net: 0, won: 0, lost: 0,
-    };
-    day.set(key, row);
-    by.set(d, day);
-    return row;
-  };
-
-  /*
-   * MONEY FROM THE LEDGER, for the same reason the day above it takes its money there: a
-   * partial close on a position still held is money with no finished trade behind it.
-   *
-   * This was missed when the day row moved and the products under it did not, so opening a
-   * day showed parts that did not add up to it — a day of $2,982.50 breaking into one
-   * product at -$1,000, with the other $3,995 nowhere. A breakdown that does not reconcile
-   * with the thing it breaks down is worse than none.
-   */
-  for (const r of realized || []) {
-    if (!r || !r.ts || !r.product) continue;
-    at(dayKey(r.ts), r.broker, r.product).net += Number(r.pnl) || 0;
-  }
-
-  // Trades, lots, wins and losses are per-trade, so they come from the finished ones.
   for (const t of closed || []) {
     if (!t.closeTs) continue;
-    const row = at(dayKey(t.closeTs), t.broker, t.product);
+    const d = dayKey(t.closeTs);
+    const day = by.get(d) || new Map();
+    const key = `${t.broker || "default"}|${t.product}`;
+    const row = day.get(key) || {
+      key, broker: t.broker || "default", product: t.product,
+      trades: 0, lots: 0, wins: 0, losses: 0, flat: 0, net: 0, won: 0, lost: 0,
+    };
     row.trades += 1;
     row.lots = round4(row.lots + Math.abs(Number(t.qty) || 0));
     if (t.pnl > 0) { row.wins += 1; row.won += t.pnl; }
     else if (t.pnl < 0) { row.losses += 1; row.lost += -t.pnl; }
     else row.flat += 1;
+    row.net += t.pnl;
+    day.set(key, row);
+    by.set(d, day);
   }
-
   const out = new Map();
   for (const [d, day] of by) {
-    const rows = [...day.values()].map((r) => ({ ...r, net: round2(r.net), won: round2(r.won), lost: round2(r.lost) }));
-    out.set(d, rows.sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.product.localeCompare(b.product)));
+    out.set(d, [...day.values()].sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.product.localeCompare(b.product)));
   }
   return out;
 }
@@ -354,29 +334,11 @@ export function dayProducts(closed, realized) {
  * The running total accumulates in DATE order, always, whichever way the table happens to
  * be sorted at the time. It only means anything read forwards.
  */
-export function dailyRows(closed, realized, tradedDays) {
-  const money = moneyByDay(realized);
-  const counts = new Map(winLossByDay(closed).map((r) => [r.d, r]));
-  /*
-   * Every day that has any of the three.
-   *
-   * Money with no finished trade — a partial close on a position still held, or commission
-   * on one just opened. A finished trade with no money of its own, when the P&L was booked
-   * on earlier days. And a day that was TRADED and realized nothing at all, which on a
-   * broker that bills commission separately is what opening a position looks like.
-   *
-   * That last one is why the table appeared to begin a day late: the first day of a book is
-   * usually all opening fills, so it had no money, no finished trade, and no row. A day you
-   * traded on and made nothing is not the same as a day you did not trade, and a table you
-   * are reconciling against a statement has to show the difference.
-   */
-  const days = [...new Set([...money.keys(), ...counts.keys(), ...(tradedDays || [])])].sort();
+export function dailyRows(closed) {
   let run = 0;
-  return days.map((d) => {
-    const c = counts.get(d) || { d, wins: 0, losses: 0, flat: 0, won: 0, lost: 0 };
-    const net = money.has(d) ? money.get(d) : 0;
-    run = round2(run + net);
-    return { ...c, d, net, run, trades: c.wins + c.losses + c.flat };
+  return winLossByDay(closed).map((r) => {
+    run += r.net;
+    return { ...r, run, trades: r.wins + r.losses + r.flat };
   });
 }
 
@@ -396,11 +358,11 @@ const csvCell = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace
  *
  * `nameOf` turns a broker id into the name the trader knows it by.
  */
-export function dailyCsv(closed, realized, nameOf = (id) => id, tradedDays) {
-  const parts = dayProducts(closed, realized);
+export function dailyCsv(closed, nameOf = (id) => id) {
+  const parts = dayProducts(closed);
   const head = ["Date", "Scope", "Broker", "Product", "Trades", "Lots", "Won", "Lost", "Scratched", "P&L", "Running"];
   const out = [head.join(",")];
-  for (const r of dailyRows(closed, realized, tradedDays)) {
+  for (const r of dailyRows(closed)) {
     const on = parts.get(r.d) || [];
     const lots = round4(on.reduce((a, g) => a + g.lots, 0));
     out.push([r.d, "Day", "", "", r.trades, lots, r.wins, r.losses, r.flat, round2(r.net), round2(r.run)].map(csvCell).join(","));
@@ -413,113 +375,3 @@ export function dailyCsv(closed, realized, nameOf = (id) => id, tradedDays) {
 
 /** Money to the cent. Exported figures are read as exact, so they are rounded like money. */
 function round2(v) { return isFinite(v) ? Math.round(v * 100) / 100 : 0; }
-
-/*
- * ---------------------------------------------------------------------------
- * REALIZED MONEY COMES FROM THE LEDGER, NOT FROM ROUND TRIPS
- * ---------------------------------------------------------------------------
- * computeBook keeps two tallies. `realized` has one entry per fill — every P&L booking and
- * every commission, the moment it happens. `closed` has one row per completed round trip.
- *
- * They are not the same money, and the difference is not small. Buy 5, sell 2 at a profit,
- * keep 3: the ledger says $3,995 and there is no closed trade at all, because nothing has
- * finished. Everything that summed `closed` therefore reported $0 for a day that made
- * $3,995 — the Closed tab's total, the Analysis strip, the daily table, the Positions
- * tiles — while the top bar, which sums the ledger, said $3,995. Two answers, both on
- * screen, to "what have I made".
- *
- * A second, quieter error rode along with it. A round trip closed by three fills over three
- * days books its whole P&L on the last of them, so the daily table put money on the wrong
- * day. The ledger books each piece on the day it was actually made.
- *
- * So: money from the ledger, always. Trade statistics — win rate, average win, profit
- * factor, streaks — stay on `closed`, because they are per-trade by nature and a trade that
- * has not finished has no result yet. The two answer different questions and now say so.
- */
-
-/** Realized money per local day, from the ledger. Map of dayKey -> net. */
-export function moneyByDay(realized) {
-  const by = new Map();
-  for (const r of realized || []) {
-    if (!r || !r.ts) continue;
-    const d = dayKey(r.ts);
-    by.set(d, (by.get(d) || 0) + (Number(r.pnl) || 0));
-  }
-  for (const [d, v] of by) by.set(d, round2(v));
-  return by;
-}
-
-/** Realized money per broker|product, from the ledger. Map of "broker|product" -> net. */
-export function moneyByProduct(realized) {
-  const by = new Map();
-  for (const r of realized || []) {
-    if (!r || !r.product) continue;
-    const k = `${r.broker || "default"}|${r.product}`;
-    by.set(k, (by.get(k) || 0) + (Number(r.pnl) || 0));
-  }
-  for (const [k, v] of by) by.set(k, round2(v));
-  return by;
-}
-
-/** Ledger entries narrowed the way the screens narrow them. Dates are local calendar days. */
-export function filterLedger(realized, { broker = "", product = "", from = "", to = "" } = {}) {
-  return (realized || []).filter((r) => {
-    if (!r || !r.ts) return false;
-    if (broker && (r.broker || "default") !== broker) return false;
-    if (product && r.product !== product) return false;
-    if (from || to) {
-      const d = dayKey(r.ts);
-      if (from && d < from) return false;
-      if (to && d > to) return false;
-    }
-    return true;
-  });
-}
-
-/** The money in a set of ledger entries, to the cent. */
-export const ledgerTotal = (entries) => round2((entries || []).reduce((a, r) => a + (Number(r.pnl) || 0), 0));
-
-/*
- * ---------------------------------------------------------------------------
- * WHAT "TODAY" MEANS
- * ---------------------------------------------------------------------------
- * It used to be today's realized money PLUS the entire unrealized P&L of every open
- * position, however old. A position opened last week and sitting $3,000 down therefore
- * reported "Daily loss limit hit — stop trading today" on a day nothing was traded, and
- * would go on reporting it every day until it was closed. A winning open position hid a
- * genuinely bad day the same way. That figure drives a risk control, so it has to be the
- * day's result and nothing else.
- *
- * The day's result is the change in equity since the previous close, less any money paid
- * in or taken out today — a deposit is not a profit. The daily snapshot already records
- * each account's TNE, so the previous close is there to be read.
- *
- * Before there is a previous snapshot — a new account, or the first day — there is nothing
- * to measure the change against, so it falls back to realized money, which is always true
- * even if it is incomplete. Never a guess.
- */
-
-/** The most recent recorded TNE for an account STRICTLY BEFORE `today`. Null if none. */
-export function previousClose(history, brokerId, today) {
-  let best = null;
-  for (const r of history || []) {
-    if (!r || r.b !== brokerId || !r.d || r.d >= today) continue;
-    if (!best || r.d > best.d) best = r;
-  }
-  return best ? { d: best.d, tne: Number(best.tne) || 0 } : null;
-}
-
-/**
- * The day's P&L for one account.
- *
- * `cashToday` is deposits less withdrawals dated today: paying money in raises equity
- * without making a penny, so it comes straight back out.
- *
- * Returns { pnl, basis } — "change" when measured against a previous close, "realized"
- * when there is none to measure against, so the screen can say which it is.
- */
-export function dayPnl({ tne, realizedToday, history, brokerId, today, cashToday = 0 }) {
-  const prev = previousClose(history, brokerId, today);
-  if (!prev) return { pnl: round2(realizedToday || 0), basis: "realized", since: null };
-  return { pnl: round2((Number(tne) || 0) - prev.tne - (Number(cashToday) || 0)), basis: "change", since: prev.d };
-}

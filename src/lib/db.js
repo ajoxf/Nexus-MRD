@@ -112,9 +112,7 @@ const remote = {
      * Only rows that now carry a position ticket, and only when the file has more of them
      * than landed as new fills — i.e. some of them were skipped as duplicates.
      */
-    // Rows that carry something a stored row might be missing or have wrong: a position
-    // ticket, or the knowledge that they are a leg of a spread rather than a trade.
-    const ticketed = owned.filter((r) => r.position || r.is_leg);
+    const ticketed = owned.filter((r) => r.position);
     if (!ticketed.length) return { added, updated: 0 };
 
     let updated = 0;
@@ -301,9 +299,7 @@ const local = {
       if (existing) {
         // Same repair as the database path. Different, not merely missing: a ticket read
         // wrongly by an older import does not look empty, and is exactly what needs fixing.
-        if ((r.position && existing.position !== r.position) || Boolean(r.is_leg) !== Boolean(existing.is_leg)) {
-          Object.assign(existing, r); updated += 1;
-        }
+        if (r.position && existing.position !== r.position) { Object.assign(existing, r); updated += 1; }
         continue;
       }
       const row = { ...r, id: crypto.randomUUID(), created_at: new Date().toISOString() };
