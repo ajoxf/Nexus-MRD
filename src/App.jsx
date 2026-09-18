@@ -161,8 +161,8 @@ async function safeDelete({ fills, brokers, label, what, run, ask }) {
   const n = fills.length;
   const { ok, checked } = await ask({
     title: `Delete ${what}?`,
-    body: `${n} fill${n === 1 ? "" : "s"} will be removed. Positions, closed trades and P&L are worked out from these fills, so they will change.`,
-    detail: "This cannot be undone from inside Nexus. The backup is a CSV you can import again.",
+    body: `${n} fill${n === 1 ? "" : "s"} will be removed, along with the daily equity history and the saved column layout that go with them. Positions, closed trades and P&L are worked out from these fills, so they will change.`,
+    detail: "The history is a record of these fills and would otherwise be yesterday's figures for a book that no longer exists. Capital, margins, products and the funds ledger are kept. This cannot be undone from inside Nexus — the backup is a CSV you can import again.",
     checkbox: { label: "Download a CSV backup first", defaultChecked: true },
     confirmLabel: `Delete ${n} fill${n === 1 ? "" : "s"}`,
     tone: "danger",
@@ -4385,11 +4385,38 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
   const b = brokers.find((x) => x.id === bid);
   const mine = fills.filter((f) => f.broker === bid);
   const done = (t) => setMsg(["ok", t]);
+  /*
+   * Deleting fills takes the daily snapshots and the saved column layout with them.
+   *
+   * THE SNAPSHOTS are a record OF those fills — each day's closing equity. Left behind,
+   * they are yesterday's figures for a book that no longer exists, and "Today" is measured
+   * against them: delete a book whose P&L was doubled, re-upload it correctly, and the
+   * first morning reports a $70,000 loss that never happened and stops you trading. The
+   * Day by day chart rebuilds earlier days from the fills once they are back, so nothing
+   * that can be recovered is lost.
+   *
+   * THE SAVED LAYOUT is the other one. It is how this broker's file was read last time, and
+   * a stale one has now caused two wrong books: it aimed the MT5 ticket column at the
+   * Comment field, and it left the order-ID column unmapped so every spread leg came in as
+   * a product. Somebody deleting their fills to start again means it — the next upload
+   * should be read fresh.
+   */
+  const clearDerived = (brokerId) => setSettings((st) => ({
+    ...st,
+    history: (st.history || []).filter((r) => (brokerId ? r.b !== brokerId : false)),
+    brokers: st.brokers.map((x) => (!brokerId || x.id === brokerId ? { ...x, csv: undefined } : x)),
+  }));
   const delBroker = async () => {
-    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid), ask })) { await reloadFills(); done(`Deleted ${b?.name}'s fills. Its settings are kept, so you can re-upload.`); }
+    if (await safeDelete({ fills: mine, brokers, label: bid, what: `all ${mine.length} ${b?.name} fills`, run: () => db.deleteBrokerFills(bid), ask })) {
+      clearDerived(bid); await reloadFills();
+      done(`Deleted ${b?.name}'s fills, its daily history and its saved column layout. Capital, margins and products are kept, so you can re-upload.`);
+    }
   };
   const delAll = async () => {
-    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills(), ask })) { await reloadFills(); done("Deleted all fills. Broker settings are kept."); }
+    if (await safeDelete({ fills, brokers, label: "all", what: `all ${fills.length} fills across every broker`, run: () => db.deleteAllFills(), ask })) {
+      clearDerived(null); await reloadFills();
+      done("Deleted all fills, the daily history and every saved column layout. Broker accounts, capital, margins and the funds ledger are kept.");
+    }
   };
   const resetSettings = async () => {
     if (fills.length) { setMsg(["bad", "Delete the fills first. Otherwise accounts would be recreated from them with default settings."]); return; }
@@ -4406,7 +4433,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
     <section className="panel reset">
       <div className="ph"><h2>Delete or reset data</h2><span className="faint" style={{ fontSize: 11 }}>For a wrong upload. A backup download is offered first.</span></div>
       <div className="pb fg">
-        <F label="Delete one broker's fills" hint={`${mine.length} fill${mine.length === 1 ? "" : "s"} stored. Settings and funds for this broker are kept.`}>
+        <F label="Delete one broker's fills" hint={`${mine.length} fill${mine.length === 1 ? "" : "s"} stored. Its daily history and saved column layout go too, so the next upload is read fresh. Capital, margins and products are kept.`}>
           <div style={{ display: "flex", gap: 6 }}>
             <select className="in" value={bid} onChange={(e) => { setBid(e.target.value); setMsg(null); }}>{brokers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
             <button className="btn danger" style={{ whiteSpace: "nowrap" }} disabled={!mine.length} onClick={delBroker}>Delete fills</button>
