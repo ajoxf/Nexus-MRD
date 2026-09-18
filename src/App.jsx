@@ -9,7 +9,7 @@ import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js"
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
 import { authErrorCopy } from "./lib/auth-errors.js";
 import { reconstructionDays, buildSeries, snapshotRows, mergeSnapshot, endOfDay, dayKey, METRICS, valueOf, addDays, realizedByDay, winLossByDay, tradedByDay, dayProducts, dailyRows, dailyCsv, moneyByDay, moneyByProduct, filterLedger, ledgerTotal, dayPnl } from "./lib/history.js";
-import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
+import { FIELDS, parseCsvFile, parsePastedText, mappingFor, rowsToFills, suspectLegs, classifyFills, estimateSizes, ORIENT_TEMPLATE_CSV, MT5_TEMPLATE_CSV } from "./lib/csv.js";
 
 // ---------- defaults ----------
 const ORIENT_PRODUCTS = {
@@ -2647,6 +2647,18 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, goFills, goSet
   if (capNow > 0 && lossNow !== null && lossNow <= -capNow) warnings.push(["bad", `Daily loss limit hit (${money(lossNow)}${capScope}). Stop trading today.`]);
   else if (capNow > 0 && lossNow !== null && lossNow <= -0.7 * capNow) warnings.push(["warn", `Today's loss is ${pct(-lossNow / capNow)} of your daily limit.`]);
   if (pf.rows.length >= n(L.maxTrades)) warnings.push(["bad", `Maximum of ${L.maxTrades} open positions reached.`]);
+  /*
+   * The same trade counted twice. A file imported without its Ref column mapped brought the
+   * legs of every spread in as outright products, so both the spread and its two sides are
+   * in the book. Named, not removed: a real outright in the same contract is a position
+   * somebody might actually hold, and deleting it on a guess would be the worse mistake.
+   */
+  const legLike = suspectLegs([...new Set(fills.filter((f) => !f.is_leg).map((f) => f.product))]);
+  if (legLike.length) warnings.push(["warn",
+    `${legLike.map((x) => x.product).join(", ")} ${legLike.length === 1 ? "looks like a leg" : "look like legs"} of ${
+      [...new Set(legLike.flatMap((x) => x.spreads))].join(", ")}, counted as ${legLike.length === 1 ? "a product" : "products"} of ${
+      legLike.length === 1 ? "its" : "their"} own. If so, that trade is in your P&L twice — re-upload the file with its order-ID column mapped and the Import button will repair it. Ignore this if you really do hold ${
+      legLike.length === 1 ? "it" : "them"} outright.`]);
   // Say it on the dashboard too: a scenario that quietly leaves something out
   // is worse than one that admits it.
   const optsOn = [...new Set(scen.flatMap((x) => x.optionsOn.map((o) => o.product)))];
@@ -3475,7 +3487,9 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   }, [fills]);
   const toRepair = parsed
     ? parsed.rows.filter((r) => {
-        if (r.status !== "stored" || !r.position) return false;
+        if (r.status !== "stored") return false;
+        const was = storedByRef.get(`${r.broker || "default"}|${r.ref}`);
+        if (!was) return false;
         /*
          * DIFFERENT, not merely missing.
          *
@@ -3484,7 +3498,14 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
          * the word "CLOSE". Repairing only blank tickets would leave exactly the rows that
          * need it most, because they do not look empty.
          */
-        return storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position !== r.position;
+        if (r.position && was.position !== r.position) return true;
+        /*
+         * And the same for a leg. A file imported without its Ref column mapped brought the
+         * legs of every spread in as outright products, so the book counted each trade
+         * twice. Re-reading it now recognises them, and this carries that recognition onto
+         * the rows already stored — otherwise the fix could never reach a book that has one.
+         */
+        return Boolean(r.is_leg) !== Boolean(was.is_leg);
       })
     : [];
   // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)

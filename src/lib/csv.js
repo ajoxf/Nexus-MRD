@@ -325,6 +325,27 @@ export function parseDate(dateStr, timeStr, dateFormat = "auto") {
 
 // Converts table rows to fills for one account. Returns { fills, errors, ignored, feesArePositiveCosts }.
 // Spread instruments as named by TT/CME and similar platforms
+/*
+ * The root symbol of an instrument: the letters before any month or year.
+ * "CL Oct26" -> CL, "BZ Nov26" -> BZ, "HO Oct26" -> HO.
+ */
+const rootSymbol = (s) => {
+  const first = String(s ?? "").trim().split(/[^A-Za-z0-9]+/).filter(Boolean)
+    .find((t) => /^[A-Za-z]{1,4}$/.test(t) && !/^(the|and|vs)$/i.test(t));
+  return first ? first.toUpperCase() : "";
+};
+
+/**
+ * Could `leg` be a leg of `spread`? True only when the leg's root symbol is named in the
+ * spread. Deliberately strict: calling a real trade a leg hides it from the book entirely.
+ */
+export function legBelongsTo(leg, spread) {
+  const root = rootSymbol(leg);
+  if (!root) return false;
+  const tokens = String(spread ?? "").toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  return tokens.includes(root);
+}
+
 export const isSpreadSymbol = (s) => /( - |inter-?product|crack|calendar|\bspread\b|\bvs\.?\b|\bspr\b)/i.test(String(s));
 
 // spreadMode: "spread" keep spread fills and drop their legs (default), "legs" the reverse, "all" keep both.
@@ -403,8 +424,8 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
   // Spread orders: an order ID holding a spread fill and its leg fills is one trade shown several ways.
   // The side that isn't the trade is kept as a leg (is_leg) rather than thrown away, so the fills that
   // made up a spread can still be looked at. Legs are skipped by every position, margin and P&L sum.
-  let legsSkipped = 0, spreadsSkipped = 0, spreadOrders = 0;
-  if (map.ref && spreadMode !== "all") {
+  let legsSkipped = 0, spreadsSkipped = 0, spreadOrders = 0, legsByTime = 0;
+  if (spreadMode !== "all") {
     const byOrder = {};
     fills.forEach((f) => { if (f._order) (byOrder[f._order] ||= []).push(f); });
     for (const list of Object.values(byOrder)) {
@@ -413,10 +434,40 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
       spreadOrders++;
       (spreadMode === "spread" ? legs : sp).forEach((f) => { f.is_leg = true; });
     }
+
+    /*
+     * WITHOUT AN ORDER ID, fall back to the timestamp.
+     *
+     * Leg detection used to require the Ref column. With it unmapped — a saved layout that
+     * predates it, or an export without one — every leg was imported as an outright product
+     * and counted alongside the spread it belonged to. On the sample file that reports six
+     * products where there are two, three open positions where there is one, and exactly
+     * DOUBLE the realized P&L.
+     *
+     * A spread and its legs fill at the same instant, to the millisecond, which the parser
+     * keeps. But a timestamp alone would be reckless: wrongly calling a real trade a leg
+     * SUPPRESSES it, which is the same error pointing the other way. So all three must hold:
+     * the same account and the very same millisecond, a spread and an outright in the group,
+     * and the outright's root symbol named in the spread. "CL Oct26" is a leg of
+     * "CL Oct26 - BZ Oct26 Inter-Product" and of "Oct26 HO-CL Crack"; "GC Dec26" is a leg of
+     * neither, however exactly it happens to coincide.
+     */
+    const byMoment = {};
+    fills.forEach((f) => { if (!f.is_leg) (byMoment[`${f.broker}|${f.ts}`] ||= []).push(f); });
+    for (const list of Object.values(byMoment)) {
+      if (list.length < 2) continue;
+      const sp = list.filter((f) => isSpreadSymbol(f.product)), outs = list.filter((f) => !isSpreadSymbol(f.product));
+      if (!sp.length || !outs.length) continue;
+      const claimed = outs.filter((f) => sp.some((x) => legBelongsTo(f.product, x.product)));
+      if (!claimed.length) continue;
+      spreadOrders++;
+      (spreadMode === "spread" ? claimed : sp).forEach((f) => { f.is_leg = true; legsByTime++; });
+    }
+
     fills.forEach((f) => { if (f.is_leg) { if (isSpreadSymbol(f.product)) spreadsSkipped++; else legsSkipped++; } });
   }
   fills.forEach((f) => delete f._order);
-  return { fills, errors, ignored, nonTrade: ignored, feesArePositiveCosts: positiveCosts, offsetMs, legsSkipped, spreadsSkipped, spreadOrders, cash };
+  return { fills, errors, ignored, nonTrade: ignored, feesArePositiveCosts: positiveCosts, offsetMs, legsSkipped, spreadsSkipped, spreadOrders, legsByTime, cash };
 }
 
 // Orient fills export (TT): what you get from the Fills grid with right-click → Select All → save
@@ -612,4 +663,28 @@ export function mappingFor(headers, savedMap, mt5 = 0) {
   const map = usedSaved ? { ...savedMap } : guessMapping(cols);
   if (mt5 > 0 && cols.includes("Position")) map.position = "Position";
   return { map, usedSaved };
+}
+
+/*
+ * Products in the book that look like legs of a spread already in it.
+ *
+ * A file imported without its Ref column mapped brings every leg in as an outright, so the
+ * same trade is counted twice: once as the spread and once as its two sides. The book then
+ * shows "CL Oct26" and "BZ Oct26" sitting beside "CL Oct26 - BZ Oct26 Inter-Product", and
+ * nothing says they are the same money.
+ *
+ * Reported, never acted on. A trader may genuinely hold an outright in the same contract a
+ * spread is built from, and silently removing it would be the worse bug — so this only
+ * names what it has spotted and leaves the decision where it belongs.
+ */
+export function suspectLegs(products) {
+  const list = [...new Set((products || []).filter(Boolean))];
+  const spreads = list.filter(isSpreadSymbol);
+  const outrights = list.filter((p) => !isSpreadSymbol(p));
+  const found = [];
+  for (const o of outrights) {
+    const owners = spreads.filter((sp) => legBelongsTo(o, sp));
+    if (owners.length) found.push({ product: o, spreads: owners });
+  }
+  return found;
 }
