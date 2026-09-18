@@ -1,3 +1,4 @@
+import { defaultSize } from "./contracts.js";
 // Scenario analysis for one broker account.
 // Every position is moved AGAINST its direction by that product's scenario move (% of price or price points).
 // Margin: fixed-per-lot brokers keep the same margin; leverage brokers (MT5) recalculate margin at the stressed price.
@@ -13,9 +14,9 @@ const round2 = (x) => (isFinite(x) ? +(+x).toFixed(2) : 0);
 export const moveDist = (m, mv) => (mv.unit === "%" ? Math.abs(m) * num(mv.v) / 100 : num(mv.v));
 
 // Margin per lot at a given price
-export const imPerLot = (broker, spec, price) =>
+export const imPerLot = (broker, spec, price, product) =>
   broker.method === "leverage"
-    ? (Math.abs(price) * (num(spec.size) || 1000)) / (num(spec.lev) || num(broker.leverage) || 1)
+    ? (Math.abs(price) * (num(spec.size) || defaultSize(product))) / (num(spec.lev) || num(broker.leverage) || 1)
     : num(spec.margin);
 
 /**
@@ -25,7 +26,7 @@ export const imPerLot = (broker, spec, price) =>
  */
 export function runScenario(broker, acc, products, target, scale = 1) {
   const lines = products.map((p) => {
-    const size = num(p.spec.size) || 1000;
+    const size = num(p.spec.size) || defaultSize(p.product);
     const mv = { ...p.move, v: num(p.move.v) * scale };
     const needsPrice = mv.unit === "%" || broker.method === "leverage";
     // A held position sets the direction. Flat, the trader can name the side they are
@@ -105,7 +106,7 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const stressedIfLong = both ? ref - dist : null;
     const stressedIfShort = both ? ref + dist : null;
     const loss = effPos ? Math.abs(effPos) * size * dist : 0;
-    const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? ref ?? 0) : 0;
+    const im = effPos ? Math.abs(effPos) * imPerLot(broker, p.spec, stressed ?? ref ?? 0, p.product) : 0;
     // `adding` is carried so the screen can say "adding 2 -> Long 3" rather than just "Long 3",
     // which on its own reads like a position the trader already has.
     return { ...p, size, mv, dist, stressed, stressedIfLong, stressedIfShort, dir, effPos, adding, planned,
@@ -142,7 +143,7 @@ export function runScenario(broker, acc, products, target, scale = 1) {
     const L1 = l.size * l.dist;
     const side = (d) => {
       const sp = l.hasPrice ? l.mark - d * l.dist : 0;
-      const I1 = imPerLot(broker, l.spec, sp);
+      const I1 = imPerLot(broker, l.spec, sp, l.product);
       const denom = L1 + target * I1;
       if (denom <= 0) return Infinity;
       return head / denom; // may be negative: account fails the scenario even without this product
