@@ -217,6 +217,8 @@ tr.clickable:hover td { background: var(--accent-soft) !important; }
 .lotsrow td { background: var(--hover) !important; padding: 8px 12px 12px 28px; }
 .lots table { width: auto; min-width: 60%; background: #fff; border: 1px solid var(--line); border-radius: 3px; }
 .lots th { position: static; }
+/* Under a Can buy / Can sell figure: the position that order would leave you holding. */
+.lands { display: block; font-size: 10px; font-weight: 400; color: var(--faint); margin-top: 1px; white-space: nowrap; }
 
 /* Flattening an open position: the control bar above the book table, and its tick column. */
 .flatbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; font-size: 12px; border-bottom: 1px solid var(--line); background: var(--panel2); }
