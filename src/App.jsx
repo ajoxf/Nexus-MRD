@@ -3025,6 +3025,20 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
   const cap = (l, x) => (x === null ? (l.reason === "margin" ? "Set margin" : "Set price")
     : !isFinite(x) ? "No limit" : x <= 0 ? "0" : qty(x));
   /*
+   * Where the order leaves you.
+   *
+   * Capacity is an ORDER SIZE, counted from the position you already hold, so on a long 5 the
+   * sell figure spends its first 5 lots unwinding and only then builds a short: "Can sell 12"
+   * is an order for 12 that leaves you short 7, not short 12. Read as a position it overstates
+   * the trade by twice what you hold, which is the one way this column can be misread, so the
+   * row says the answer rather than leaving it to be worked out.
+   */
+  const landsOn = (l, x, dir) => {
+    if (x === null || !isFinite(x) || x <= 0) return null;
+    const net = +(l.effPos + dir * x).toFixed(2);
+    return net > 0 ? `Long ${qty(net)}` : net < 0 ? `Short ${qty(-net)}` : "Flat";
+  };
+  /*
    * Which products are a leg of a spread.
    *
    * The row's own Scenario P&L stays as it is — it is the right number for margin, which is
@@ -3259,8 +3273,12 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
                         </td>
                         <td className={l.loss ? "bad" : "faint"}>{l.effPos ? money(-l.loss) : "—"}</td>
                         <td>{l.effPos ? money(l.im) : <span className="faint">—</span>}</td>
-                        <td className={`${l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}${!l.pos && l.dir < 0 ? " faded" : ""}`}><b>{cap(l, l.canBuy)}</b></td>
-                        <td className={`${l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}${!l.pos && l.dir > 0 ? " faded" : ""}`}><b>{cap(l, l.canSell)}</b></td>
+                        <td className={`${l.canBuy === null ? "warn" : l.canBuy <= 0 ? "bad" : "ok"}${!l.pos && l.dir < 0 ? " faded" : ""}`}>
+                          <b>{cap(l, l.canBuy)}</b>{landsOn(l, l.canBuy, 1) && <span className="lands">{landsOn(l, l.canBuy, 1)}</span>}
+                        </td>
+                        <td className={`${l.canSell === null ? "warn" : l.canSell <= 0 ? "bad" : "ok"}${!l.pos && l.dir > 0 ? " faded" : ""}`}>
+                          <b>{cap(l, l.canSell)}</b>{landsOn(l, l.canSell, -1) && <span className="lands">{landsOn(l, l.canSell, -1)}</span>}
+                        </td>
                         <td className="txt"><span className={`pill ${status[0]}`}><span className={status[0]}>{status[1]}</span></span></td>
                       </tr>
                     );
@@ -3330,7 +3348,7 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
         );
       })}
       <p className="faint" style={{ fontSize: 11, margin: "10px 2px" }}>
-        Can buy / Can sell = the most lots you can trade in that product, on top of what you hold, so that after every position moves against you by its scenario move the account stays above the chosen level.
+        Can buy / Can sell = the most lots you can trade in that product, on top of what you hold, so that after every position moves against you by its scenario move the account stays above the chosen level. It is an order size, not a position: selling out of a long spends its first lots unwinding, so the line underneath says which position the order would leave you holding.
         Selling a long (or buying back a short) reduces risk first. Leverage accounts recalculate margin at the stressed price.
       </p>
     </>
