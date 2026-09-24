@@ -138,6 +138,17 @@ const basis = (b) => (b.method === "leverage" ? `Leverage 1:${n(b.leverage)}` : 
 
 // How closing fills are matched: explicit setting, else FIFO for futures brokers, average for leverage (MT5) accounts.
 const matchOf = (b) => b?.match || (b?.method === "leverage" ? "average" : "fifo");
+const MATCH_LABEL = { fifo: "FIFO", lifo: "LIFO", average: "average price" };
+const matchLabel = (b) => MATCH_LABEL[matchOf(b)] || matchOf(b);
+/*
+ * LIFO moves money between realized and unrealized; it cannot move the two added together, so
+ * net equity is the same under FIFO and LIFO — as long as realized P&L is being counted into
+ * equity. With "Add realized P&L to equity" switched off, equity is capital plus unrealized,
+ * and unrealized is precisely the half that moves. The trader is told where it applies rather
+ * than being stopped: the combination is legitimate, it just must not be a surprise.
+ */
+const lifoEquityWarning = (b, acc, includeRealized) =>
+  matchOf(b) === "lifo" && !includeRealized && !acc?.fund?.fromLedger;
 
 // Downloads every fill as CSV (used as a backup before deleting anything).
 /** Hand the browser a file. One place, so every export behaves the same way. */
@@ -3579,7 +3590,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
           </div>
         </div>
         <div className="pb fg">
-          <F label="Broker these fills belong to" hint={tb ? `${basis(tb)} · ${matchOf(tb) === "fifo" ? "FIFO" : "average price"}${tb.csv?.map ? " · saved column layout" : ""}` : null}>
+          <F label="Broker these fills belong to" hint={tb ? `${basis(tb)} · ${matchLabel(tb)}${tb.csv?.map ? " · saved column layout" : ""}` : null}>
             <select className="in" value={target} onChange={(e) => { setTarget(e.target.value); if (csv) applyLayout(csv.headers, e.target.value, csv.mt5); }}>
               {brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
@@ -4026,7 +4037,7 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
       {isRemote && <CloseAccountPanel fills={fills} brokers={settings.brokers} />}
 
       {settings.brokers.map((b) => (
-        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
+        <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} includeRealized={!!settings.limits.includeRealized} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
           setSettings={setSettings} />
       ))}
 
@@ -4092,6 +4103,13 @@ function LimitsPanel({ settings, setSettings, pf, addBroker }) {
             hint={pf.dailyCap === null ? "Applied per account — your accounts are in different currencies" : (dirty ? "Saved figure: " + money(pf.dailyCap) : money(pf.dailyCap))}>{lnum("dailyLossPct", { step: 0.1 })}</F>
         </div>
         <div className="sep" />
+        {!d.includeRealized && settings.brokers.some((b) => matchOf(b) === "lifo" && !pf.acct(b.id)?.fund?.fromLedger) && (
+          <small className="warn" style={{ display: "block", marginBottom: 6 }}>
+            {settings.brokers.filter((b) => matchOf(b) === "lifo" && !pf.acct(b.id)?.fund?.fromLedger).map((b) => b.name).join(", ")}
+            {" "}match closing trades LIFO. While this is unticked, that account's equity is capital plus open P&amp;L only —
+            and open P&amp;L is the half that moves when the matching method changes.
+          </small>
+        )}
         <label className="check">
           <input type="checkbox" checked={!!d.includeRealized} onChange={(e) => set("includeRealized", e.target.checked)} />
           {/* The total is only meaningful while every account is in the same money; with
@@ -4107,7 +4125,7 @@ function LimitsPanel({ settings, setSettings, pf, addBroker }) {
   );
 }
 
-function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
+function BrokerCard({ b, acc, used, inUse, setSettings, minRatio, includeRealized }) {
   const ask = useConfirm();
   const [newP, setNewP] = useState("");
   const [d, setD, dirty, discard] = useDraft(b);
@@ -4193,8 +4211,15 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio }) {
           <F label="Closing trades are matched" hint={d.match ? null : "Default for this margin method"}>
             <select className="in" value={matchOf(d)} onChange={set("match")}>
               <option value="fifo">FIFO: oldest lots first (e.g. Orient)</option>
+              <option value="lifo">LIFO: newest lots first</option>
               <option value="average">Average price (e.g. MT5 netting)</option>
             </select>
+            {lifoEquityWarning(d, acc, includeRealized) && (
+              <small className="warn">
+                Realized P&amp;L is not being added to this account's equity, so switching between FIFO and
+                LIFO will move the equity figure. Tick "Add realized P&amp;L to equity" under Limits to keep it steady.
+              </small>
+            )}
           </F>
           <F label={`Commission per lot (${symbolFor(d.currency).trim()})`} hint="Per side. Only used where the fill carries no commission of its own.">
             <input className="in" type="number" step="0.01" placeholder="0" value={d.commission ?? ""} onChange={set("commission")} />
