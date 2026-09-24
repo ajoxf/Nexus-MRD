@@ -3,7 +3,14 @@ import { defaultSize } from "./contracts.js";
 //
 // Matching, per broker account:
 //   "fifo"    – closing fills square off the OLDEST open lots first (futures brokers, e.g. Orient).
+//   "lifo"    – closing fills square off the NEWEST open lots first.
 //   "average" – closing fills book P&L against the average entry price (MT5 netting accounts).
+//
+// FIFO and LIFO differ only in WHICH open lot a closing fill is paired with. That moves money
+// between realized and unrealized, and between one closed trade and another, but it can never
+// move the two added together: the same fills are bought and sold at the same prices either
+// way. Net equity is therefore identical under both — see scripts/matching-check.mjs, which
+// proves it over random books rather than asserting it here.
 //   Position tickets – if a closing fill names an open position ticket (MT5 hedging), it closes that
 //   ticket at that ticket's price, whatever the method; each closed ticket is its own closed position.
 // Going through zero closes the position; any remainder opens a new one at the fill price.
@@ -69,7 +76,11 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
   for (const f of sorted) {
     const broker = f.broker || "default";
     const size = +sizeFn(broker, f.product) || defaultSize(f.product);
-    const fifo = methodOf(broker) === "fifo";
+    const method = methodOf(broker);
+    // FIFO and LIFO both match lot by lot and differ only in which end of the queue they take
+    // from; "average" keeps no lot identity at all and books against the running average.
+    const lotted = method === "fifo" || method === "lifo";
+    const newestFirst = method === "lifo";
     const price = +f.price;
     const q = f.side === "Buy" ? +f.qty : -f.qty;
     const fee = +f.fee || 0;
@@ -122,7 +133,7 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
       st.lots.push(newLot(f, q, price, fee));
       note(c.openOrders, f.order_id);
       st.pos = r9(st.pos + q);
-      st.avg = fifo || f.position ? lotsAvg(st.lots, price) : (Math.abs(st.pos - q) * st.avg + Math.abs(q) * price) / Math.abs(st.pos);
+      st.avg = lotted || f.position ? lotsAvg(st.lots, price) : (Math.abs(st.pos - q) * st.avg + Math.abs(q) * price) / Math.abs(st.pos);
       c.entryQty += Math.abs(q); c.entryVal += Math.abs(q) * price;
       c.maxQty = Math.max(c.maxQty, Math.abs(st.pos));
       continue;
@@ -133,30 +144,33 @@ export function computeBook(fills, sizeOf = {}, methodOf = () => "average") {
     const d = Math.sign(st.pos);
     let pnl = 0, left = closeQty;
     let feeLeft = fee;
-    for (const l of st.lots) {                       // lots are oldest-first: this is FIFO
+    // st.lots is held oldest-first. FIFO walks it as it stands; LIFO walks a reversed copy,
+    // which is the same lot objects in the other order, so the mutations below still land on
+    // the real lots.
+    for (const l of (newestFirst ? [...st.lots].reverse() : st.lots)) {
       if (left <= EPS) break;
       const take = Math.min(left, Math.abs(l.q));
-      if (fifo) {
+      if (lotted) {
         const lp = d * (price - l.price) * take * size;
         pnl += lp;
         l.pnl += lp + feeLeft; l.fees += feeLeft; feeLeft = 0; l.exitQty += take; l.exitVal += take * price; l.fills++;
         note(l.closeOrders, f.order_id);
       }
       l.q = r9(l.q - d * take); left = r9(left - take);
-      if (fifo && l.q === 0) {
-        // FIFO: each squared-off lot is its own closed trade (entry lot vs the fills that closed it)
+      if (lotted && l.q === 0) {
+        // Lot matched: each squared-off lot is its own closed trade (entry lot vs the fills that closed it)
         closed.push({ broker, product: f.product, side: d > 0 ? "Long" : "Short", openTs: l.ts, closeTs: f.ts, qty: l.q0, maxQty: l.q0,
-          avgEntry: l.price, avgExit: l.exitVal / l.exitQty, pnl: l.pnl, fees: l.fees, fills: l.fills, matched: "fifo",
+          avgEntry: l.price, avgExit: l.exitVal / l.exitQty, pnl: l.pnl, fees: l.fees, fills: l.fills, matched: method,
           openOrders: l.openOrders, closeOrders: l.closeOrders });
       }
     }
-    if (fifo) c.ticketed = true; // closed trades already recorded per lot
-    if (!fifo) pnl = d * (price - st.avg) * closeQty * size;
+    if (lotted) c.ticketed = true; // closed trades already recorded per lot
+    if (!lotted) pnl = d * (price - st.avg) * closeQty * size;
     st.lots = st.lots.filter((l) => l.q !== 0);
     realized.push({ ts: f.ts, broker, product: f.product, pnl });
     c.pnl += pnl; c.exitQty += closeQty; c.exitVal += closeQty * price;
     st.pos = r9(st.pos - d * closeQty);
-    if (fifo) st.avg = lotsAvg(st.lots, st.avg);
+    if (lotted) st.avg = lotsAvg(st.lots, st.avg);
     if (st.pos === 0) {
       closeCycle(st, f.ts);
       const remaining = r9(Math.abs(q) - closeQty);
