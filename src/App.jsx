@@ -5,6 +5,7 @@ import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
+import { expiryState, formatExpiry, expiringRows } from "./lib/expiry.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
@@ -2621,7 +2622,28 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
   const tName = { min: `your ${L.minRatio}% minimum`, call: "the margin call level", stop: "the stop-out level" }[settings.scenario.target];
 
 
+  /*
+   * Expiry. Worked out once, here, so the column, the warning and the tooltip are the same
+   * reading — a row that says "in 3 days" and a warning that says 4 would be worse than neither.
+   * ROLL_WINDOW is how far ahead a roll stops being a note and becomes a decision.
+   */
+  const ROLL_WINDOW = 7;
+  rows.forEach((r) => { r.expiry = expiryState(r.spec?.expiry, new Date(), ROLL_WINDOW); });
+  const anyExpiry = rows.some((r) => r.expiry);
+
   const warnings = [];
+  /*
+   * Said before the margin warnings, because an expiry is a deadline rather than a level: it
+   * does not improve if the market comes back. A contract already past its last trading day is
+   * red — the position cannot still be live at the broker, so the book and the account disagree.
+   */
+  for (const { row: r, state } of expiringRows(rows, new Date(), ROLL_WINDOW)) {
+    const who = all ? `${r.brokerName}: ` : "";
+    const size = `${r.side.toLowerCase()} ${qty(r.lots)}`;
+    warnings.push(state.expired
+      ? ["bad", `${who}${r.product} stopped trading ${state.label} (${formatExpiry(r.spec.expiry)}) and you are still showing ${size}. Roll it, or square it off on the Book panel.`]
+      : ["warn", `${who}${r.product} stops trading ${state.label} (${formatExpiry(r.spec.expiry)}) — ${size} to roll or exit.`]);
+  }
   for (const a of accts) {
     if (!isFinite(a.ratio)) continue;
     const nm = all ? `${a.name}: ` : "";
@@ -2700,7 +2722,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
           ) : (
             <div className="tw">
               <table>
-                <thead><tr>{all && <th className="txt">Broker</th>}<th className="txt">Product</th><th>Side</th><th>Lots</th><th>Avg price</th><th>Current</th><th>Stop</th><th>Open P&L</th><th>Init. margin</th><th>Risk to stop</th><th>Opened</th></tr></thead>
+                <thead><tr>{all && <th className="txt">Broker</th>}<th className="txt">Product</th><th>Side</th><th>Lots</th><th>Avg price</th><th>Current</th><th>Stop</th><th>Open P&L</th><th>Init. margin</th><th>Risk to stop</th><th>Opened</th>{anyExpiry && <th>Expires</th>}</tr></thead>
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.key}>
@@ -2721,11 +2743,18 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                       <td className={r.noMargin ? "warn" : ""} title={r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
                       <td className={!r.hasStop || r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity) ? "bad" : ""}>{r.hasStop ? money(r.risk) : "—"}</td>
                       <td className="dim">{dt(r.openTs)}</td>
+                      {anyExpiry && (
+                        <td className={r.expiry ? r.expiry.level : "faint"} title={r.spec?.expiry ? `Last trading day ${formatExpiry(r.spec.expiry)}` : "No last trading day recorded — set it on the broker's product list"}>
+                          {r.expiry
+                            ? <>{formatExpiry(r.spec.expiry)}<span className="lands">{r.expiry.expired ? `expired ${r.expiry.label}` : r.expiry.label}</span></>
+                            : "—"}
+                        </td>
+                      )}
                     </tr>
                   ))}
                   <tr className="total">
                     <td className="txt" colSpan={all ? 2 : 1}>Total</td><td colSpan={5}></td>
-                    <td className={pc(sum(rows, (r) => r.upnl))}>{signed(sum(rows, (r) => r.upnl))}</td><td>{money(sum(rows, (r) => r.im))}</td><td>{money(sum(rows, (r) => r.risk || 0))}</td><td></td>
+                    <td className={pc(sum(rows, (r) => r.upnl))}>{signed(sum(rows, (r) => r.upnl))}</td><td>{money(sum(rows, (r) => r.im))}</td><td>{money(sum(rows, (r) => r.risk || 0))}</td><td></td>{anyExpiry && <td></td>}
                   </tr>
                 </tbody>
               </table>
@@ -4233,7 +4262,7 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio, includeRealize
       </div>
       <div className="tw">
         <table>
-          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : `Margin / lot (${symbolFor(d.currency).trim()})`}</th><th>Commission / lot</th><th></th></tr></thead>
+          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : `Margin / lot (${symbolFor(d.currency).trim()})`}</th><th>Commission / lot</th><th>Expires</th><th></th></tr></thead>
           <tbody>
             {Object.keys(d.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
             {Object.entries(d.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, sp]) => (
@@ -4246,6 +4275,9 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio, includeRealize
                 <td><input className="cell" type="number" step="0.01" placeholder={n(d.commission) ? money(n(d.commission), d.currency) : "0"}
                   value={sp.comm ?? ""} onChange={(e) => setP(p, "comm", e.target.value)}
                   aria-label={`${p} commission per lot`} title="Overrides the account rate. A spread billed per leg costs twice the leg rate." /></td>
+                <td><input className="cell" style={{ width: 132 }} type="date" value={sp.expiry ?? ""}
+                  onChange={(e) => setP(p, "expiry", e.target.value)} aria-label={`${p} last trading day`}
+                  title="Last trading day. Typed in, never worked out from an exchange calendar." /></td>
                 <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => dropProduct(p)}>✕</button>}</td>
               </tr>
             ))}
