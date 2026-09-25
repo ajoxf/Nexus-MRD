@@ -59,13 +59,34 @@ export function formatExpiry(value) {
 }
 
 /*
+ * A spread has two legs and two last trading days.
+ *
+ * CL Nov26-Jan27 stops being a spread when the Nov leg stops trading, whatever January is
+ * doing; the HO-CL crack goes when whichever of heating oil or crude gets there first. So the
+ * deadline that matters is the EARLIER of the two, and it is taken as the earlier of whatever
+ * dates are present rather than trusting which box they were typed into — a trader filling in
+ * a crack has no reason to know which leg the app considers "first".
+ *
+ * One date is an outright. Two is a spread. Neither is a contract nobody has dated yet.
+ */
+export function contractExpiry(spec) {
+  const dates = [spec?.expiry, spec?.expiry2].filter((v) => parseExpiry(v));
+  if (!dates.length) return null;
+  const sorted = [...dates].sort();      // ISO dates sort correctly as text
+  return { near: sorted[0], far: sorted.length > 1 ? sorted[sorted.length - 1] : null, both: sorted };
+}
+
+/*
  * The open positions whose contract is at or past its roll window, nearest first — what the
  * dashboard turns into a warning. A position with no expiry recorded is not "safe", it is
  * unknown, so it is left out rather than reported as fine.
  */
 export function expiringRows(rows, now = new Date(), soonDays = 7) {
   return rows
-    .map((r) => ({ row: r, state: expiryState(r.spec?.expiry, now, soonDays) }))
+    .map((r) => {
+      const c = contractExpiry(r.spec);
+      return { row: r, contract: c, state: c && expiryState(c.near, now, soonDays) };
+    })
     .filter((x) => x.state && x.state.due)
     .sort((a, b) => a.state.days - b.state.days);
 }

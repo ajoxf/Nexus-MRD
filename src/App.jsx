@@ -5,7 +5,7 @@ import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
-import { expiryState, formatExpiry, expiringRows } from "./lib/expiry.js";
+import { expiryState, formatExpiry, expiringRows, contractExpiry } from "./lib/expiry.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
@@ -2628,7 +2628,10 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
    * ROLL_WINDOW is how far ahead a roll stops being a note and becomes a decision.
    */
   const ROLL_WINDOW = 7;
-  rows.forEach((r) => { r.expiry = expiryState(r.spec?.expiry, new Date(), ROLL_WINDOW); });
+  rows.forEach((r) => {
+    r.contract = contractExpiry(r.spec);
+    r.expiry = r.contract && expiryState(r.contract.near, new Date(), ROLL_WINDOW);
+  });
   const anyExpiry = rows.some((r) => r.expiry);
 
   const warnings = [];
@@ -2637,12 +2640,14 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
    * does not improve if the market comes back. A contract already past its last trading day is
    * red — the position cannot still be live at the broker, so the book and the account disagree.
    */
-  for (const { row: r, state } of expiringRows(rows, new Date(), ROLL_WINDOW)) {
+  for (const { row: r, contract, state } of expiringRows(rows, new Date(), ROLL_WINDOW)) {
     const who = all ? `${r.brokerName}: ` : "";
     const size = `${r.side.toLowerCase()} ${qty(r.lots)}`;
+    // On a spread it is the nearer leg that ends it, so that is the date quoted.
+    const when = `${formatExpiry(contract.near)}${contract.far ? ", the nearer leg" : ""}`;
     warnings.push(state.expired
-      ? ["bad", `${who}${r.product} stopped trading ${state.label} (${formatExpiry(r.spec.expiry)}) and you are still showing ${size}. Roll it, or square it off on the Book panel.`]
-      : ["warn", `${who}${r.product} stops trading ${state.label} (${formatExpiry(r.spec.expiry)}) — ${size} to roll or exit.`]);
+      ? ["bad", `${who}${r.product} stopped trading ${state.label} (${when}) and you are still showing ${size}. Roll it, or square it off on the Book panel.`]
+      : ["warn", `${who}${r.product} stops trading ${state.label} (${when}) — ${size} to roll or exit.`]);
   }
   for (const a of accts) {
     if (!isFinite(a.ratio)) continue;
@@ -2744,9 +2749,20 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                       <td className={!r.hasStop || r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity) ? "bad" : ""}>{r.hasStop ? money(r.risk) : "—"}</td>
                       <td className="dim">{dt(r.openTs)}</td>
                       {anyExpiry && (
-                        <td className={r.expiry ? r.expiry.level : "faint"} title={r.spec?.expiry ? `Last trading day ${formatExpiry(r.spec.expiry)}` : "No last trading day recorded — set it on the broker's product list"}>
+                        <td className={r.expiry ? r.expiry.level : "faint"}
+                          title={r.contract
+                            ? (r.contract.far
+                                ? `Legs stop trading ${formatExpiry(r.contract.near)} and ${formatExpiry(r.contract.far)} — the earlier one is the deadline`
+                                : `Last trading day ${formatExpiry(r.contract.near)}`)
+                            : "No last trading day recorded — set it on the broker's product list"}>
                           {r.expiry
-                            ? <>{formatExpiry(r.spec.expiry)}<span className="lands">{r.expiry.expired ? `expired ${r.expiry.label}` : r.expiry.label}</span></>
+                            ? <>
+                                {formatExpiry(r.contract.near)}
+                                <span className="lands">
+                                  {r.expiry.expired ? `expired ${r.expiry.label}` : r.expiry.label}
+                                  {r.contract.far && <> · then {formatExpiry(r.contract.far)}</>}
+                                </span>
+                              </>
                             : "—"}
                         </td>
                       )}
@@ -4055,22 +4071,35 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
     setSettings((s) => ({ ...s, brokers: [...s.brokers, { ...NEW_BROKER, id, name: `Broker ${s.brokers.length + 1}` }] }));
   };
   return (
+    /*
+     * Two bands, not one grid.
+     *
+     * Everything used to be a sibling in one auto-fit grid, so a broker card - tall, and
+     * carrying a table six columns wide - was squeezed into a 320px track and set the row
+     * height for every short panel beside it. That is where the white space came from, and
+     * why the product table was clipped.
+     *
+     * So: the short configuration panels flow in columns that pack by height, and the broker
+     * cards get the full width they need underneath.
+     */
     <div className="grid-settings">
-      <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} />
+      <div className="setcards">
+        <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} />
 
-      <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
+        <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
 
-      {/* Only where there is an account to close. In browser-storage mode there is no
-          server, no subscription and nobody to ask — "delete all fills" above is already
-          the whole of it. */}
-      {isRemote && <CloseAccountPanel fills={fills} brokers={settings.brokers} />}
+        {/* Only where there is an account to close. In browser-storage mode there is no
+            server, no subscription and nobody to ask — "delete all fills" above is already
+            the whole of it. */}
+        {isRemote && <CloseAccountPanel fills={fills} brokers={settings.brokers} />}
+
+        <BuildStamp />
+      </div>
 
       {settings.brokers.map((b) => (
         <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} includeRealized={!!settings.limits.includeRealized} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
           setSettings={setSettings} />
       ))}
-
-      <BuildStamp />
     </div>
   );
 }
@@ -4262,7 +4291,7 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio, includeRealize
       </div>
       <div className="tw">
         <table>
-          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : `Margin / lot (${symbolFor(d.currency).trim()})`}</th><th>Commission / lot</th><th>Expires</th><th></th></tr></thead>
+          <thead><tr><th className="txt">Product</th><th>Contract size</th><th>{lev ? "Leverage override" : `Margin / lot (${symbolFor(d.currency).trim()})`}</th><th>Commission / lot</th><th title="A spread stops trading when its nearer leg does, so both legs get a date.">Expires<br /><span className="faint" style={{ fontWeight: 400 }}>2nd leg for spreads</span></th><th></th></tr></thead>
           <tbody>
             {Object.keys(d.products || {}).length === 0 && <tr><td colSpan={5} className="txt faint">No products yet. They're added automatically when you upload fills, or add one below.</td></tr>}
             {Object.entries(d.products || {}).sort(([x], [y]) => x.localeCompare(y)).map(([p, sp]) => (
@@ -4275,9 +4304,16 @@ function BrokerCard({ b, acc, used, inUse, setSettings, minRatio, includeRealize
                 <td><input className="cell" type="number" step="0.01" placeholder={n(d.commission) ? money(n(d.commission), d.currency) : "0"}
                   value={sp.comm ?? ""} onChange={(e) => setP(p, "comm", e.target.value)}
                   aria-label={`${p} commission per lot`} title="Overrides the account rate. A spread billed per leg costs twice the leg rate." /></td>
-                <td><input className="cell" style={{ width: 132 }} type="date" value={sp.expiry ?? ""}
-                  onChange={(e) => setP(p, "expiry", e.target.value)} aria-label={`${p} last trading day`}
-                  title="Last trading day. Typed in, never worked out from an exchange calendar." /></td>
+                <td>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <input className="cell" style={{ width: 128 }} type="date" value={sp.expiry ?? ""}
+                      onChange={(e) => setP(p, "expiry", e.target.value)} aria-label={`${p} last trading day`}
+                      title="Last trading day. Typed in, never worked out from an exchange calendar." />
+                    <input className="cell" style={{ width: 128 }} type="date" value={sp.expiry2 ?? ""}
+                      onChange={(e) => setP(p, "expiry2", e.target.value)} aria-label={`${p} second leg last trading day`}
+                      title="The other leg of a spread. Whichever of the two is earlier is the deadline — it does not matter which box it goes in." />
+                  </div>
+                </td>
                 <td>{!inUse.has(p) && <button className="btn ghost" aria-label={`Remove ${p}`} onClick={() => dropProduct(p)}>✕</button>}</td>
               </tr>
             ))}
