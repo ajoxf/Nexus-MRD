@@ -65,7 +65,17 @@ button, input, select { font: inherit; color: inherit; }
 
 .grid-dash { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
 .grid-fills { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 12px; align-items: start; }
-.grid-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; align-items: start; }
+/*
+ * Settings is two bands. The short configuration panels pack by height in CSS columns, which
+ * is the one layout that closes the gap a short card leaves beside a tall one; the broker
+ * cards sit full width below, because each carries a table six columns wide and being squeezed
+ * into a 320px track was clipping it.
+ */
+.grid-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+.setcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; align-items: start; }
+/* `.panel + .panel` spaces panels that are stacked. Inside a grid the gap already does it, and
+   the margin only pushes every panel after the first 12px down out of line with the first. */
+.setcards > .panel + .panel, .grid-settings > .panel + .panel { margin-top: 0; }
 .col > .panel + .panel { margin-top: 12px; }
 
 /* ---------- tables ---------- */

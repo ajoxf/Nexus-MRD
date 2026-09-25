@@ -1,4 +1,4 @@
-import { parseExpiry, daysUntil, expiryState, formatExpiry, expiringRows } from '../src/lib/expiry.js';
+import { parseExpiry, daysUntil, expiryState, formatExpiry, expiringRows, contractExpiry } from '../src/lib/expiry.js';
 
 /*
  * Expiry dates, and the two ways a date feature goes wrong: it accepts something that is not a
@@ -72,6 +72,31 @@ is('nearest first, expired at the top', due[0].row.product, 'CL Oct26');
  * than reported as fine — silence about a missing date is better than a false all-clear.
  */
 is('a product with no expiry is not called safe, it is left out', due.some((x) => x.row.product === 'CL Jan27'), false);
+
+/*
+ * A spread has two legs and two last trading days, and it stops being a spread when the NEARER
+ * one goes. Which box the date was typed into says nothing about which leg is nearer — somebody
+ * filling in a crack has no reason to know — so the earlier of the two always wins.
+ */
+const near = (spec) => contractExpiry(spec)?.near ?? null;
+is('one date is an outright', JSON.stringify(contractExpiry({ expiry: '2026-10-20' })),
+   JSON.stringify({ near: '2026-10-20', far: null, both: ['2026-10-20'] }));
+is('two dates in order: the first governs', near({ expiry: '2026-10-20', expiry2: '2026-12-31' }), '2026-10-20');
+is('two dates out of order: the earlier still governs', near({ expiry: '2026-12-31', expiry2: '2026-10-20' }), '2026-10-20');
+is('the far leg is reported too', contractExpiry({ expiry: '2026-12-31', expiry2: '2026-10-20' }).far, '2026-12-31');
+is('only a second leg filled in still works', near({ expiry2: '2026-11-30' }), '2026-11-30');
+is('a junk first leg does not shadow a real second', near({ expiry: 'rubbish', expiry2: '2026-11-30' }), '2026-11-30');
+is('two identical dates report no far leg', contractExpiry({ expiry: '2026-10-20', expiry2: '2026-10-20' }).far, '2026-10-20');
+is('no dates at all is nothing, not today', contractExpiry({}), null);
+is('no spec at all is nothing', contractExpiry(undefined), null);
+
+// A calendar spread whose far leg is months out is still due when the front month goes.
+const CAL = { product: 'CL Nov26-Jan27 Calendar', spec: { expiry: '2026-12-21', expiry2: '2026-09-29' } };
+const OUTRIGHT = { product: 'CL Jan27', spec: { expiry: '2026-12-21' } };
+const dueSpread = expiringRows([CAL, OUTRIGHT], TODAY, 7);
+is('the spread is due on its front leg', dueSpread.map((x) => x.row.product).join(), 'CL Nov26-Jan27 Calendar');
+is('and the state is read off the near leg', dueSpread[0].state.days, 5);
+is('the far leg rides along for display', dueSpread[0].contract.far, '2026-12-21');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
