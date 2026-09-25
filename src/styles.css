@@ -76,6 +76,26 @@ button, input, select { font: inherit; color: inherit; }
 /* `.panel + .panel` spaces panels that are stacked. Inside a grid the gap already does it, and
    the margin only pushes every panel after the first 12px down out of line with the first. */
 .setcards > .panel + .panel, .grid-settings > .panel + .panel { margin-top: 0; }
+
+/* A panel the trader can move. The grip is the only thing that starts a drag, so text inside
+   the card still selects normally; it sits before the title rather than over the header's own
+   controls, which on these panels are all on the right. */
+.movable { position: relative; min-width: 0; display: flex; flex-direction: column; }
+.movable > .panel { flex: 1; }
+.movable .ph { padding-left: 28px; }
+.grip {
+  position: absolute; left: 5px; top: 9px; z-index: 2;
+  border: 0; background: none; padding: 0 2px; line-height: 1;
+  font-size: 15px; color: var(--faint); cursor: grab;
+  border-radius: 3px; opacity: .55;
+}
+.movable:hover .grip, .grip:focus-visible { opacity: 1; color: var(--dim); }
+.grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.grip:active { cursor: grabbing; }
+.movable.dragging { opacity: .45; }
+.movable.dragging .panel { outline: 2px dashed var(--accent); outline-offset: -1px; }
+.layoutbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; font-size: 12px; }
+.layoutbar .btn { padding: 3px 10px; font-size: 12px; }
 .col > .panel + .panel { margin-top: 12px; }
 
 /* ---------- tables ---------- */
