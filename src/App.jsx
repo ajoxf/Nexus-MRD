@@ -6,6 +6,7 @@ import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
 import { expiryState, formatExpiry, expiringRows, contractExpiry } from "./lib/expiry.js";
+import { applyOrder, moveTo, moveBy, isCustomised } from "./lib/layout.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
 import { normaliseRef, looksLikeRef, refStillValid, describeTerms } from "./lib/affiliates.js";
@@ -4065,6 +4066,94 @@ function ClosedTab({ pf, settings, setSettings, view, fills }) {
 }
 
 // ---------- settings ----------
+/*
+ * Panels the trader can rearrange.
+ *
+ * `items` is [{ id, title, node }] in the order the code declares them; the saved order is a
+ * preference laid over that. Dragging reorders live rather than showing an insertion marker,
+ * because on cards this size the answer to "where will it land" should be the layout itself.
+ *
+ * The grip is a real button, and the arrow keys move a panel one place. A rearrangement that
+ * can only be done with a mouse is a rearrangement some people cannot do at all — and the
+ * keyboard path is also the one that works when a drag is fighting a text field.
+ *
+ * Only the grip starts a drag: the panels are full of inputs, and making the whole card
+ * draggable would take selecting text inside them away.
+ */
+function Sortable({ className, storeKey, items, settings, setSettings }) {
+  const [dragId, setDragId] = useState(null);
+  const [live, setLive] = useState(null);
+  const [armed, setArmed] = useState(null);
+
+  const ids = items.map((i) => i.id);
+  const saved = settings.prefs?.order?.[storeKey];
+  const order = live || applyOrder(ids, saved);
+  const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+
+  const save = (next) => setSettings((s) => ({ ...s, prefs: { ...s.prefs, order: { ...(s.prefs?.order || {}), [storeKey]: next } } }));
+  const reset = () => setSettings((s) => {
+    const { [storeKey]: _drop, ...rest } = s.prefs?.order || {};
+    return { ...s, prefs: { ...s.prefs, order: rest } };
+  });
+
+  const onKey = (id) => (e) => {
+    const d = e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : 0;
+    if (!d) return;
+    e.preventDefault();
+    const next = moveBy(order, id, d);
+    if (next !== order) save(next);
+  };
+
+  return (
+    <>
+      {isCustomised(ids, saved) && (
+        <div className="layoutbar">
+          <span className="faint">Your own arrangement</span>
+          <button className="btn ghost" onClick={reset}>Reset layout</button>
+        </div>
+      )}
+      <div className={className}>
+        {order.map((id) => {
+          const item = byId[id];
+          if (!item) return null;
+          return (
+            <div
+              key={id}
+              className={`movable${dragId === id ? " dragging" : ""}`}
+              draggable={armed === id}
+              onDragStart={(e) => { setDragId(id); setLive(order); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", id); }}
+              onDragEnd={() => { if (live) save(live); setDragId(null); setLive(null); setArmed(null); }}
+              onDragOver={(e) => {
+                if (!dragId || dragId === id) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setLive((cur) => {
+                  const from = cur || order;
+                  const to = from.indexOf(id);
+                  return from.indexOf(dragId) === to ? from : moveTo(from, dragId, to);
+                });
+              }}
+              onDrop={(e) => e.preventDefault()}
+            >
+              <button
+                type="button"
+                className="grip"
+                aria-label={`Move ${item.title} — drag, or use the arrow keys`}
+                title={`Drag to move ${item.title}, or use the arrow keys`}
+                onMouseDown={() => setArmed(id)}
+                onTouchStart={() => setArmed(id)}
+                onBlur={() => setArmed((a) => (a === id ? null : a))}
+                onKeyDown={onKey(id)}
+              >⠿</button>
+              {item.node}
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
   const addBroker = () => {
     const id = `b${Date.now().toString(36)}`;
@@ -4083,18 +4172,16 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
      * cards get the full width they need underneath.
      */
     <div className="grid-settings">
-      <div className="setcards">
-        <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} />
-
-        <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} />
-
-        {/* Only where there is an account to close. In browser-storage mode there is no
-            server, no subscription and nobody to ask — "delete all fills" above is already
-            the whole of it. */}
-        {isRemote && <CloseAccountPanel fills={fills} brokers={settings.brokers} />}
-
-        <BuildStamp />
-      </div>
+      <Sortable className="setcards" storeKey="settings" settings={settings} setSettings={setSettings}
+        items={[
+          { id: "limits", title: "Your limits", node: <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} /> },
+          { id: "reset", title: "Delete or reset data", node: <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} /> },
+          /* Only where there is an account to close. In browser-storage mode there is no
+             server, no subscription and nobody to ask — "delete all fills" is already the
+             whole of it, so the panel is absent rather than present and inert. */
+          ...(isRemote ? [{ id: "close", title: "Close your account", node: <CloseAccountPanel fills={fills} brokers={settings.brokers} /> }] : []),
+          { id: "version", title: "Version", node: <BuildStamp /> },
+        ]} />
 
       {settings.brokers.map((b) => (
         <BrokerCard key={b.id} b={b} acc={pf.acct(b.id)} minRatio={settings.limits.minRatio} includeRealized={!!settings.limits.includeRealized} used={fills.some((f) => f.broker === b.id)} inUse={new Set(pf.rows.filter((r) => r.broker === b.id).map((r) => r.product))}
