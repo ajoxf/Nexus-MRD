@@ -1867,7 +1867,7 @@ function SignInPage({ children }) {
             <p className="desk">Risk and Margin Platform</p>
           </div>
         </div>
-        <p className="tagline">Know the downside before you trade.</p>
+        <p className="tagline">Build opportunities with calculated risks.</p>
       </aside>
       <main className="signin-form">{children}</main>
     </div>
