@@ -1867,16 +1867,7 @@ function SignInPage({ children }) {
             <p className="desk">Risk and Margin Platform</p>
           </div>
         </div>
-        <p className="tagline">Know what a move against you costs before you put the trade on.</p>
-        <div className="rule" />
-        <p className="foot">
-          {/* "By invitation" and "start a free trial" cannot both be true on the
-              same screen, so the invitation line stands down while the offer is
-              open. Both are driven by the one variable. */}
-          {/* Fincoursa, not NordStar Pro. They are two products of one company, not one
-              product inside the other — which is the whole point of the split. */}
-          A Fincoursa product.
-        </p>
+        <p className="tagline">Know the downside before you trade.</p>
       </aside>
       <main className="signin-form">{children}</main>
     </div>
