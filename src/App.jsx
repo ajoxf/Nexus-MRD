@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
-import { openStatementZip, mergeStatements } from "./lib/statements.js";
+import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
@@ -4578,6 +4578,7 @@ function StatementsPanel() {
   const [over, setOver] = useState(false);
   const [shown, setShown] = useState(null);          // "<checksum>|<file name>" of the CSV on screen
   const fileRef = useRef(null);
+  const folderRef = useRef(null);
   const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
 
   const openAll = async (files, password) => {
@@ -4607,13 +4608,22 @@ function StatementsPanel() {
     setBusy(false);
   };
 
+  // Zips only; anything else in a folder (the broker's other attachments, say) is passed over quietly.
   const load = (fileList) => {
     const files = [...(fileList || [])];
     const zips = files.filter((f) => /\.zip$/i.test(f.name));
-    if (!zips.length) { setMsg(["bad", "Choose the statement .zip files your broker sends."]); return; }
-    if (zips.length < files.length) setMsg(["bad", `${plural(files.length - zips.length, "file")} that aren't zips were left out.`]);
-    openAll(zips, pw.current);
     if (fileRef.current) fileRef.current.value = "";
+    if (folderRef.current) folderRef.current.value = "";
+    if (!zips.length) { setBusy(false); setMsg(["bad", files.length ? "No statement .zip files found in what you chose." : "Choose the statement .zip files your broker sends."]); return; }
+    openAll(zips, pw.current);
+  };
+  // A drop can hold folders. Walk them; fall back to plain files where the browser can't.
+  const drop = async (dt) => {
+    const entries = [...(dt.items || [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+    if (!entries.length) { load(dt.files); return; }
+    setBusy(true);
+    try { load(await filesFromEntries(entries)); }
+    catch (e) { setMsg(["bad", `Couldn't read what was dropped: ${e.message}`]); setBusy(false); }
   };
 
   const submitPw = (e) => {
@@ -4638,13 +4648,16 @@ function StatementsPanel() {
       <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>Opened in this browser only · nothing is uploaded or saved</span></div>
       <div className="pb fg">
         <input ref={fileRef} type="file" accept=".zip" multiple hidden onChange={(e) => load(e.target.files)} />
+        {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
+        <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => load(e.target.files)} />
         <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
           onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
-          onDrop={(e) => { e.preventDefault(); setOver(false); load(e.dataTransfer.files); }}>
-          <b>{busy ? "Opening…" : "Drop statement zips here"}</b>{!busy && " or click to choose"}<br />
-          <span className="faint" style={{ fontSize: 11 }}>One or many days at once · password-protected zips are fine · the same zip twice is skipped</span>
+          onDrop={(e) => { e.preventDefault(); setOver(false); drop(e.dataTransfer); }}>
+          <b>{busy ? "Opening…" : "Drop statement zips or folders here"}</b>{!busy && " or click to choose zips"}<br />
+          <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips are fine · the same zip twice is skipped</span>
         </div>
+        <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of statements</button>
 
         {askPw && (
           <form onSubmit={submitPw}>

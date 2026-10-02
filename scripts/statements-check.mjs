@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { statementDate, statementAccount, kindOf, mergeStatements, openStatementZip } from '../src/lib/statements.js';
+import { statementDate, statementAccount, kindOf, mergeStatements, openStatementZip, filesFromEntries } from '../src/lib/statements.js';
 let fail = 0;
 const eq = (name, got, want) => {
   const ok = JSON.stringify(got) === JSON.stringify(want);
@@ -39,6 +39,17 @@ eq('date and account read from the names', [st.date, st.account], ['2026-10-01',
 eq('the checksum is the file\'s, so a re-upload is recognised', st.checksum, (await openStatementZip(file, 'testpass')).checksum);
 const notZip = new File([Buffer.from('hello')], 'x.zip');
 eq('not a zip says so', await openStatementZip(notZip, 'p').then(() => 'opened', (e) => e.code), 'NOT_A_ZIP');
+
+// A folder per day, dropped as one parent folder. The directory reader hands entries back in
+// batches and then an empty one; every batch has to be read.
+{
+  const file = (name) => ({ isFile: true, file: (ok) => ok({ name }) });
+  const dir = (kids, batch = 2) => ({ isDirectory: true, createReader: () => { let i = 0; return { readEntries: (ok) => { ok(kids.slice(i, i + batch)); i += batch; } }; } });
+  const days = Array.from({ length: 45 }, (_, k) => dir([file(`Client_Group_Daily_Statement_-_202608${String(k).padStart(2, '0')}.zip`), file('notes.txt')]));
+  const got = await filesFromEntries([dir(days, 7), file('loose.zip')]);
+  eq('45 day-folders inside one folder: every zip found', got.filter((f) => f.name.endsWith('.zip')).length, 46);
+  eq('...other files are returned too, for the caller to pass over', got.length, 91);
+}
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

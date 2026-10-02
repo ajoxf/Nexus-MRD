@@ -110,3 +110,28 @@ export function mergeStatements(have, opened) {
   const all = [...have, ...added].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || a.zipName.localeCompare(b.zipName));
   return { all, added, repeated };
 }
+
+/*
+ * Every file under whatever was dropped: loose files, a folder per day, or one folder
+ * holding all of them. Brokers' statements tend to be saved a folder per day, and asking
+ * for 45 separate drops would be asking a lot.
+ *
+ * Works on the browser's FileSystemEntry API (DataTransferItem.webkitGetAsEntry). A
+ * directory reader hands back entries in batches, so it is read until it returns none.
+ */
+export async function filesFromEntries(entries) {
+  const out = [];
+  const walk = async (entry) => {
+    if (!entry) return;
+    if (entry.isFile) { out.push(await new Promise((res, rej) => entry.file(res, rej))); return; }
+    if (!entry.isDirectory) return;
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const e of batch) await walk(e);
+    }
+  };
+  for (const e of entries) await walk(e);
+  return out;
+}
