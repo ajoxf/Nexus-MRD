@@ -3,6 +3,8 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { classifyCash, fileKeys, fromLegacy, accepted, NEAR_DAYS } from "./lib/cash.js";
+import { openStatementZip, mergeStatements } from "./lib/statements.js";
+import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
@@ -4615,6 +4617,161 @@ function ResetPanel({ ledger, settings, setSettings, fills, reloadFills }) {
   );
 }
 
+/*
+ * Daily broker statements: drop in the zips, type the password once, see what's inside.
+ *
+ * Opened entirely in this browser (src/lib/statements.js). The password lives in a ref for
+ * as long as the page is open — not in state that gets saved, not in localStorage, never
+ * sent anywhere — and the statements themselves are held in memory only.
+ *
+ * Read-only by design: nothing here posts to the ledger, the marks or the equity tally.
+ * Reconciling these figures against the book is the next step, and when it comes it will
+ * propose, never post.
+ */
+function StatementsPanel() {
+  const [list, setList] = useState([]);
+  const listRef = useRef([]);
+  const [pending, setPending] = useState([]);       // zips waiting on a password
+  const [askPw, setAskPw] = useState(null);          // null | "needs" | "wrong"
+  const [pwInput, setPwInput] = useState("");
+  const pw = useRef("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [over, setOver] = useState(false);
+  const [shown, setShown] = useState(null);          // "<checksum>|<file name>" of the CSV on screen
+  const fileRef = useRef(null);
+  const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
+
+  const openAll = async (files, password) => {
+    setBusy(true);
+    const opened = [], locked = [], problems = [];
+    let wrong = false;
+    for (const f of files) {
+      try { opened.push(await openStatementZip(f, password)); }
+      catch (e) {
+        if (e.code === "NEEDS_PASSWORD" || e.code === "BAD_PASSWORD") { locked.push(f); wrong = wrong || e.code === "BAD_PASSWORD"; }
+        else problems.push(e.message);
+      }
+    }
+    // Merged against a ref, not inside a state updater: the updater runs later, and the
+    // counts reported below have to be the ones that actually happened.
+    const { all, added, repeated } = mergeStatements(listRef.current, opened);
+    listRef.current = all;
+    setList(all);
+    if (wrong) pw.current = "";
+    setPending(locked);
+    setAskPw(locked.length ? (wrong ? "wrong" : "needs") : null);
+    const parts = [];
+    if (added.length) parts.push(`Opened ${plural(added.length, "statement")}`);
+    if (repeated.length) parts.push(`${plural(repeated.length, "statement")} already open — skipped`);
+    if (problems.length) parts.push(problems.join(" · "));
+    setMsg(parts.length ? [problems.length ? "bad" : "ok", parts.join(" · ")] : null);
+    setBusy(false);
+  };
+
+  const load = (fileList) => {
+    const files = [...(fileList || [])];
+    const zips = files.filter((f) => /\.zip$/i.test(f.name));
+    if (!zips.length) { setMsg(["bad", "Choose the statement .zip files your broker sends."]); return; }
+    if (zips.length < files.length) setMsg(["bad", `${plural(files.length - zips.length, "file")} that aren't zips were left out.`]);
+    openAll(zips, pw.current);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const submitPw = (e) => {
+    e.preventDefault();
+    if (!pwInput) return;
+    pw.current = pwInput;
+    setPwInput("");
+    openAll(pending, pw.current);
+  };
+
+  const openPdf = (blob) => {
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+
+  const csvRows = (text) => Papa.parse(text, { skipEmptyLines: true }).data;
+  const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
+
+  return (
+    <section className="panel" style={{ marginTop: 16 }}>
+      <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>Opened in this browser only · nothing is uploaded or saved</span></div>
+      <div className="pb fg">
+        <input ref={fileRef} type="file" accept=".zip" multiple hidden onChange={(e) => load(e.target.files)} />
+        <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
+          onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+          onDrop={(e) => { e.preventDefault(); setOver(false); load(e.dataTransfer.files); }}>
+          <b>{busy ? "Opening…" : "Drop statement zips here"}</b>{!busy && " or click to choose"}<br />
+          <span className="faint" style={{ fontSize: 11 }}>One or many days at once · password-protected zips are fine · the same zip twice is skipped</span>
+        </div>
+
+        {askPw && (
+          <form onSubmit={submitPw}>
+            <F label={askPw === "wrong" ? "That password didn't open it — try again" : `Password for ${plural(pending.length, "statement")}`}
+              hint="Kept in this page's memory only, until you close or reload it. Never sent or saved.">
+              <div style={{ display: "flex", gap: 8 }}>
+                <input type="password" autoComplete="off" spellCheck={false} value={pwInput} onChange={(e) => setPwInput(e.target.value)} autoFocus aria-label="Statement password" />
+                <button className="btn" disabled={!pwInput || busy}>Open</button>
+                <button type="button" className="btn ghost" onClick={() => { setPending([]); setAskPw(null); setPwInput(""); }}>Cancel</button>
+              </div>
+            </F>
+          </form>
+        )}
+        {msg && <div className={msg[0]}>{msg[1]}</div>}
+
+        {list.length > 0 && (
+          <>
+            <div className="tw">
+              <table>
+                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th className="txt">Inside</th><th></th></tr></thead>
+                <tbody>
+                  {list.map((st) => (
+                    <tr key={st.checksum}>
+                      <td className="txt">{fmtDate(st.date)}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                      <td className="txt">{st.account || "—"}</td>
+                      <td className="txt">
+                        {st.files.map((f) => {
+                          const id = `${st.checksum}|${f.name}`;
+                          return f.kind === "csv"
+                            ? <button key={f.name} className={`btn ghost${shown === id ? " on" : ""}`} style={{ margin: "2px 4px 2px 0" }} onClick={() => setShown(shown === id ? null : id)}>{f.name}</button>
+                            : f.kind === "pdf"
+                              ? <button key={f.name} className="btn ghost" style={{ margin: "2px 4px 2px 0" }} onClick={() => openPdf(f.blob)} title="Opens in a new tab. If the PDF has its own password, your PDF viewer will ask for it.">{f.name} ↗</button>
+                              : <span key={f.name} className="faint" style={{ marginRight: 8 }}>{f.name}</span>;
+                        })}
+                      </td>
+                      <td><button className="btn ghost" onClick={() => { listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum); setList(listRef.current); if (shown?.startsWith(st.checksum)) setShown(null); }} aria-label="Close statement">✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {shown && (() => {
+              const [sum, name] = [shown.slice(0, shown.indexOf("|")), shown.slice(shown.indexOf("|") + 1)];
+              const f = list.find((x) => x.checksum === sum)?.files.find((x) => x.name === name);
+              if (!f) return null;
+              const rows = csvRows(f.text);
+              return (
+                <div>
+                  <div className="faint" style={{ fontSize: 11, margin: "8px 0 4px" }}>{name} · {plural(rows.length, "row")}, shown exactly as in the file</div>
+                  <div className="tw tall">
+                    <table>
+                      <tbody>{rows.slice(0, 500).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className="txt">{c}</td>)}</tr>)}</tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+          </>
+        )}
+        <div className="faint" style={{ fontSize: 11 }}>For reading only for now: RAMP doesn't use these figures yet. Checking them against your book comes next, and will propose changes for you to confirm, never post them.</div>
+      </div>
+    </section>
+  );
+}
+
 // ---------- funds: deposits, withdrawals and equity tally ----------
 function FundsTab({ ledger, pf, settings, setSettings, view }) {
   const ask = useConfirm();
@@ -4675,6 +4832,7 @@ function FundsTab({ ledger, pf, settings, setSettings, view }) {
   const accts = pf.accounts.filter((a) => view === "all" || a.id === view);
 
   return (
+    <>
     <div className="grid-fills">
       <section className="panel">
         <div className="ph"><h2>Record money in, out or charged</h2></div>
@@ -4784,6 +4942,8 @@ function FundsTab({ ledger, pf, settings, setSettings, view }) {
         </section>
       </div>
     </div>
+    <StatementsPanel />
+    </>
   );
 }
 
