@@ -3,6 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
+import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
@@ -4641,6 +4642,27 @@ function StatementsPanel() {
   };
 
   const csvRows = (text) => Papa.parse(text, { skipEmptyLines: true }).data;
+  // A statement is checked to the cent, so it is shown to the cent.
+  const cents = (v, cur = "USD") => (v < 0 ? "-" : "") + symbolFor(cur) + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  /*
+   * Each statement's Financial Summary, read strictly (src/lib/orient.js): the main account's
+   * headline figures, and every place Orient's own arithmetic doesn't add up. A file that
+   * can't be read says why instead of showing a figure.
+   */
+  const summaries = useMemo(() => new Map(list.map((st) => {
+    const f = st.files.find((x) => x.kind === "csv" && isFinancialSummary(x.name));
+    if (!f) return [st.checksum, null];
+    const { accounts, problems } = readFinancialSummary(Papa.parse(f.text, { skipEmptyLines: true }).data);
+    const main = mainAccount(accounts);
+    const failed = [...accounts.flatMap((a) => checkAccount(a).map((c) => ({ ...c, label: `${a.no}: ${c.label}` }))), ...checkFamily(accounts)];
+    // Open positions, and the two files checked against each other.
+    const op = st.files.find((x) => x.kind === "csv" && isOpenPosition(x.name));
+    const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
+    if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions: pos && !pos.problems.length ? positionsOf(pos.lots) : null }];
+  })), [list]);
+  const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
+  const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
   const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
 
   return (
@@ -4677,12 +4699,36 @@ function StatementsPanel() {
           <>
             <div className="tw">
               <table>
-                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th className="txt">Inside</th><th></th></tr></thead>
+                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
                 <tbody>
                   {list.map((st) => (
                     <tr key={st.checksum}>
                       <td className="txt">{fmtDate(st.date)}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
                       <td className="txt">{st.account || "—"}</td>
+                      {(() => {
+                        const sm = summaries.get(st.checksum);
+                        if (!sm) return <td colSpan={5} className="txt faint">No Financial Summary in this zip</td>;
+                        if (sm.problems.length) return <td colSpan={5} className="txt bad">Couldn't read the Financial Summary: {sm.problems[0]}{sm.problems.length > 1 ? ` (+${sm.problems.length - 1} more)` : ""}</td>;
+                        const m = sm.main;
+                        const cur = m?.ccy || "USD";
+                        return (
+                          <>
+                            <td>{m ? cents(m.tne, cur) : "—"}</td>
+                            <td>{m ? cents(m.im, cur) : "—"}</td>
+                            <td className={m && m.excess < 0 ? "bad" : ""}>{m ? cents(m.excess, cur) : "—"}</td>
+                            <td className="txt" style={{ fontSize: 12 }}>
+                              {!sm.positions ? <span className="faint">No Open Position file</span>
+                                : !sm.positions.length ? <span className="faint">None</span>
+                                : sm.positions.map((ps) => (
+                                  <div key={`${ps.account}|${ps.label}`}>{ps.label} <b className={ps.lots > 0 ? "ok" : "bad"}>{ps.lots > 0 ? "+" : ""}{ps.lots}</b> @ {ps.avg} · settle {ps.settle ?? "—"} · {cents(ps.upl, cur)}</div>
+                                ))}
+                            </td>
+                            <td className={`txt ${sm.failed.length ? "warn" : "ok"}`} title={sm.failed.map((c) => (isFinite(c.got) ? `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}` : c.label)).join("\n") || undefined}>
+                              {sm.failed.length ? `${sm.failed.length} don't add up` : "Add up"}
+                            </td>
+                          </>
+                        );
+                      })()}
                       <td className="txt">
                         {st.files.map((f) => {
                           const id = `${st.checksum}|${f.name}`;
@@ -4699,6 +4745,15 @@ function StatementsPanel() {
                 </tbody>
               </table>
             </div>
+            {read.length > 1 && (
+              <div className={carry.length ? "warn" : "ok"} style={{ fontSize: 12 }}>
+                {carry.length
+                  ? <>Day to day: {carry.length} opening balance{carry.length === 1 ? " doesn't" : "s don't"} match the previous statement's closing balance — usually a missing day in between.
+                      <ul style={{ margin: "4px 0 0 16px" }}>{carry.slice(0, 10).map((b) => <li key={`${b.date}|${b.no}`}>{fmtDate(b.date)}, account {b.no}: opens at {cents(b.beginning)}, previous statement ({fmtDate(b.prevDate)}) closed at {cents(b.prevEnding)}</li>)}</ul>
+                      {carry.length > 10 && <span className="faint"> …and {carry.length - 10} more</span>}</>
+                  : `Day to day: every opening balance matches the previous statement's closing balance, across ${read.length} statements.`}
+              </div>
+            )}
             {shown && (() => {
               const [sum, name] = [shown.slice(0, shown.indexOf("|")), shown.slice(shown.indexOf("|") + 1)];
               const f = list.find((x) => x.checksum === sum)?.files.find((x) => x.name === name);
@@ -4717,7 +4772,7 @@ function StatementsPanel() {
             })()}
           </>
         )}
-        <div className="faint" style={{ fontSize: 11 }}>For reading only for now: RAMP doesn't use these figures yet. Checking them against your book comes next, and will propose changes for you to confirm, never post them.</div>
+        <div className="faint" style={{ fontSize: 11 }}>Figures match within ${TOL.toFixed(2)} (a cent either way, for rounding). For reading only for now: RAMP doesn't use these figures yet. Checking them against your book comes next, and will propose changes for you to confirm, never post them.</div>
       </div>
     </section>
   );
