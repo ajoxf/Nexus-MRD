@@ -426,6 +426,23 @@ export function rowsToFills(rows, map, { dateFormat = "auto", defaultBroker = "d
     if (map.profit) { const pv = num(row[map.profit]); if (isFinite(pv)) f._profit = pv; }
     fills.push(f);
   });
+  /*
+   * Two genuine fills that would share one ID.
+   *
+   * The ID above is order + contract + side + price + millisecond, and quantity is not in it. One
+   * order filling against two resting orders at one price can print two rows that differ only in
+   * quantity — and with one ID between them the second was taken for a duplicate and never stored,
+   * leaving the position short by its lots.
+   *
+   * So only where rows of one file collide on that ID AND disagree on quantity does each get its
+   * quantity added to the ID. Every other ID stays exactly as it was, so files already imported
+   * still match what is stored. Rows identical in every field are still one fill shown twice.
+   */
+  const byRef = {};
+  fills.forEach((f) => { if (f._order) (byRef[`${f.broker}|${f.ref}`] ||= []).push(f); });
+  for (const list of Object.values(byRef)) {
+    if (new Set(list.map((f) => +f.qty)).size > 1) list.forEach((f) => { f.ref = `${f.ref}|q${+f.qty}`; });
+  }
   // Spread orders: an order ID holding a spread fill and its leg fills is one trade shown several ways.
   // The side that isn't the trade is kept as a leg (is_leg) rather than thrown away, so the fills that
   // made up a spread can still be looked at. Legs are skipped by every position, margin and P&L sum.
@@ -514,6 +531,51 @@ export function classifyFills(incoming, existing, { manualWindowMin = 15 } = {})
   for (const r of rows) {
     if (r.status) continue;
     if (available[r.key] > 0) { r.status = "stored"; available[r.key]--; }
+  }
+  /*
+   * 2b) the same trade, read in a different time zone.
+   *
+   * A TT Fills export has no time zone on its clock, so it is read in whatever zone the computer
+   * is set to. The same file from a laptop still on Singapore time lands 7 hours away from the
+   * London import, under a different ID and a different time, and every fill was stored twice.
+   *
+   * A zone moves a clock by whole quarter-hours and never more than 14 hours. So: same order, same
+   * contract, side, quantity and price, the same reading to the millisecond within the quarter-hour,
+   * and a whole number of quarter-hours apart. A different fill of the same order matching all of
+   * that by chance would have to land on the same millisecond — the test that a real later fill is
+   * NOT matched is in scripts/fill-identity-check.mjs.
+   *
+   * Only fills with a broker's own ID AND a clock read to the millisecond take part. Without the ID
+   * there is nothing to tie two readings to one trade; without the milliseconds, a real second fill
+   * of the same order on a later quarter-hour (09:15:00, 09:30:00) is indistinguishable from a zone
+   * shift, and treating it as one would lose a fill. Those keep the checks above, as before.
+   */
+  const orderOf = (f) => f.order_id || (isBrokerRef(f.ref) && String(f.ref).split("|").length >= 5 ? String(f.ref).split("|")[0] : null);
+  const QUARTER = 15 * 60 * 1000, ZONE_MAX = 14 * 60 * 60 * 1000;
+  const shiftKey = (f) => {
+    const o = isBrokerRef(f.ref) ? orderOf(f) : null;
+    const t = new Date(f.ts).getTime();
+    if (!o || !(t % 1000)) return null;
+    return `${f.broker || "default"}|${o}|${String(f.product).trim().toUpperCase()}|${f.side}|${+(+f.qty).toFixed(8)}|${+(+f.price).toFixed(8)}|${((t % QUARTER) + QUARTER) % QUARTER}`;
+  };
+  // Stored fills not already claimed above, by the row that claimed them.
+  const claimedRefs = new Set(rows.filter((r) => r.status === "stored").map(rk));
+  const claimedKeys = {};
+  rows.forEach((r) => { if (r.status === "stored" && !storedRefs.has(rk(r))) claimedKeys[r.key] = (claimedKeys[r.key] || 0) + 1; });
+  const pool = {};
+  for (const f of existing) {
+    if (claimedRefs.has(rk(f))) continue;
+    if (claimedKeys[contentKey(f)] > 0) { claimedKeys[contentKey(f)]--; continue; }
+    const k = shiftKey(f);
+    if (k) (pool[k] ||= []).push({ t: new Date(f.ts).getTime(), used: false });
+  }
+  for (const r of rows) {
+    if (r.status) continue;
+    const k = shiftKey(r);
+    if (!k || !pool[k]) continue;
+    const t = new Date(r.ts).getTime();
+    const m = pool[k].find((x) => !x.used && Math.abs(x.t - t) <= ZONE_MAX);
+    if (m) { m.used = true; r.status = "stored"; }
   }
   // 3) trades recorded by hand on the ticket (time differs; match on product/side/qty/price nearby in time)
   const manual = existing.filter((f) => f.source === "manual").map((f) => ({ ...f, used: false }));

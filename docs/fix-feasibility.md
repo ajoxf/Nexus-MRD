@@ -1,6 +1,6 @@
 # Can a TT feed replace manual import in Nexus RAMP?
 
-*Feasibility assessment and decision memo — DRAFT 2, 2 Oct 2026. No code has changed.*
+*Feasibility assessment and decision memo — DRAFT 3, 2 Oct 2026. Phase 0 built on this branch, not merged.*
 
 ---
 
@@ -325,6 +325,15 @@ ref column: TTOrderID | equal refs for two partial fills: true
   your stored position would be short by the dropped quantity (question Y4 — please look for one
   in a real export).
 
+**Correction to draft 1:** the app has a second defence I had not credited. `classifyFills` also
+matches rows on their content: product, side, quantity, price and time to the second. It does
+**not** catch either finding, though:
+- for Finding A, the times are hours apart;
+- for Finding B, the second row is marked a duplicate inside the file and is never imported.
+
+I confirmed this end to end before any fix (`docs/evidence/fill-identity-before.txt`: 9 of 22
+checks failing, every one of them A or B).
+
 **Why this matters for a feed:** a feed gives UTC times and real fill ids. **No FIX or REST fill
 will ever produce the same `ref` as a CSV row for the same trade.** If the feed and the CSV both
 cover a day, `unique (user_id, broker, ref)` lets both in. Your position doubles.
@@ -399,21 +408,56 @@ So the fix must:
 
 This is why I sized the identity fix as its own careful piece of work.
 
-### 8.5 The check script (after you approve this design)
+### 8.5 Phase 0 — built, on this branch only
 
-`scripts/fill-identity-check.mjs`, in the existing plain-Node style. It will prove at least:
+**The check:** `scripts/fill-identity-check.mjs`, 24 checks. Every route goes through what the app
+actually runs: the real TT parser, the real duplicate classifier, and a stand-in for the
+database's unique rule.
 
-1. The same fill via CSV and via a feed message is stored **once**.
-2. The same feed fill delivered three ways (live, resend with `PossDupFlag`, recovery replay) is
-   stored **once**.
-3. Two genuine partial fills (same order, price and millisecond) are stored **twice**, and a
-   re-import of the same file adds nothing.
-4. The same CSV parsed in London and in Singapore time produces the **same** ref.
-5. A spread with two legs arriving as three messages counts as **one** position.
-6. A bust removes the original. A bust that arrives before its fill still ends with nothing stored.
-7. `CumQty` is never used as the fill quantity.
+| # | What it proves | Before the fix | After |
+|---|---|---|---|
+| 1a–1b | The same trade by CSV and by feed, in either order, is stored once | pass | pass |
+| 1c | …even when the CSV was read in the wrong time zone | **FAIL** | pass |
+| 2 | Live + resend (`PossDupFlag`) + recovery replay → stored once | pass | pass |
+| 3a–3d | Two real partial fills (same order, price, millisecond) → both stored; re-imports in any row order add nothing | **FAIL** | pass |
+| 3e–3f | A fill dropped by an *older* import is put back on re-import, once, and stays put back | **FAIL** | pass |
+| 4a–4b | The same file from London, then Singapore → stored once; position unchanged | **FAIL** | pass |
+| 4c | A real later fill of the same order is **not** mistaken for a time-zone shift | pass | pass |
+| 4d | Exports timed only to the second: two real fills 15 min apart both stay (with and without an id) | pass | pass |
+| 5a–5c | A spread plus its legs, by feed then CSV → 3 rows, one position | pass | pass |
+| 6a–6c | Busts remove the fill; a bust ahead of its fill leaves nothing; a correction replaces it | pass | pass |
+| 7 | The fill's own quantity (`LastQty`), never the order's total (`CumQty`) | pass | pass |
+| 8 | Rows identical in *every* field in one file → one fill (today's rule, kept until Y4 is answered) | pass | pass |
+| 9 | The same file for two users → one row each | pass | pass |
 
-I will send you its output.
+The check passes in four time zones (UTC, London, Singapore, Chicago). All 21 existing checks still
+pass, and the app builds. Outputs: `docs/evidence/fill-identity-before.txt` and `-after.txt`.
+
+**What changed in the code:**
+- `src/lib/csv.js`, `rowsToFills`. A fill's id gets its quantity added **only** when two rows of
+  one file share an id and disagree on quantity. Every other id is exactly what it was, so
+  everything already stored still matches.
+- `src/lib/csv.js`, `classifyFills`. One new matching step: the same order, contract, side,
+  quantity, price and clock reading to the millisecond, a whole number of quarter-hours apart and
+  at most 14 hours. It is used only for fills with a broker's own id **and** millisecond times.
+  Narrowing it to millisecond times came from my own review. Without that, two real
+  to-the-second fills 15 minutes apart would have been merged into one, losing a fill. Check 4d
+  now guards against that.
+- `src/lib/ttfeed.js` (new, **not used by the app**): turns a FIX Execution Report into RAMP's fill
+  shape, and plans busts and corrections. It exists so the check can prove the feed route. Every
+  TT detail in it is UNVERIFIED.
+
+**Nothing stored is rewritten.** The fix changes what an *import* decides, not the fills already in
+the database, so section 8.4's danger does not arise.
+
+**The dry run:** re-load your past TT exports in the Fills tab and read the preview counts, **without
+pressing Import.**
+- "Already stored" should be the whole file.
+- Any "new" rows on a file you have imported before are fills an earlier import dropped
+  (Finding B). They are the ones to look at before deciding whether to merge.
+
+**Left for later phases:** the seam rule, translating TT instrument names to RAMP product names, and
+the sync job itself.
 
 ---
 
@@ -481,7 +525,7 @@ Just you, for now. That keeps this simple and safe:
 Each phase lives on this branch, behind its own check scripts. Nothing is merged until you are
 comfortable.
 
-1. **Phase 0 — identity fix** (2–4 days):
+1. **Phase 0 — identity fix** — **built on this branch** (section 8.5):
    - fix Findings A and B, compatibly with refs already stored;
    - `fill-identity-check.mjs`;
    - a dry-run report of what it would change in your stored fills, before it changes anything.
