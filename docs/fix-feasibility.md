@@ -1,6 +1,6 @@
 # Can a TT feed replace manual import in Nexus RAMP?
 
-*Feasibility assessment and decision memo — DRAFT 1, 2 Oct 2026. No code has changed.*
+*Feasibility assessment and decision memo — DRAFT 2, 2 Oct 2026. No code has changed.*
 
 ---
 
@@ -25,7 +25,9 @@ What you told me, which this memo is built on:
 | Prices | Live intraday, then the official settlement after the close; you can still type over them; stale prices must be obvious |
 | Exchanges | ICE Futures Europe, CME Group, ICE US / others, Asian venues |
 | Other venues | Some fills come from outside TT, so CSV import stays |
-| History needed | Open positions plus about 90 days |
+| History needed | Open positions plus about 90 days. Anything older comes in by CSV — **no opening-balance rows** (Y3) |
+| Spreads | **Both** exchange-listed and TT Autospreader (Y2) |
+| Stops | Watched in TT, not RAMP (Y5), so live intraday marks are **deferred** |
 | New infrastructure | Only if clearly needed |
 
 ---
@@ -70,7 +72,7 @@ What you told me, which this memo is built on:
 **Is this the right next thing?** The identity fix, yes: it protects the book you already have.
 REST sync, probably: it removes the daily chore at low risk. Live FIX prices, not yet. Their cost
 and operating burden is large compared with typing marks for a book you run alone, unless your
-intraday stop discipline actually depends on them. Only you can judge that (question Y5).
+intraday stop discipline actually depends on them. You answered that (Y5): you watch stops in TT, so live marks wait.
 
 ---
 
@@ -238,15 +240,15 @@ What that means:
   it. Getting that wrong either loses fills or doubles them.
 - **REST probably reports legs too.** How `ttledger` marks spread versus leg is UNVERIFIED (T7).
 
-**The trap — your own synthetic spreads.** If you trade spreads through **TT Autospreader** (a
+**The trap — your own synthetic spreads. You use both kinds (Y2), so this applies.** If you trade spreads through **TT Autospreader** (a
 synthetic spread TT works by trading the legs) rather than an exchange-listed spread:
 - The exchange only ever sees **two outright fills**.
 - 442 may say 1 (outright) for each.
 - TT's Fills grid may also show a synthetic spread row.
 
 Whether to store the spread or the legs then needs a different rule from exchange spreads. If the
-wrong side is marked `is_leg`, risk is counted twice or not at all. **Question Y2: do you use
-Autospreader?**
+wrong side is marked `is_leg`, risk is counted twice or not at all. You trade both, so the sync needs both
+rules, and the check script tests both.
 
 ---
 
@@ -520,19 +522,17 @@ Send these as written:
 - **T13.** Does TT FIX support `RequestForPositions (AN)` / `PositionReport (AP)`? Nothing I could
   reach confirms it.
 
-## 14. Questions for you
+## 14. Your answers, and what is still open
 
-- **Y1.** Which Vercel plan is the project on? (Vercel dashboard → your team → Settings → Billing.)
-- **Y2.** Do you trade spreads through TT **Autospreader**, exchange-listed spreads, or both?
-- **Y3.** For a position opened more than 90 days ago, would you accept an "opening balance" line
-  in RAMP ("held 3 lots at 4.25 as of <date>") instead of its original fills?
-- **Y4.** In a real TT export, can you find two rows with the same TTOrderID, price **and**
-  time-to-the-millisecond? If so, Finding B is affecting you today.
-- **Y5.** Do you place intraday stops off RAMP's marks, or watch them in TT? This decides whether
-  live intraday marks are worth their cost.
-- **Y6.** In TT's Fills grid, is there a column such as "Exec ID", "Fill ID" or "Exchange Fill ID"
-  you can add to your export? (Right-click the column headers → column chooser.)
-- **Y7.** Which time zone is your TT Fills grid set to display?
+| | Answer | Effect on the design |
+|---|---|---|
+| Y1 Vercel plan | Not sure; decide at Phase 1 | Keep both the Vercel Pro cron and the Supabase scheduled function open |
+| Y2 Spread style | **Both** exchange-listed and Autospreader | Two rules for `is_leg`, both covered by the check script (section 6) |
+| Y3 Opening balances | **No**, CSV the old fills | RAMP stays fills-only; no new kind of row |
+| Y4 Same-millisecond partial fills | You will check a real export | Decides how urgent Finding B is. It gets fixed either way |
+| Y5 Intraday stops | Watched in **TT** | Phase 3 (live marks) deferred; settlement plus typed marks are enough |
+| Y6 Per-fill id column in the TT grid | You will check the column chooser | If one exists, CSV and feed share one identity. If not, the fingerprint backstop is required |
+| Y7 Grid time zone | Not sure | The import will **ask once per broker and store it**, instead of using the computer's zone (fixes Finding A) |
 
 ---
 
