@@ -3,6 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
+import { reconcile } from "./lib/reconcile.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -2429,7 +2430,7 @@ function Tracker({ user }) {
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
+        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
@@ -4557,6 +4558,76 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
 }
 
 /*
+ * The difference waterfall: RAMP's net equity, then each cause of difference, to Orient's.
+ * Each line shows both figures, the difference and what to do about it. Matching lines are
+ * shown too, dimmed — "this agrees" is part of the answer.
+ */
+function Reconciliation({ r, brokers, rampId, setRampId, cents, fmtDate }) {
+  if (r.error) return <div className="warn">Can't compare against your book: {r.error}</div>;
+  const cur = r.ccy || "USD";
+  const label = (t) => String(t).replace(/\d{4}-\d{2}-\d{2}/g, (d) => fmtDate(d));
+  const Row = ({ l, strong }) => (
+    <tr className={l.ok ? "dim" : ""}>
+      <td className="txt">{strong ? <b>{label(l.label)}</b> : label(l.label)}{l.orientLabel && <div className="faint" style={{ fontSize: 10 }}>{l.orientLabel} vs {l.rampLabel.replace(/^RAMP /, "")}</div>}</td>
+      <td>{cents(l.orient, cur)}</td>
+      <td>{cents(l.ramp, cur)}</td>
+      <td className={l.ok ? "ok" : "warn"}><b>{l.ok ? "✓" : (l.diff > 0 ? "+" : "") + cents(l.diff, cur)}</b></td>
+      <td className="txt faint" style={{ fontSize: 11 }}>{l.ok ? "" : l.fix}</td>
+    </tr>
+  );
+  const allOk = r.tneLine.ok && r.im.ok && r.positionsMatch;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, fontSize: 14 }}>Against your book</h3>
+        <span className="faint" style={{ fontSize: 12 }}>Orient {r.account} · {fmtDate(r.from)} to {fmtDate(r.to)} ({r.days} statement{r.days === 1 ? "" : "s"}) · compared with</span>
+        <select value={rampId} onChange={(e) => setRampId(e.target.value)} aria-label="RAMP account to compare">
+          {brokers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </div>
+      <div className={allOk ? "ok" : "warn"} style={{ fontSize: 12, margin: "6px 0" }}>
+        {allOk ? "Net equity, margin and positions all agree with Orient."
+          : `Net equity differs by ${cents(r.tneLine.diff, cur)} (Orient minus RAMP). The lines below say where it comes from.`}
+      </div>
+      <div className="tw">
+        <table>
+          <thead><tr><th className="txt">Line</th><th>Orient</th><th>RAMP</th><th>Difference</th><th className="txt">What to do</th></tr></thead>
+          <tbody>
+            {r.lines.map((l) => <Row key={l.key} l={l} />)}
+            <Row l={r.cashLine} strong />
+            {r.openLines.map((l) => <Row key={l.key} l={l} />)}
+            <Row l={r.tneLine} strong />
+            {Math.abs(r.unexplained) > 0.005 && <tr><td className="txt bad" colSpan={5}>Unexplained: {cents(r.unexplained, cur)}. The lines above should account for everything; please report this.</td></tr>}
+            <Row l={{ label: "Initial margin", orient: r.im.orient, ramp: r.im.ramp, diff: r.im.orient - r.im.ramp, ok: r.im.ok,
+              fix: r.im.implied?.perLot ? `Orient charges about ${cents(r.im.implied.perLot, cur)} a lot on ${r.im.implied.product} (${r.im.implied.lots} lots); you have ${cents(r.im.implied.current, cur)} in Settings. Changing it is your call.` : "Margin per lot in Settings differs from Orient's." }} />
+          </tbody>
+        </table>
+      </div>
+      {r.noPositionsFile ? <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>The last statement has no Open Position file, so positions aren't compared.</div> : (
+        <div className="tw" style={{ marginTop: 8 }}>
+          <table>
+            <thead><tr><th className="txt">Contract (legs)</th><th>Orient lots</th><th>Orient avg</th><th>Settlement</th><th>RAMP lots</th><th>RAMP avg</th><th className="txt"></th></tr></thead>
+            <tbody>
+              {r.positions.map((p) => (
+                <tr key={p.contract} className={p.match ? "dim" : ""}>
+                  <td className="txt">{p.contract}</td>
+                  <td>{p.orient ? p.orient.lots : 0}</td><td>{p.orient ? p.orient.avg : "—"}</td><td>{p.orient?.settle ?? "—"}</td>
+                  <td>{p.ramp ? p.ramp.lots : 0}</td><td>{p.ramp ? p.ramp.avg : "—"}</td>
+                  <td className={`txt ${p.match ? "ok" : "warn"}`}>{p.match ? "✓" : !p.lotsMatch ? "Different lots" : "Different average price"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+        RAMP as of the close of {fmtDate(r.to)}: fills up to that trading day (CME's day ends 4pm Chicago), Funds entries and charges to that day, your prices from the Positions tab. Nothing here changes your book.
+      </div>
+    </div>
+  );
+}
+
+/*
  * Daily broker statements: drop in the zips, type the password once, see what's inside.
  *
  * Opened entirely in this browser (src/lib/statements.js). The password lives in a ref for
@@ -4567,7 +4638,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
  * Reconciling these figures against the book is the next step, and when it comes it will
  * propose, never post.
  */
-function StatementsPanel() {
+function StatementsPanel({ settings, fills = [] }) {
   const [list, setList] = useState([]);
   const listRef = useRef([]);
   const [pending, setPending] = useState([]);       // zips waiting on a password
@@ -4659,10 +4730,38 @@ function StatementsPanel() {
     const op = st.files.find((x) => x.kind === "csv" && isOpenPosition(x.name));
     const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
     if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
-    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions: pos && !pos.problems.length ? positionsOf(pos.lots) : null }];
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, lots: pos && !pos.problems.length ? pos.lots : null, positions: pos && !pos.problems.length ? positionsOf(pos.lots) : null }];
   })), [list]);
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
-  const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
+  const read = useMemo(() => list.filter((st) => summaries.get(st.checksum)?.accounts.length), [list, summaries]);
+
+  /*
+   * Against the book (src/lib/reconcile.js): the loaded statements set against the RAMP
+   * account they belong to, over the same trading days. Read-only — every line says what
+   * differs and where to put it right; nothing here changes anything.
+   */
+  const brokers = settings?.brokers || [];
+  const guess = brokers.find((b) => b.id === "orient") || brokers.find((b) => /orient/i.test(b.name)) || brokers[0];
+  const [rampId, setRampId] = useState(guess?.id || "");
+  const rampAcct = brokers.find((b) => b.id === rampId) || guess;
+  const recon = useMemo(() => {
+    if (!rampAcct || !read.length) return null;
+    const usable = read.filter((st) => !summaries.get(st.checksum).problems.length);
+    if (!usable.length) return null;
+    const byId = Object.fromEntries(brokers.map((b) => [b.id, b]));
+    const mine = fills.filter((f) => (f.broker || "default") === rampAcct.id);
+    const marks = Object.fromEntries(Object.entries(settings.marks || {})
+      .filter(([k, v]) => k.startsWith(`${rampAcct.id}|`) && has(v?.price)).map(([k, v]) => [k.slice(rampAcct.id.length + 1), n(v.price)]));
+    try {
+      return reconcile({
+        statements: usable.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum).accounts, lots: summaries.get(st.checksum).lots })),
+        fills: withCommission(mine, byId),
+        cash: (settings.cash || []).filter((c) => c.broker === rampAcct.id),
+        account: { capital: n(rampAcct.capital), method: matchOf(rampAcct), includeRealized: !!settings.limits?.includeRealized, products: rampAcct.products },
+        marks, chargeTotal, sizeOf: (p) => sizeOf(rampAcct.products?.[p], p),
+      });
+    } catch (e) { return { error: e.message }; }
+  }, [read, summaries, rampAcct, fills, settings, brokers]);
   const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
 
   return (
@@ -4754,6 +4853,7 @@ function StatementsPanel() {
                   : `Day to day: every opening balance matches the previous statement's closing balance, across ${read.length} statements.`}
               </div>
             )}
+            {recon && <Reconciliation r={recon} brokers={brokers} rampId={rampAcct?.id} setRampId={setRampId} cents={cents} fmtDate={fmtDate} />}
             {shown && (() => {
               const [sum, name] = [shown.slice(0, shown.indexOf("|")), shown.slice(shown.indexOf("|") + 1)];
               const f = list.find((x) => x.checksum === sum)?.files.find((x) => x.name === name);
@@ -4779,7 +4879,7 @@ function StatementsPanel() {
 }
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
-function FundsTab({ pf, settings, setSettings, view }) {
+function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -4929,7 +5029,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
         </section>
       </div>
     </div>
-    <StatementsPanel />
+    <StatementsPanel settings={settings} fills={fills} />
     </>
   );
 }
