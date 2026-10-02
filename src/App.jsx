@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
+import { classifyCash, fileKeys, fromLegacy, accepted, NEAR_DAYS } from "./lib/cash.js";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
@@ -2230,10 +2231,24 @@ function Tracker({ user }) {
   const [loadErr, setLoadErr] = useState(null);
   const firstSave = useRef(true);
   const reloadFills = async () => setFills((await db.loadFills()).map((f) => ({ ...f, broker: f.broker || "default" })));
+  /*
+   * The cash ledger, every entry including ones proposed or turned down (migration 0013).
+   * settings.cash is no longer read or written for the ledger: it is the old copy, kept as
+   * the backup. Until the database has the new table, that old copy is shown read-only.
+   */
+  const [cash, setCash] = useState(null);
+  const [cashLocked, setCashLocked] = useState(false);
+  const reloadCash = async (legacy) => {
+    try { setCash(await db.loadCash()); setCashLocked(false); }
+    catch (e) {
+      if (e.code !== "NO_CASH_TABLE") throw e;
+      setCash(fromLegacy(legacy)); setCashLocked(true);
+    }
+  };
 
   useEffect(() => {
     (async () => {
-      try { setSettings(migrate(await db.loadSettings())); await reloadFills(); }
+      try { const s = migrate(await db.loadSettings()); setSettings(s); await reloadFills(); await reloadCash(s.cash); }
       catch (e) { setLoadErr(e.message); }
     })();
   }, [user?.id]);
@@ -2265,7 +2280,13 @@ function Tracker({ user }) {
     });
   }, [fills, settings]);
 
-  const pf = useMemo(() => (settings ? portfolio(fills, settings) : null), [fills, settings]);
+  /*
+   * What every screen reads: the settings, with the ledger's ACCEPTED entries in place of
+   * the old list. Screens only ever change settings through setSettings(fn), which works on
+   * the stored settings, so this view is never what gets saved.
+   */
+  const book = useMemo(() => (settings && cash ? { ...settings, cash: accepted(cash) } : null), [settings, cash]);
+  const pf = useMemo(() => (book ? portfolio(fills, book) : null), [fills, book]);
 
   /*
    * Writes today's equity, margin and lots for each account into settings, so
@@ -2303,6 +2324,16 @@ function Tracker({ user }) {
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
   const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
   const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
+  // Every write to the ledger goes through here, and so through the database's unique key.
+  const locked = () => { throw new Error("The funds ledger is read-only until the database update (migration 0013) has been run."); };
+  const ledger = {
+    all: cash || [],
+    locked: cashLocked,
+    add: async (entries) => { if (cashLocked) locked(); const res = await db.addCash(entries); await reloadCash(); return res; },
+    update: async (id, patch) => { if (cashLocked) locked(); await db.updateCash(id, patch); await reloadCash(); },
+    remove: async (id) => { if (cashLocked) locked(); await db.deleteCash(id); await reloadCash(); },
+    removeAll: async () => { if (cashLocked) locked(); await db.deleteAllCash(); await reloadCash(); },
+  };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
   /*
    * Hiding the figures across the top. Its own preference, deliberately separate from the
@@ -2421,13 +2452,14 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
-        {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
-        {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
-        {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
-        {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
-        {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
+        {cashLocked && <div className="banner">The funds ledger is read-only until the database update (migration 0013) has been run. Your deposits and charges are shown as they were.</div>}
+        {tab === "dash" && <Dashboard pf={pf} settings={book} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
+        {tab === "scen" && <ScenarioTab pf={pf} settings={book} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
+        {tab === "fills" && <FillsTab ledger={ledger} settings={book} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
+        {tab === "closed" && <ClosedTab pf={pf} settings={book} setSettings={setSettings} view={view} fills={fills} />}
+        {tab === "analysis" && <AnalysisTab pf={pf} settings={book} setSettings={setSettings} view={view} fills={fills} />}
+        {tab === "funds" && <FundsTab ledger={ledger} pf={pf} settings={book} setSettings={setSettings} view={view} />}
+        {tab === "settings" && <SettingsTab ledger={ledger} settings={book} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
     </DirtyCtx.Provider>
@@ -3404,7 +3436,7 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
 }
 
 // ---------- fills ----------
-function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, setBroker }) {
+function FillsTab({ ledger, settings, setSettings, view, fills, addFills, reloadFills, setBroker }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const [target, setTarget] = useState(view !== "all" ? view : brokers[0]?.id);
@@ -3430,6 +3462,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
   const [spreadMode, setSpreadMode] = useState("spread");
   const [applySizes, setApplySizes] = useState(true);
   const [importCash, setImportCash] = useState(true);
+  const [includeNearCash, setIncludeNearCash] = useState(false);
   const [filter, setFilter] = useState({ broker: view !== "all" ? view : "", product: "", side: "", from: "", to: "" });
   const [openLegs, setOpenLegs] = useState(null);   // order_id whose legs are shown
   const [limit, setLimit] = useState(200);
@@ -3496,7 +3529,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
       if (aiHelp) askForMapping(headers, rows);
     } catch (err) { setResult(["bad", `Couldn't read those rows: ${err.message}`]); }
   };
-  const reset = () => { setCsv(null); setAiState(null); setIncludeManual(false); setSplit(true); setApplySizes(true); setSpreadMode("spread"); setImportCash(true); if (fileRef.current) fileRef.current.value = ""; };
+  const reset = () => { setCsv(null); setAiState(null); setIncludeManual(false); setSplit(true); setApplySizes(true); setSpreadMode("spread"); setImportCash(true); setIncludeNearCash(false); if (fileRef.current) fileRef.current.value = ""; };
   const resolveBroker = (raw) => { const v = raw.toLowerCase(); return brokers.find((b) => b.id.toLowerCase() === v || b.name.toLowerCase() === v)?.id || null; };
   // A file holding several broker accounts (e.g. two MT5 logins) is split into separate portal accounts,
   // because each account has its own margin level.
@@ -3546,9 +3579,21 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         return storedByRef.get(`${r.broker || "default"}|${r.ref}`)?.position !== r.position;
       })
     : [];
-  // Deposits/withdrawals found in the file that aren't in the ledger yet (same account, amount, type and minute)
-  const cashKey = (c) => `${c.broker}|${c.type}|${(+c.amount).toFixed(2)}|${String(c.ts).slice(0, 16)}`;
-  const cashNew = parsed ? (() => { const have = new Set((settings.cash || []).map(cashKey)); return parsed.cash.filter((c) => !have.has(cashKey(c))); })() : [];
+  /*
+   * Deposits and withdrawals in the file, sorted against the whole ledger (src/lib/cash.js):
+   * new ones are offered; ones already there — by deal number or identical content — are
+   * not; and ones that merely look like an entry already there (same account, type and
+   * amount within a few days) are listed for the trader to judge, never added quietly.
+   */
+  const cashSort = parsed && !ledger.locked ? (() => {
+    const keys = fileKeys(parsed.cash);
+    return classifyCash(parsed.cash.map((c, i) => ({ ...c, source: "csv", key: keys[i] })), ledger.all);
+  })() : null;
+  const cashNew = cashSort ? cashSort.rows.filter((c) => c.status === "new") : [];
+  const cashNear = cashSort ? cashSort.rows.filter((c) => c.status === "possible") : [];
+  const cashHeld = cashSort ? cashSort.counts.stored + cashSort.counts.fileDup : 0;
+  // What would go to Funds if the import ran now. Possible matches only when ticked.
+  const cashOffered = (importCash ? cashNew.length : 0) + (includeNearCash ? cashNear.length : 0);
   const missingReq = FIELDS.filter((x) => x.required && !map[x.key]);
 
   const doImport = async () => {
@@ -3577,14 +3622,18 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
         });
         return { ...st, brokers: all };
       });
-      const newCash = importCash ? cashNew : [];
-      if (newCash.length) setSettings((st) => ({ ...st, cash: [...(st.cash || []), ...newCash.map((c) => ({ ...c, id: crypto.randomUUID(), source: "csv" }))] }));
+      const offered = [...(importCash ? cashNew : []), ...(includeNearCash ? cashNear : [])];
+      // The count is what the database stored, not what was sent.
+      const { added: cashAdded } = offered.length ? await ledger.add(offered.map(({ status, match, ...c }) => c)) : { added: 0 };
+      // Held back here, plus any the database refused as already stored (another tab, say).
+      const cashSkipped = cashHeld + offered.length - cashAdded;
+      const cashLeft = includeNearCash ? 0 : cashNear.length;
       const { added, updated } = payload.length ? await addFills(payload) : { added: 0, updated: 0 };
       setBroker(tb.id, "csv", { map, dateFormat });
       // A repaired row is neither new nor skipped; counting it as skipped would report a
       // duplicate where something was actually put right.
       const skipped = Math.max(0, parsed.rows.length - added - updated);
-      setResult(["ok", `${newCash.length ? `Added ${newCash.length} deposit/withdrawal${newCash.length === 1 ? "" : "s"} to Funds · ` : ""}Imported ${added} new fill${added === 1 ? "" : "s"}${updated ? ` · updated ${updated} existing fill${updated === 1 ? "" : "s"} with position tickets` : ""} to ${newIds.length || splitting ? acctVals.join(" & ") : tb.name}${newIds.length ? ` · created ${newIds.length} account${newIds.length === 1 ? "" : "s"} — record their deposits in Funds` : ""}${skipped ? ` · ${skipped} duplicate${skipped === 1 ? "" : "s"} skipped` : ""}${parsed.nonTrade ? ` · ${parsed.nonTrade} non-trade rows ignored` : ""}${parsed.errors.length ? ` · ${parsed.errors.length} unreadable rows` : ""}`]);
+      setResult(["ok", `${cashAdded ? `Added ${cashAdded} deposit/withdrawal${cashAdded === 1 ? "" : "s"} to Funds · ` : ""}${cashSkipped > 0 ? `${cashSkipped} already in Funds · ` : ""}${cashLeft ? `${cashLeft} that look${cashLeft === 1 ? "s" : ""} like ${cashLeft === 1 ? "an entry" : "entries"} already in Funds left out · ` : ""}Imported ${added} new fill${added === 1 ? "" : "s"}${updated ? ` · updated ${updated} existing fill${updated === 1 ? "" : "s"} with position tickets` : ""} to ${newIds.length || splitting ? acctVals.join(" & ") : tb.name}${newIds.length ? ` · created ${newIds.length} account${newIds.length === 1 ? "" : "s"} — record their deposits in Funds` : ""}${skipped ? ` · ${skipped} duplicate${skipped === 1 ? "" : "s"} skipped` : ""}${parsed.nonTrade ? ` · ${parsed.nonTrade} non-trade rows ignored` : ""}${parsed.errors.length ? ` · ${parsed.errors.length} unreadable rows` : ""}`]);
       reset();
     } catch (e) { setResult(["bad", `Import failed: ${e.message}`]); }
     setBusy(false);
@@ -3747,9 +3796,17 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
               {cashNew.length > 0 && (
                 <label className="check">
                   <input type="checkbox" checked={importCash} onChange={(e) => setImportCash(e.target.checked)} />
-                  <span>Also add {cashNew.length} deposit/withdrawal{cashNew.length === 1 ? "" : "s"} found in this report to Funds<br /><span className="faint">{cashNew.slice(0, 3).map((c) => `${c.type === "deposit" ? "+" : "−"}${money(c.amount)} on ${dt(c.ts)}`).join(" · ")}{cashNew.length > 3 ? " …" : ""}</span></span>
+                  <span>Also add {cashNew.length} deposit/withdrawal{cashNew.length === 1 ? "" : "s"} found in this report to Funds{cashHeld ? ` (${cashHeld} already there)` : ""}<br /><span className="faint">{cashNew.slice(0, 3).map((c) => `${c.type === "deposit" ? "+" : "−"}${money(c.amount)} on ${dt(c.ts)}`).join(" · ")}{cashNew.length > 3 ? " …" : ""}</span></span>
                 </label>
               )}
+              {cashNear.length > 0 && (
+                <label className="check">
+                  <input type="checkbox" checked={includeNearCash} onChange={(e) => setIncludeNearCash(e.target.checked)} />
+                  <span>Add {cashNear.length} that look{cashNear.length === 1 ? "s" : ""} like {cashNear.length === 1 ? "an entry" : "entries"} already in Funds<br /><span className="faint">{cashNear.slice(0, 3).map((c) => `${c.type === "deposit" ? "+" : "−"}${money(c.amount)} on ${dt(c.ts)} — you have ${money(c.match.amount)} on ${dt(c.match.ts)}`).join(" · ")}{cashNear.length > 3 ? " …" : ""}. Same account, type and amount within {NEAR_DAYS} days. Leave unticked if it is the same money.</span></span>
+                </label>
+              )}
+              {!cashNew.length && !cashNear.length && cashHeld > 0 && <div className="dim">{cashHeld} deposit/withdrawal{cashHeld === 1 ? "" : "s"} in this report {cashHeld === 1 ? "is" : "are"} already in Funds.</div>}
+              {ledger.locked && parsed?.cash.length > 0 && <div className="warn">{parsed.cash.length} deposit/withdrawal{parsed.cash.length === 1 ? "" : "s"} in this report can't be added until the funds ledger's database update has been run.</div>}
               {missingReq.length > 0 ? <div className="bad">Choose a column for: {missingReq.map((x) => x.label).join(", ")}</div> : parsed && (
                 <div>
                   <div className="preview" style={{ marginTop: 0 }}>
@@ -3771,7 +3828,7 @@ function FillsTab({ settings, setSettings, view, fills, addFills, reloadFills, s
                 </div>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !(importCash && cashNew.length))} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && importCash && cashNew.length ? `Add ${cashNew.length} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} with position tickets` : "Nothing new to import"}</button>
+                <button className="btn" style={{ flex: 1 }} disabled={busy || missingReq.length > 0 || (!toImport.length && !toRepair.length && !cashOffered)} onClick={doImport}>{busy ? "Importing…" : !toImport.length && !toRepair.length && cashOffered ? `Add ${cashOffered} to Funds` : toImport.length ? `Import ${toImport.length} to ${splitting ? `${acctVals.length} accounts` : effMap.broker ? "brokers" : tb.name}${toRepair.length ? ` · repair ${toRepair.length}` : ""}` : toRepair.length ? `Update ${toRepair.length} stored fill${toRepair.length === 1 ? "" : "s"} with position tickets` : "Nothing new to import"}</button>
                 <button className="btn ghost" onClick={reset}>Cancel</button>
               </div>
             </>
@@ -4145,7 +4202,7 @@ function Sortable({ className, storeKey, items, settings, setSettings }) {
   );
 }
 
-function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
+function SettingsTab({ ledger, settings, setSettings, pf, fills, reloadFills }) {
   const addBroker = () => {
     const id = `b${Date.now().toString(36)}`;
     setSettings((s) => ({ ...s, brokers: [...s.brokers, { ...NEW_BROKER, id, name: `Broker ${s.brokers.length + 1}` }] }));
@@ -4166,7 +4223,7 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
       <Sortable className="setcards" storeKey="settings" settings={settings} setSettings={setSettings}
         items={[
           { id: "limits", title: "Your limits", node: <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} /> },
-          { id: "reset", title: "Delete or reset data", node: <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} /> },
+          { id: "reset", title: "Delete or reset data", node: <ResetPanel ledger={ledger} settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} /> },
           /* Only where there is an account to close. In browser-storage mode there is no
              server, no subscription and nobody to ask — "delete all fills" is already the
              whole of it, so the panel is absent rather than present and inert. */
@@ -4509,7 +4566,7 @@ function CloseAccountPanel({ fills, brokers }) {
   );
 }
 
-function ResetPanel({ settings, setSettings, fills, reloadFills }) {
+function ResetPanel({ ledger, settings, setSettings, fills, reloadFills }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const [bid, setBid] = useState(brokers[0]?.id || "");
@@ -4532,6 +4589,11 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
       confirmLabel: "Reset everything", tone: "danger",
     });
     if (!ok) return;
+    // The ledger is its own table now, so "reset everything" has to clear it there too.
+    if (!ledger.locked) {
+      try { await ledger.removeAll(); }
+      catch (e) { setMsg(["bad", `Could not clear the funds ledger: ${e.message}. Nothing was reset.`]); return; }
+    }
     setSettings(migrate(null)); done("Settings reset to defaults.");
   };
   return (
@@ -4554,7 +4616,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
 }
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
-function FundsTab({ pf, settings, setSettings, view }) {
+function FundsTab({ ledger, pf, settings, setSettings, view }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -4563,11 +4625,30 @@ function FundsTab({ pf, settings, setSettings, view }) {
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const cash = [...(settings.cash || [])].filter((c) => view === "all" || c.broker === view).sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const set = (k, v) => { setF((x) => ({ ...x, [k]: v })); setMsg(null); };
-  const add = () => {
+  const add = async () => {
     if (!(n(f.amount) > 0) || !f.broker || !f.date) return;
-    const entry = { id: crypto.randomUUID(), broker: f.broker, type: f.type, amount: n(f.amount), ts: new Date(`${f.date}T12:00:00`).toISOString(), note: f.note.trim(), source: "manual" };
+    const entry = { broker: f.broker, type: f.type, amount: n(f.amount), ts: new Date(`${f.date}T12:00:00`).toISOString(), note: f.note.trim(), source: "manual", key: `manual:${crypto.randomUUID()}` };
     if (f.type === "charge") { entry.category = f.category; if (f.monthly) entry.recurring = "monthly"; }
-    setSettings((s) => ({ ...s, cash: [...(s.cash || []), entry] }));
+    /*
+     * Typing a deposit that a report or statement already brought in is the double count
+     * the ledger exists to stop. The key cannot catch it — a hand-typed entry has its own —
+     * so the content is compared, and anything close is put to the trader before it lands.
+     */
+    const [near] = classifyCash([entry], ledger.all).rows;
+    if (near.status !== "new") {
+      const m = near.match;
+      const { ok } = await ask({
+        title: near.status === "stored" ? "This is already in Funds" : "Is this already in Funds?",
+        body: m
+          ? `${m.type === "charge" ? m.category || "Charge" : m.type === "deposit" ? "Deposit" : "Withdrawal"} of ${money(n(m.amount))} on ${new Date(m.ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} — same account, type and amount${m.source && m.source !== "manual" ? `, from ${m.source === "csv" ? "an imported report" : m.source === "statement" ? "a broker statement" : "your earlier ledger"}` : ""}.`
+          : "An entry with the same account, type, amount and time is already recorded.",
+        detail: "Recording it again counts the money twice. Only record it if this is a separate payment.",
+        confirmLabel: `Record a second ${f.type}`, tone: "danger",
+      });
+      if (!ok) return;
+    }
+    try { await ledger.add([entry]); }
+    catch (e) { setMsg(["bad", `Not recorded: ${e.message}`]); return; }
     setMsg(["ok", f.type === "charge" ? `Recorded ${f.category} charge of ${money(entry.amount)}${f.monthly ? " a month" : ""} for ${bname(f.broker)}.` : `Recorded ${f.type} of ${money(entry.amount)} for ${bname(f.broker)}.`]);
     setF((x) => ({ ...x, amount: "", note: "" }));
   };
@@ -4579,7 +4660,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
       detail: "Account equity is worked out from this ledger, so your capital and TNE/IM will change.",
       confirmLabel: "Delete entry", tone: "danger",
     });
-    if (ok) setSettings((s) => ({ ...s, cash: s.cash.filter((c2) => c2.id !== id) }));
+    if (ok) { try { await ledger.remove(id); } catch (e) { setMsg(["bad", `Not deleted: ${e.message}`]); } }
   };
   const stopMonthly = async (id) => {
     const { ok } = await ask({
@@ -4588,7 +4669,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
       detail: "Use this when a subscription ends — it keeps the history honest rather than deleting the charge.",
       confirmLabel: "Stop from today",
     });
-    if (ok) setSettings((s) => ({ ...s, cash: s.cash.map((c) => (c.id === id ? { ...c, endTs: new Date().toISOString() } : c)) }));
+    if (ok) { try { await ledger.update(id, { endTs: new Date().toISOString() }); } catch (e) { setMsg(["bad", `Not changed: ${e.message}`]); } }
   };
   const setStmt = (id, v) => setSettings((s) => ({ ...s, statement: { ...(s.statement || {}), [id]: v } }));
   const accts = pf.accounts.filter((a) => view === "all" || a.id === view);
@@ -4617,7 +4698,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
             <F label="Date"><input className="in" type="date" value={f.date} onChange={(e) => set("date", e.target.value)} /></F>
             <F label="Note (optional)"><input className="in" value={f.note} placeholder="e.g. Wire ref 4471" onChange={(e) => set("note", e.target.value)} /></F>
           </div>
-          <button className={`btn full ${f.type === "deposit" ? "buy" : f.type === "charge" ? "charge" : "sell"}`} disabled={!(n(f.amount) > 0)} onClick={add}>Record {f.type}{n(f.amount) > 0 ? ` of ${money(n(f.amount), brokers.find((b) => b.id === f.broker)?.currency)}${f.type === "charge" && f.monthly ? " a month" : ""}` : ""}</button>
+          <button className={`btn full ${f.type === "deposit" ? "buy" : f.type === "charge" ? "charge" : "sell"}`} disabled={!(n(f.amount) > 0) || ledger.locked} onClick={add}>Record {f.type}{n(f.amount) > 0 ? ` of ${money(n(f.amount), brokers.find((b) => b.id === f.broker)?.currency)}${f.type === "charge" && f.monthly ? " a month" : ""}` : ""}</button>
           {msg && <div className={msg[0]} style={{ fontSize: 12 }}>{msg[1]}</div>}
           <small className="faint">Once an account has deposits or withdrawals here, its equity starts from net deposits instead of the Capital typed in Settings. Charges reduce equity. MT5 deal reports that include balance rows can add deposits automatically on upload.</small>
         </div>
