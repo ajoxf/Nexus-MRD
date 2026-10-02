@@ -1,5 +1,4 @@
 import { createClient } from "@supabase/supabase-js";
-import { addToLedger, fromLegacy, fromRow, toRow } from "./cash.js";
 
 const URL = import.meta.env.VITE_SUPABASE_URL;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -142,63 +141,6 @@ const remote = {
     const { error } = await supabase.from("fills").delete().eq("user_id", await myId()).eq("broker", broker);
     if (error) throw error;
   },
-
-  /*
-   * The cash ledger, one row per entry (migration 0013).
-   *
-   * Uniqueness is the database's job here, as it is for fills: a second entry with the same
-   * key for the same account is not stored, whatever the screen that sent it thought. The
-   * count returned is what Postgres actually inserted, so "added 3" means three.
-   *
-   * Until 0013 has been run the table does not exist. That is reported as NO_CASH_TABLE
-   * rather than as an error, so the app can show the old ledger read-only instead of
-   * refusing to load anybody's book.
-   */
-  async loadCash() {
-    const all = [];
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase.from("cash_entries").select("*").order("ts").range(from, from + 999);
-      if (error) {
-        if (error.code === "42P01" || error.code === "PGRST205") { const e = new Error("The funds ledger needs a database update (migration 0013)."); e.code = "NO_CASH_TABLE"; throw e; }
-        throw error;
-      }
-      all.push(...data);
-      if (data.length < 1000) break;
-    }
-    return all.map(fromRow);
-  },
-  async addCash(entries) {
-    if (!entries.length) return { added: 0 };
-    const uid = await myId();
-    const rows = entries.map((c) => ({ ...toRow(c), user_id: uid }));
-    let added = 0;
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const { data, error } = await supabase
-        .from("cash_entries")
-        .upsert(rows.slice(i, i + CHUNK), { onConflict: "user_id,broker,source_key", ignoreDuplicates: true })
-        .select("id");
-      if (error) throw error;
-      added += data.length;
-    }
-    return { added };
-  },
-  // Only the fields a trader can change after the fact: a monthly charge stopping, or a
-  // proposed entry being accepted or turned down. Amount, date and key are never rewritten.
-  async updateCash(id, patch) {
-    const row = {};
-    if ("endTs" in patch) row.end_ts = patch.endTs;
-    if ("status" in patch) row.status = patch.status;
-    const { error } = await supabase.from("cash_entries").update(row).eq("id", id);
-    if (error) throw error;
-  },
-  async deleteCash(id) {
-    const { error } = await supabase.from("cash_entries").delete().eq("id", id);
-    if (error) throw error;
-  },
-  async deleteAllCash() {
-    const { error } = await supabase.from("cash_entries").delete().eq("user_id", await myId());
-    if (error) throw error;
-  },
 };
 
 // ---------- Signing in and out ----------
@@ -329,22 +271,9 @@ export const auth = isRemote
     };
 
 // ---------- Browser storage (used until a database is connected) ----------
-const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills", LS_CASH = "mrt:cash";
+const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills";
 const readFills = () => JSON.parse(localStorage.getItem(LS_FILLS) || "[]");
 const writeFills = (f) => localStorage.setItem(LS_FILLS, JSON.stringify(f));
-/*
- * The ledger in this browser. The first time it is read it is seeded from the old list in
- * settings — the same copy 0013 makes in the database — and from then on it is its own
- * list. The old one is left where it was, as the backup.
- */
-const readCash = () => {
-  const raw = localStorage.getItem(LS_CASH);
-  if (raw) return JSON.parse(raw);
-  const legacy = fromLegacy(JSON.parse(localStorage.getItem(LS_SETTINGS) || "null")?.cash);
-  localStorage.setItem(LS_CASH, JSON.stringify(legacy));
-  return legacy;
-};
-const writeCash = (c) => localStorage.setItem(LS_CASH, JSON.stringify(c));
 
 const local = {
   /*
@@ -383,19 +312,6 @@ const local = {
   async deleteFill(id) { writeFills(readFills().filter((f) => f.id !== id)); },
   async deleteAllFills() { writeFills([]); },
   async deleteBrokerFills(broker) { writeFills(readFills().filter((f) => (f.broker || "default") !== broker)); },
-  async loadCash() { return readCash(); },
-  // The same rule as the database's unique key, applied to the list in this browser.
-  async addCash(entries) {
-    const { ledger, added } = addToLedger(readCash(), entries);
-    writeCash(ledger);
-    return { added };
-  },
-  async updateCash(id, patch) {
-    const keep = Object.fromEntries(Object.entries(patch).filter(([k]) => k === "endTs" || k === "status"));
-    writeCash(readCash().map((c) => (c.id === id ? { ...c, ...keep } : c)));
-  },
-  async deleteCash(id) { writeCash(readCash().filter((c) => c.id !== id)); },
-  async deleteAllCash() { writeCash([]); },
 };
 
 export const db = isRemote ? remote : local;
