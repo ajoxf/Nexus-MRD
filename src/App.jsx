@@ -3,6 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
+import { spreadsOf } from "./lib/statementSpreads.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -4659,7 +4660,8 @@ function StatementsPanel() {
     const op = st.files.find((x) => x.kind === "csv" && isOpenPosition(x.name));
     const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
     if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
-    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions: pos && !pos.problems.length ? positionsOf(pos.lots) : null }];
+    const positions = pos && !pos.problems.length ? positionsOf(pos.lots) : null;
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions, spreads: positions ? spreadsOf(positions) : null }];
   })), [list]);
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
   const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
@@ -4719,9 +4721,16 @@ function StatementsPanel() {
                             <td className="txt" style={{ fontSize: 12 }}>
                               {!sm.positions ? <span className="faint">No Open Position file</span>
                                 : !sm.positions.length ? <span className="faint">None</span>
-                                : sm.positions.map((ps) => (
-                                  <div key={`${ps.account}|${ps.label}`}>{ps.label} <b className={ps.lots > 0 ? "ok" : "bad"}>{ps.lots > 0 ? "+" : ""}{ps.lots}</b> @ {ps.avg} · settle {ps.settle ?? "—"} · {cents(ps.upl, cur)}</div>
-                                ))}
+                                : <>
+                                  {/* Spreads first, paired from Orient's legs (src/lib/statementSpreads.js); the legs as Orient lists them underneath. */}
+                                  {sm.spreads.spreads.map((sp, i) => (
+                                    <div key={`sp|${i}`}>{sp.label} <b className={sp.lots > 0 ? "ok" : "bad"}>{sp.lots > 0 ? "+" : ""}{sp.lots}</b> @ {+sp.entry.toFixed(4)} · settle {sp.settle === null ? "—" : +sp.settle.toFixed(4)} · {cents(sp.upl, cur)}</div>
+                                  ))}
+                                  {sm.spreads.outrights.map((o, i) => (
+                                    <div key={`out|${i}`}>{o.label} <b className={o.lots > 0 ? "ok" : "bad"}>{o.lots > 0 ? "+" : ""}{o.lots}</b> outright @ {o.avg} · settle {o.settle ?? "—"} · {cents(o.upl, cur)}</div>
+                                  ))}
+                                  <div className="faint" style={{ marginTop: 2 }}>Legs: {sm.positions.map((ps) => `${ps.label} ${ps.lots > 0 ? "+" : ""}${ps.lots} @ ${ps.avg} · settle ${ps.settle ?? "—"} · ${cents(ps.upl, cur)}`).join("; ")}</div>
+                                </>}
                             </td>
                             <td className={`txt ${sm.failed.length ? "warn" : "ok"}`} title={sm.failed.map((c) => (isFinite(c.got) ? `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}` : c.label)).join("\n") || undefined}>
                               {sm.failed.length ? `${sm.failed.length} don't add up` : "Add up"}
