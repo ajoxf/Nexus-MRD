@@ -4721,16 +4721,43 @@ function StatementsPanel() {
                             <td className="txt" style={{ fontSize: 12 }}>
                               {!sm.positions ? <span className="faint">No Open Position file</span>
                                 : !sm.positions.length ? <span className="faint">None</span>
-                                : <>
-                                  {/* Spreads first — paired by Orient's exchange order id, else by rule (src/lib/statementSpreads.js); the legs as Orient lists them underneath. */}
-                                  {sm.spreads.spreads.map((sp, i) => (
-                                    <div key={`sp|${i}`}>{sp.label} <b className={sp.lots > 0 ? "ok" : "bad"}>{sp.lots > 0 ? "+" : ""}{sp.lots}</b> @ {+sp.entry.toFixed(4)} · settle {sp.settle === null ? "—" : +sp.settle.toFixed(4)} · {cents(sp.upl, cur)}{sp.by === "rule" && <span className="faint" title="Orient's file didn't link these legs by exchange order id, so they were paired by rule: CL–BZ same month, then HO–CL same month, then calendars."> · paired by rule</span>}</div>
-                                  ))}
-                                  {sm.spreads.outrights.map((o, i) => (
-                                    <div key={`out|${i}`}>{o.label} <b className={o.lots > 0 ? "ok" : "bad"}>{o.lots > 0 ? "+" : ""}{o.lots}</b> outright @ {o.avg} · settle {o.settle ?? "—"} · {cents(o.upl, cur)}</div>
-                                  ))}
-                                  <div className="faint" style={{ marginTop: 2 }}>Legs: {sm.positions.map((ps) => `${ps.label} ${ps.lots > 0 ? "+" : ""}${ps.lots} @ ${ps.avg} · settle ${ps.settle ?? "—"} · ${cents(ps.upl, cur)}`).join("; ")}</div>
-                                </>}
+                                : (() => {
+                                  /*
+                                   * A small table per statement: spreads first — paired by Orient's exchange
+                                   * order id, else by rule (src/lib/statementSpreads.js) — then anything left
+                                   * outright, then the legs as Orient lists them. The total is the legs' P/L,
+                                   * which is Orient's own figure; the spreads above add up to it.
+                                   */
+                                  const sign = (n) => <b className={n > 0 ? "ok" : "bad"}>{n > 0 ? "+" : ""}{n}</b>;
+                                  const px = (v) => (v === null || v === undefined ? "—" : +(+v).toFixed(4));
+                                  const total = sm.positions.reduce((t, ps) => t + ps.upl, 0);
+                                  return (
+                                    <table className="postable">
+                                      <thead><tr><th className="txt">Position</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
+                                      <tbody>
+                                        {sm.spreads.spreads.map((sp, i) => (
+                                          <tr key={`sp|${i}`}>
+                                            <td className="txt">{sp.label}{sp.by === "rule" && <span className="faint" title="Orient's file didn't link these legs by exchange order id, so they were paired by rule: CL–BZ same month, then HO–CL same month, then calendars."> · by rule</span>}</td>
+                                            <td>{sign(sp.lots)}</td><td>{px(sp.entry)}</td><td>{px(sp.settle)}</td><td className={sp.upl < 0 ? "bad" : ""}>{cents(sp.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        {sm.spreads.outrights.map((o, i) => (
+                                          <tr key={`out|${i}`}>
+                                            <td className="txt">{o.label} <span className="faint">outright</span></td>
+                                            <td>{sign(o.lots)}</td><td>{px(o.avg)}</td><td>{px(o.settle)}</td><td className={o.upl < 0 ? "bad" : ""}>{cents(o.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        <tr className="legs-head"><td className="txt" colSpan={5}>Legs, as Orient lists them</td></tr>
+                                        {sm.positions.map((ps) => (
+                                          <tr key={`leg|${ps.account}|${ps.label}`} className="leg">
+                                            <td className="txt">{ps.label}</td><td>{ps.lots > 0 ? "+" : ""}{ps.lots}</td><td>{px(ps.avg)}</td><td>{px(ps.settle)}</td><td>{cents(ps.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        <tr className="total"><td className="txt" colSpan={4}>Total</td><td className={total < 0 ? "bad" : ""}>{cents(total, cur)}</td></tr>
+                                      </tbody>
+                                    </table>
+                                  );
+                                })()}
                             </td>
                             <td className={`txt ${sm.failed.length ? "warn" : "ok"}`} title={sm.failed.map((c) => (isFinite(c.got) ? `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}` : c.label)).join("\n") || undefined}>
                               {sm.failed.length ? `${sm.failed.length} don't add up` : "Add up"}

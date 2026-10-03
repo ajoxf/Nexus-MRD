@@ -748,3 +748,10 @@ table.daily tr.day[aria-expanded="true"] .twist { transform: rotate(90deg); }
 /* In its own column the grid does the constraining, so the table fills what it is given. */
 .grid-daily table.daily { max-width: none; }
 @media (max-width: 1100px) { .grid-daily { grid-template-columns: minmax(0, 1fr); } }
+
+/* Open positions inside a statement row: the app's table, compact. */
+table.postable { width: auto; margin: 0; }
+table.postable th, table.postable td { padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+table.postable tr.legs-head td { color: var(--faint); padding-top: 6px; font-size: 11px; }
+table.postable tr.leg td { color: var(--faint); }
+table.postable tr.total td { font-weight: 600; border-top: 1px solid var(--line, currentColor); }
