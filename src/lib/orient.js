@@ -210,6 +210,20 @@ export const POSITION_COLUMNS = {
 
 export const isOpenPosition = (fileName) => /^open position/i.test(String(fileName || "").trim());
 export const plainAccount = (s) => String(s ?? "").replace(/-/g, "").trim();
+
+/*
+ * The sub-account a lot sits in, as the Financial Summary numbers it.
+ *
+ * A sub-account's own statement writes it in full ("1-00305-001-1" → 1003050011). The GROUP
+ * statement writes only its short code — "0011", which Excel shows as 11 — and read as an
+ * account number that matched nothing, so every group row with positions reported its own
+ * figures as not adding up. The short code is the full number's last four digits, so it is
+ * joined to the group's. Anything else is left as it is, so a real mismatch still shows.
+ */
+export const subAccount = (sub, group) => {
+  const s = plainAccount(sub), g = plainAccount(group);
+  return /^\d{1,4}$/.test(s) && /^\d+$/.test(g) ? g + s.padStart(4, "0") : s;
+};
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // 202612 → "Dec26"
 export const monthLabel = (yyyymm) => { const m = /^(\d{4})(\d{2})$/.exec(String(yyyymm || "")); return m && +m[2] >= 1 && +m[2] <= 12 ? `${MONTHS[+m[2] - 1]}${m[1].slice(2)}` : String(yyyymm || ""); };
@@ -243,7 +257,7 @@ export function readOpenPositions(rows) {
     const side = cell("side").toUpperCase();
     if (side !== "B" && side !== "S") problems.push(`Open Position row ${row}, "BuySell": "${cell("side")}" is neither B nor S.`);
     const lot = {
-      tradeId: cell("tradeId"), account: plainAccount(cell("sub")), group: plainAccount(cell("group")),
+      tradeId: cell("tradeId"), account: subAccount(cell("sub"), cell("group")), group: plainAccount(cell("group")),
       code: cell("code"), month: cell("month"), expiry: cell("expiry"), kind: cell("kind").toUpperCase(), exchange: cell("exchange"),
       tradeDate: cell("tradeDate"), ccy: cell("ccy"),
       side, strike: num("strike", true), price: num("price"), qty: num("qty"), settle: num("settle"), upl: num("upl"),

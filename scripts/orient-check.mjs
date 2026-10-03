@@ -141,6 +141,29 @@ const readPos = (text) => readOpenPositions(Papa.parse(text, { skipEmptyLines: t
   const bent = lots.map((l, i) => (i === 1 ? { ...l, upl: l.upl * 2 } : l));
   eq('lots that imply different contract sizes are flagged', checkPositionsAgainstSummary(bent, summary).some((c) => /different contract sizes/.test(c.label)), true);
 }
+/*
+ * The GROUP statement's Open Position file names the sub-account by its short code — "0011",
+ * which Excel shows as 11 — where the sub-account's own statement writes "1-00305-001-1". Read
+ * as an account number, "0011" matched nothing in the Financial Summary, and every group row
+ * with positions said "2 don't add up": the group and 0011 shown against $0.00 of positions.
+ * The short code is the last four digits of the full number, so it is joined to the group.
+ */
+{
+  const summary = read(csv(
+    acct('TEST TRADER', '200100', { beginning: 30000, foUpl: -800, im: 4200 }),
+    acct('TEST TRADER-0000', '2001000000', { beginning: 50000 }),
+    acct('TEST TRADER-0011', '2001000011', { beginning: -20000, foUpl: -800, im: 4200 }))).accounts;
+  for (const [name, sub] of [['"0011"', '0011'], ['11, as Excel leaves it', '11'], ['the full "2-00100-001-1"', '2-00100-001-1']]) {
+    const { lots } = readPos(posCsv.replaceAll(',2-00100-001-1,', `,${sub},`));
+    eq(`group file, sub-account written ${name}: read as the full number`, [...new Set(lots.map((l) => l.account))], ['2001000011']);
+    eq(`group file, sub-account written ${name}: the sums add up`, checkPositionsAgainstSummary(lots, summary), []);
+  }
+  // Anything that is not a short code is left as it is, so a real mismatch still shows.
+  const { lots: odd } = readPos(posCsv.replaceAll(',2-00100-001-1,', ',TRADER-A,'));
+  eq('a sub-account that is not a number is not invented into one', odd[0].account !== '2001000011', true);
+  eq('…and the check still says the sums do not add up', checkPositionsAgainstSummary(odd, summary).length > 0, true);
+}
+
 eq('no open positions is an answer, not a problem', readPos(POS_HEADER), { lots: [], problems: [] });
 eq('a missing column stops the read', readPos(posCsv.replace('SettPrice,', 'Settle,')).problems, ['The Open Position file has no "SettPrice" column. Orient may have changed the layout.']);
 eq('a side that is neither B nor S is refused', readPos(posCsv.replace(',70.1,S,', ',70.1,X,')).problems, ['Open Position row 2, "BuySell": "X" is neither B nor S.']);
