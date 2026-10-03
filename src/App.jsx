@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
-import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
+import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored } from "./lib/statements.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
@@ -4582,6 +4582,46 @@ function StatementsPanel() {
   const fileRef = useRef(null);
   const folderRef = useRef(null);
   const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
+  // Whether statements are being kept: null while loading, then ["ok" | "warn" | "bad", text].
+  const [keep, setKeep] = useState(null);
+  const NO_TABLE = "Statements can't be saved yet: the statements table hasn't been added to the database (supabase/migrations/0013_statements.sql). What you open now is shown but not kept.";
+
+  // The statements kept from earlier visits, read back on every visit.
+  useEffect(() => {
+    let live = true;
+    db.loadStatements()
+      .then((rows) => {
+        if (!live) return;
+        const { all } = mergeStatements(listRef.current, rows.map(fromStored));
+        listRef.current = all;
+        setList(all);
+        setKeep(["ok", rows.length ? `${plural(rows.length, "saved statement")} loaded` : null]);
+      })
+      .catch((e) => { if (live) setKeep(e.code === "NO_TABLE" ? ["warn", NO_TABLE] : ["bad", `Saved statements couldn't be loaded: ${e.message}`]); });
+    return () => { live = false; };
+  }, []);
+
+  // Keep what was just opened. Never fatal: a statement that didn't save is still on screen, and
+  // the message says so.
+  const keepOpened = async (added) => {
+    if (!added.length) return;
+    try {
+      await db.saveStatements(added.map(toStored));
+      setKeep(["ok", `${plural(added.length, "statement")} saved`]);
+    } catch (e) {
+      setKeep(e.code === "NO_TABLE" ? ["warn", NO_TABLE] : ["bad", `Opened, but not saved: ${e.message}`]);
+    }
+  };
+
+  // Deleting is for good, so it asks. The zip on the trader's computer is untouched.
+  const removeStatement = async (st) => {
+    if (!window.confirm(`Delete the ${fmtDate(st.date)} statement (${st.zipName}) from RAMP?\n\nYour own copy of the zip is not affected; you can open it again any time.`)) return;
+    try { await db.deleteStatement(st.checksum); }
+    catch (e) { if (e.code !== "NO_TABLE") { setKeep(["bad", `Couldn't delete it: ${e.message}`]); return; } }
+    listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum);
+    setList(listRef.current);
+    if (shown?.startsWith(st.checksum)) setShown(null);
+  };
 
   const openAll = async (files, password) => {
     setBusy(true);
@@ -4608,6 +4648,7 @@ function StatementsPanel() {
     if (problems.length) parts.push(problems.join(" · "));
     setMsg(parts.length ? [problems.length ? "bad" : "ok", parts.join(" · ")] : null);
     setBusy(false);
+    await keepOpened(added);
   };
 
   // Zips only; anything else in a folder (the broker's other attachments, say) is passed over quietly.
@@ -4669,7 +4710,7 @@ function StatementsPanel() {
 
   return (
     <section className="panel" style={{ marginTop: 16 }}>
-      <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>Opened in this browser only · nothing is uploaded or saved</span></div>
+      <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>{isRemote ? "Saved to your RAMP account" : "Kept in this browser only"} · CSV files only, PDFs aren't kept</span></div>
       <div className="pb fg">
         <input ref={fileRef} type="file" accept=".zip" multiple hidden onChange={(e) => load(e.target.files)} />
         {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
@@ -4696,6 +4737,7 @@ function StatementsPanel() {
           </form>
         )}
         {msg && <div className={msg[0]}>{msg[1]}</div>}
+        {keep && keep[1] && <div className={keep[0]} style={{ fontSize: 12 }}>{keep[1]}</div>}
 
         {list.length > 0 && (
           <>
@@ -4766,6 +4808,7 @@ function StatementsPanel() {
                         );
                       })()}
                       <td className="txt">
+                        {st.stored && <span className="faint" style={{ marginRight: 8, fontSize: 11 }} title="Saved statements keep their CSV files only. Open the zip again to see its PDF.">Saved · PDF not kept</span>}
                         {st.files.map((f) => {
                           const id = `${st.checksum}|${f.name}`;
                           return f.kind === "csv"
@@ -4775,7 +4818,7 @@ function StatementsPanel() {
                               : <span key={f.name} className="faint" style={{ marginRight: 8 }}>{f.name}</span>;
                         })}
                       </td>
-                      <td><button className="btn ghost" onClick={() => { listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum); setList(listRef.current); if (shown?.startsWith(st.checksum)) setShown(null); }} aria-label="Close statement">✕</button></td>
+                      <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
                     </tr>
                   ))}
                 </tbody>

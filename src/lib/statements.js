@@ -135,3 +135,27 @@ export async function filesFromEntries(entries) {
   for (const e of entries) await walk(e);
   return out;
 }
+
+/*
+ * A statement as it is kept (supabase/migrations/0013_statements.sql), and back again.
+ *
+ * Only the CSV files are kept, as text: the page re-reads them on every visit, so a better
+ * reader later applies to old statements too. PDFs are not kept — they repeat the CSVs, and the
+ * trader still has the zip. A kept statement comes back marked stored, so the page can say its
+ * PDFs aren't here.
+ */
+export const toStored = (st) => ({
+  checksum: st.checksum,
+  zip_name: st.zipName,
+  statement_date: st.date || null,
+  account: st.account || null,
+  files: st.files.filter((f) => f.kind === "csv").map((f) => ({ name: f.name, text: f.text })),
+});
+export const fromStored = (row) => ({
+  zipName: row.zip_name,
+  date: row.statement_date || null,
+  account: row.account || null,
+  checksum: row.checksum,
+  files: (row.files || []).map((f) => ({ name: f.name, kind: "csv", text: f.text })),
+  stored: true,
+});
