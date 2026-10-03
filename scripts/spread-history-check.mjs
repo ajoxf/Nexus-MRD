@@ -116,5 +116,36 @@ is('a single leg is an outright', spreadBook(lone, '20260822').positions.map((p)
   is('Excel-rounded ids do not pair unrelated trades into a spread', spreadBook(mangled, '20260822').positions.map((p) => p.kind).sort(), ['Outright', 'Outright']);
 }
 
+// ---------- Closed with legs, not as a spread ----------
+/*
+ * A spread closed by trading its legs on separate orders (BZ Oct26 expiring) arrives as two
+ * outright trades. They must close the spread, at the price the two legs imply — not sit beside it
+ * as an open spread plus two outrights that cancel, with the spread's P/L lost. Shaped on Aug 25:
+ * +3 Inter-Product at -7.6133, closed with CL sold at 85.6267 and BZ bought at 93.2967:
+ * (-7.67 - -7.6133) x 3 x 1,000 = -$170.
+ */
+{
+  const open = [...IP('20260820', '09:00', '9000000000101', 'B', 85.70, 93.30), ...IP('20260820', '09:01', '9000000000102', 'B', 85.60, 93.22), ...IP('20260820', '09:02', '9000000000103', 'B', 85.65, 93.27)];
+  const legged = [
+    row('20260825', '10:00', '9000000000201', 'CL', 'S', 85.6267), row('20260825', '10:00', '9000000000202', 'CL', 'S', 85.6267), row('20260825', '10:00', '9000000000203', 'CL', 'S', 85.6267),
+    row('20260825', '10:05', '9000000000301', 'BZ', 'B', 93.2967), row('20260825', '10:05', '9000000000302', 'BZ', 'B', 93.2967), row('20260825', '10:05', '9000000000303', 'BZ', 'B', 93.2967),
+  ];
+  const tr = uniqueTrades([read([...open, ...legged]).trades]);
+  const bk = spreadBook(tr, '20260825');
+  is('a spread closed with legs is closed: nothing left open', bk.positions, []);
+  is('…and its P/L is realised at the price the legs imply', bk.realised, { '2001000011': -170 });
+
+  // The other way round: opened with legs, closed as a spread.
+  const legsFirst = [row('20260820', '09:00', '9000000000401', 'CL', 'B', 85.0), row('20260820', '09:05', '9000000000402', 'BZ', 'S', 92.5)];
+  const closeAsSpread = IP('20260825', '10:00', '9000000000403', 'S', 86.0, 93.0);
+  const bk2 = spreadBook(uniqueTrades([read([...legsFirst, ...closeAsSpread]).trades]), '20260825');
+  is('opened with legs, closed as a spread: nothing left open', bk2.positions, []);
+  is('…P/L realised: (86 - 93) - (85 - 92.5) = +0.5 x 1,000', bk2.realised, { '2001000011': 500 });
+
+  // Legs that only partly offset close only that much.
+  const bk3 = spreadBook(uniqueTrades([read([...open, legged[0], legged[3]]).trades]), '20260825');
+  is('one lot of each leg closes one spread, two stay open', bk3.positions.map((p) => [p.kind, p.lots]), [['Inter-Product', 2]]);
+}
+
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

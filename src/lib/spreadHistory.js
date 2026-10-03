@@ -165,6 +165,27 @@ export function spreadBook(trades, asOf) {
     books.set(e.key, bk);
   }
 
+  /*
+   * 3. A spread closed — or opened — by trading its legs on separate orders. Those legs arrive as
+   *    outrights; left alone they sit beside the spread, cancelling it, with its P/L never realised
+   *    (Aug 25: an Inter-Product closed leg by leg as BZ Oct26 neared expiry, -$170 lost). Open
+   *    outright legs that exactly offset an open spread close it, first in first out, at the price
+   *    the two legs imply.
+   */
+  for (const sp of [...books.values()].filter((bk) => bk.key.startsWith("S|"))) {
+    const [la, lb] = sp.legs;
+    const oa = books.get(`O|${sp.account}|${la.code}|${la.month}`), ob = books.get(`O|${sp.account}|${lb.code}|${lb.month}`);
+    if (!oa || !ob) continue;
+    while (sp.open.length && oa.open.length && ob.open.length) {
+      const h = sp.open[0], a = oa.open[0], b = ob.open[0];
+      // A long spread is long its first leg and short its second; what closes it is the reverse.
+      if (a.sign !== -h.sign || b.sign !== h.sign) break;
+      const k = Math.min(h.qty, a.qty, b.qty);
+      if (sp.mult !== null) realised[sp.account] = (realised[sp.account] || 0) + h.sign * (sp.rule.value(a.price, b.price) - h.price) * k * sp.mult;
+      for (const [q, x] of [[sp.open, h], [oa.open, a], [ob.open, b]]) { x.qty -= k; if (!x.qty) q.shift(); }
+    }
+  }
+
   const positions = [...books.values()].filter((bk) => bk.open.length).map((bk) => {
     const lots = bk.open.reduce((t, o) => t + o.sign * o.qty, 0);
     const gross = bk.open.reduce((t, o) => t + o.qty, 0);

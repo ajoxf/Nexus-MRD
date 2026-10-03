@@ -4773,7 +4773,20 @@ function StatementsPanel() {
       ok: chk.legsMatch, chk, since: trades[0].date,
       positions: chk.positions.filter((p) => accts.has(p.account)),
       bookUpl: mine(chk.bookUpl), orientUpl: mine(chk.orientUpl), gap: +mine(chk.pnlGap).toFixed(2),
-      why: chk.legsMatch ? null : `The trades opened so far don't add up to Orient's open lots (${chk.mismatches.map((m) => `${m.contract.split("|").slice(1).join(" ")}: trades ${m.book}, Orient ${m.orient}`).join("; ")}). Open the statements from before ${trades[0].date.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1")}, back to a day the account was flat.`,
+      why: chk.legsMatch ? null : (() => {
+        /*
+         * Which days' trades are missing. Orient's open lots carry the date each was traded; a lot
+         * from a day with no Trade Confirmation open is that day missing. Only when none is
+         * found does it point further back.
+         */
+        const have = new Set(trades.map((t) => t.date));
+        const gaps = [...new Set(sm.lots.map((l) => l.tradeDate).filter((d) => d && d <= st.date.replaceAll("-", "") && !have.has(d)))].sort();
+        const fmt = (d) => d.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1");
+        const diff = chk.mismatches.map((m) => `${m.contract.split("|").slice(1).join(" ")}: trades ${m.book}, Orient ${m.orient}`).join("; ");
+        return gaps.length
+          ? `Orient's open lots include trades from ${gaps.map(fmt).join(", ")}, and no Trade Confirmation for ${gaps.length === 1 ? "that day" : "those days"} is open (${diff}). Open ${gaps.length === 1 ? "that day's statement" : "those days' statements"}.`
+          : `The trades opened so far don't add up to Orient's open lots (${diff}). A day's statement is missing — or, if the account wasn't flat on ${fmt(trades[0].date)}, open the statements from before then.`;
+      })(),
     };
   };
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
