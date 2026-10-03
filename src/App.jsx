@@ -4571,7 +4571,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
  * Reconciling these figures against the book is the next step, and when it comes it will
  * propose, never post.
  */
-function StatementsPanel({ fills = [] }) {
+export function StatementsPanel({ fills = [] }) {
   const [list, setList] = useState([]);
   const listRef = useRef([]);
   const [pending, setPending] = useState([]);       // zips waiting on a password
@@ -4777,6 +4777,35 @@ function StatementsPanel({ fills = [] }) {
     }
     return matchFills(fills, history.trades, days);
   }, [fills, history, list, summaries]);
+  /*
+   * The daily statements as a tree: a block per date, the group's statement at its head and the
+   * sub-accounts' beneath it. Positions are shown once, on the sub-account that holds them, not
+   * repeated on the group. The newest day is open; older days fold to their head row.
+   */
+  const [openDays, setOpenDays] = useState(null); // null: only the newest day open
+  const isGroupSt = (st) => String(st.account || "").length > 4;
+  const dailyRows = useMemo(() => {
+    const daily = list.filter((st) => !isMonthly(st));
+    const dates = [...new Set(daily.map((st) => st.date || ""))].sort().reverse();
+    const out = [];
+    dates.forEach((date, i) => {
+      const mine = daily.filter((st) => (st.date || "") === date);
+      const groups = mine.filter(isGroupSt);
+      const subs = mine.filter((st) => !isGroupSt(st)).sort((a, b) => String(a.account).localeCompare(String(b.account)));
+      const open = openDays ? openDays.has(date) : i === 0;
+      const holders = subs.filter((st) => summaries.get(st.checksum)?.positions?.length).map((st) => st.account);
+      if (groups.length) groups.forEach((st, j) => out.push({ kind: "group", st, date, open, subs: subs.length, first: j === 0, posElsewhere: holders.length ? holders.join(", ") : null }));
+      else out.push({ kind: "nogroup", date, open, subs: subs.length });
+      if (open) subs.forEach((st) => out.push({ kind: "sub", st, date }));
+    });
+    return out;
+  }, [list, summaries, openDays]);
+  const newestDay = dailyRows[0]?.date ?? null;
+  const toggleDay = (date) => setOpenDays((prev) => {
+    const next = new Set(prev ?? (newestDay !== null ? [newestDay] : []));
+    if (next.has(date)) next.delete(date); else next.add(date);
+    return next;
+  });
   const historyFor = (st, sm) => {
     if (!sm?.lots?.length || !st.date) return null;
     const accts = new Set(sm.lots.map((l) => l.account));
@@ -4927,9 +4956,23 @@ function StatementsPanel({ fills = [] }) {
               <table>
                 <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
                 <tbody>
-                  {list.filter((st) => !isMonthly(st)).map((st) => (
-                    <tr key={st.checksum}>
-                      <td className="txt">{fmtDate(st.date)}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                  {dailyRows.map((row) => row.kind === "nogroup" ? (
+                    <tr key={`nogroup|${row.date}`} className="dayhead">
+                      <td className="txt" colSpan={9}>
+                        <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>
+                        <b>{fmtDate(row.date || null)}</b> <span className="faint">· group statement not open · {row.subs} sub-account statement{row.subs === 1 ? "" : "s"}</span>
+                      </td>
+                    </tr>
+                  ) : ((st) => (
+                    <tr key={st.checksum} className={row.kind === "group" ? "dayhead" : "daysub"}>
+                      <td className="txt">{row.kind === "sub"
+                        ? <div style={{ paddingLeft: 22 }}><span className="faint">└ </span>Sub-account<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></div>
+                        : <>
+                            {row.first && <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>}
+                            <b>{fmtDate(st.date)}</b> <span className="faint">· group</span>
+                            <div className="faint" style={{ fontSize: 10 }}>{st.zipName}{!row.open && row.subs ? ` · ${row.subs} sub-account statement${row.subs === 1 ? "" : "s"} folded` : ""}</div>
+                          </>}
+                      </td>
                       <td className="txt">{st.account || "—"}</td>
                       {(() => {
                         const sm = summaries.get(st.checksum);
@@ -4943,7 +4986,8 @@ function StatementsPanel({ fills = [] }) {
                             <td>{m ? cents(m.im, cur) : "—"}</td>
                             <td className={m && m.excess < 0 ? "bad" : ""}>{m ? cents(m.excess, cur) : "—"}</td>
                             <td className="txt" style={{ fontSize: 12 }}>
-                              {!sm.positions ? <span className="faint">No Open Position file</span>
+                              {row.posElsewhere ? <span className="faint">Held in {row.posElsewhere} — {row.open ? "below" : "open the day to see them"}</span>
+                                : !sm.positions ? <span className="faint">No Open Position file</span>
                                 : !sm.positions.length ? <span className="faint">None</span>
                                 : (() => {
                                   /*
@@ -5053,7 +5097,7 @@ function StatementsPanel({ fills = [] }) {
                       </td>
                       <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
                     </tr>
-                  ))}
+                  ))(row.st))}
                 </tbody>
               </table>
             </div>

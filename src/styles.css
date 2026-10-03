@@ -755,3 +755,7 @@ table.postable th, table.postable td { padding: 2px 8px; font-size: 12px; white-
 table.postable tr.legs-head td { color: var(--faint); padding-top: 6px; font-size: 11px; }
 table.postable tr.leg td { color: var(--faint); }
 table.postable tr.total td { font-weight: 600; border-top: 1px solid var(--line, currentColor); }
+
+/* Daily statements as a tree: the group's row heads each day, sub-accounts sit beneath it. */
+tr.dayhead > td { border-top: 2px solid var(--line2); }
+tr.daysub > td { background: var(--panel2); }
