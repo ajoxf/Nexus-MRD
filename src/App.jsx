@@ -1,12 +1,18 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
+import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
+import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
-import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
+import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
+import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
+import { spreadsFromLots } from "./lib/statementSpreads.js";
+import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
+import { matchFills } from "./lib/fillMatch.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
-import { resolveLeg, matchLegs, spreadValue, stressSpread, suggestSpreads, normaliseSpread, legKey } from "./lib/spreads.js";
+import { legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
 import { expiryState, formatExpiry, expiringRows, contractExpiry } from "./lib/expiry.js";
 import { applyOrder, moveTo, moveBy, isCustomised } from "./lib/layout.js";
@@ -212,7 +218,7 @@ function funding(settings, brokerId, now = new Date()) {
   return { list, dep, wd, charges, net: dep - wd, fromLedger: moneyMoves, base: moneyMoves ? dep - wd : n(b?.capital) };
 }
 
-function portfolio(fills, settings, now = new Date()) {
+function portfolio(fills, settings, now = new Date(), feeds = {}) {
   const { limits: L, brokers: B, marks: M } = settings;
   const byId = Object.fromEntries(B.map((b) => [b.id, b]));
   const book = computeBook(withCommission(fills, byId), (b, p) => sizeOf(byId[b]?.products?.[p], p), (b) => matchOf(byId[b]));
@@ -223,11 +229,24 @@ function portfolio(fills, settings, now = new Date()) {
     const spec = br.products?.[p.product] || {};
     const key = `${p.broker}|${p.product}`;
     const dir = p.side === "Long" ? 1 : -1;
-    const mark = has(M[key]?.price) ? n(M[key].price) : p.avg;
+    /*
+     * The price. With the broker's statements behind the account, a contract (or spread, from
+     * its legs) is at the latest settlement; a typed price wins only if it was typed after that
+     * statement — the next statement clears it. Without statements, as before: typed, else entry.
+     */
+    const feed = feeds[p.broker];
+    const typed = has(M[key]?.price);
+    const settle = feed ? settleOf(p.product, feed.settles) : null;
+    const typedFresh = typed && (settle === null || (M[key].priceTs && M[key].priceTs > feed.closeTs));
+    const mark = typedFresh ? n(M[key].price) : settle !== null ? settle : p.avg;
+    const markSource = typedFresh ? "typed" : settle !== null ? "settle" : "entry";
     const stop = M[key]?.stop, hasStop = has(stop);
     const size = sizeOf(spec, p.product);
     const lev = n(spec.lev) || n(br.leverage) || 1;
-    const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
+    // Margin per lot: learned from the broker's statements for the kind of spread, else as typed.
+    const kind = feed?.imPer ? instrumentOf(p.product)?.kind : null;
+    const learned = kind && feed.imPer[kind] !== undefined ? feed.imPer[kind] : null;
+    const im = learned !== null ? learned * p.lots : br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
     const risk = hasStop ? Math.max(0, dir * (mark - n(stop))) * size * p.lots : null;
     /*
@@ -242,9 +261,9 @@ function portfolio(fills, settings, now = new Date()) {
      * Flagged, never corrected. A price is the trader's to state, and silently flipping a
      * sign on somebody's mark would be a worse bug than the one it fixes.
      */
-    const markGiven = has(M[key]?.price);
+    const markGiven = markSource === "typed";
     const signFlip = markGiven && mark !== 0 && p.avg !== 0 && Math.sign(mark) !== Math.sign(p.avg);
-    return { ...p, key, brokerName: br.name, spec, dir, mark, markGiven, signFlip, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: br.method === "fixed" && !n(spec.margin), method: br.method };
+    return { ...p, key, brokerName: br.name, spec, dir, mark, markGiven, markSource, imLearned: learned !== null, signFlip, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: learned === null && br.method === "fixed" && !n(spec.margin), method: br.method };
   });
 
   const accounts = B.map((b) => {
@@ -252,14 +271,42 @@ function portfolio(fills, settings, now = new Date()) {
     const real = book.realized.filter((r) => r.broker === b.id);
     const IM = sum(rs, (r) => r.im), upnl = sum(rs, (r) => r.upnl);
     const realizedAll = sum(real, (r) => r.pnl), realizedToday = sum(real.filter((r) => isToday(r.ts)), (r) => r.pnl);
-    const fund = funding(settings, b.id, now);
-    const TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
+    let fund = funding(settings, b.id, now);
+    let TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
+    let accIM = IM, fromStatement = null;
+    /*
+     * An account the broker's statements cover runs on them. Equity is Orient's at the last close
+     * plus what has changed since: the move from settlement on what was open, and the P/L (with
+     * fees) on fills pasted since. With no new fills and prices at settlement that is exactly
+     * Orient's figure — however Orient and RAMP each split realised from unrealised. Margin is
+     * Orient's IM, plus the learned margin of whatever has been opened or closed since.
+     * Money typed in as a fallback counts only until a statement shows it.
+     */
+    const feed = feeds[b.id];
+    if (feed) {
+      const sizeFn = (bk, prod) => sizeOf(byId[bk]?.products?.[prod], prod);
+      const atClose = computeBook(withCommission(fills.filter((f) => f.broker === b.id && f.ts <= feed.cutoff), byId), sizeFn, (bk) => matchOf(byId[bk]));
+      const pClose = pnlAt(atClose, (p) => settleOf(p.product, feed.settles) ?? p.avg, sizeFn);
+      const pNow = realizedAll + upnl;
+      const imOf = (p) => { const k = feed.imPer ? instrumentOf(p.product)?.kind : null; return k && feed.imPer[k] !== undefined ? feed.imPer[k] * p.lots : n(byId[b.id]?.products?.[p.product]?.margin) * p.lots; };
+      const imChange = sum(rs, (r) => r.im) - sum(atClose.open, imOf);
+      const onStatement = (c) => feed.cash.some((x) => Math.abs(x.amount - (c.type === "withdrawal" ? -n(c.amount) : n(c.amount))) < 0.01 && Math.abs(new Date(x.date) - new Date(c.ts)) <= 7 * 864e5);
+      const transit = (settings.cash || []).filter((c) => c.broker === b.id && c.type !== "charge" && c.ts.slice(0, 10) > feed.date && !onStatement(c));
+      const transitNet = sum(transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+      TNE = feed.anchor.equity + (pNow - pClose) + transitNet;
+      accIM = Math.max(0, feed.anchor.im + imChange);
+      fund = { ...fund, base: feed.anchor.equity, fromLedger: true };
+      // Your fills' own P/L at the close, before commission — to tally against Orient's Profit/Loss.
+      const gross = computeBook(fills.filter((f) => f.broker === b.id && f.ts <= feed.cutoff).map((f) => ({ ...f, fee: 0 })), sizeFn, (bk) => matchOf(byId[bk]));
+      const fillsPl = fillsPlAt(gross, (p) => settleOf(p.product, feed.settles), sizeFn);
+      fromStatement = { fillsPl, method: matchOf(byId[b.id]), date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, sums: feed.sums, onStatement, imPer: feed.imPer, days: feed.days };
+    }
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
     return {
-      ...b, capital: fund.base, fund, rows: rs, IM, upnl, realizedAll, realizedToday, TNE, callR, stopR,
-      ratio: IM > 0 ? TNE / IM : Infinity,
-      lossToCall: IM > 0 ? TNE - IM * callR : TNE,
-      freeIM: (minR > 0 ? TNE / minR : TNE) - IM,
+      ...b, capital: fund.base, fund, rows: rs, IM: accIM, upnl, realizedAll, realizedToday, TNE, callR, stopR, fromStatement,
+      ratio: accIM > 0 ? TNE / accIM : Infinity,
+      lossToCall: accIM > 0 ? TNE - accIM * callR : TNE,
+      freeIM: (minR > 0 ? TNE / minR : TNE) - accIM,
       riskCap: fund.base * n(L.maxRiskPct) / 100,
       // This account's own share, in its own currency. Used when there is no honest
       // combined figure to fall back on.
@@ -350,6 +397,7 @@ const ICONS = {
   fills: <Icon d={<><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="3.5" cy="6" r="1" /><circle cx="3.5" cy="12" r="1" /><circle cx="3.5" cy="18" r="1" /></>} />,
   closed: <Icon d={<><path d="M3 7h18v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" /><path d="M2 3h20v4H2zM10 12h4" /></>} />,
   analysis: <Icon d={<><path d="M3 3v18h18" /><path d="M7 15l4-5 3 3 5-7" /><circle cx="11" cy="10" r="1.2" /><circle cx="14" cy="13" r="1.2" /></>} />,
+  statements: <Icon d={<><path d="M6 2h9l5 5v15H6z" /><path d="M14 2v6h6M9 13h8M9 17h8" /></>} />,
   funds: <Icon d={<><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /><path d="M16 3l3 3-3 3" /></>} />,
   settings: <Icon d={<><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></>} />,
 };
@@ -2268,7 +2316,12 @@ function Tracker({ user }) {
     });
   }, [fills, settings]);
 
-  const pf = useMemo(() => (settings ? portfolio(fills, settings) : null), [fills, settings]);
+  // The broker's saved statements, which the book runs on for the accounts they cover.
+  const [stmtRows, setStmtRows] = useState([]);
+  const reloadStatements = useCallback(() => { db.loadStatements?.().then(setStmtRows).catch(() => setStmtRows([])); }, []);
+  useEffect(() => { reloadStatements(); }, [reloadStatements]);
+  const feeds = useMemo(() => (settings ? feedsFor(stmtRows, fills, settings.brokers) : {}), [stmtRows, fills, settings?.brokers]);
+  const pf = useMemo(() => (settings ? portfolio(fills, settings, undefined, feeds) : null), [fills, settings, feeds]);
 
   /*
    * Writes today's equity, margin and lots for each account into settings, so
@@ -2304,7 +2357,8 @@ function Tracker({ user }) {
   const view = mixed && stored === "all" ? (settings.brokers[0]?.id ?? "all") : stored;
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
-  const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
+  // A typed price carries when it was typed, so the next statement's settlement can replace it.
+  const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v, ...(k === "price" ? { priceTs: new Date().toISOString() } : {}) } } }));
   const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
   /*
@@ -2336,7 +2390,7 @@ function Tracker({ user }) {
   const scaleMax = Math.max(pf.minR * 2, 3, isFinite(ratio) ? Math.min(ratio, pf.minR * 4) : 0);
   const pos = (r) => Math.min(100, Math.max(0, (r / scaleMax) * 100));
   const save = { saved: [isRemote ? "Saved" : "Saved locally", "var(--ok)"], saving: ["Saving…", "var(--warn)"], error: ["Save failed", "var(--bad)"] }[saveState];
-  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
+  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["statements", "Statements"], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
 
   return (
     <DirtyCtx.Provider value={dirtyApi}>
@@ -2427,6 +2481,7 @@ function Tracker({ user }) {
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
+        {tab === "statements" && <StatementsPanel fills={fills} onChanged={reloadStatements} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
@@ -2733,14 +2788,17 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                       <td><b>{px(r.avg)}</b></td>
                       {/* Flagged at the input as well as in Warnings: this is the box the
                           correction gets typed into, so it is where the red belongs. */}
+                      {/* At settlement from the broker's latest statement unless a price was typed since;
+                          typing one overrides it until the next statement. */}
                       <td><input className={`cell ${r.signFlip ? "need" : ""}`} type="number" step="0.01"
-                        placeholder={px(r.avg)} value={settings.marks[r.key]?.price ?? ""}
-                        title={r.signFlip ? `Opened at ${px(r.avg)} — check the sign` : undefined}
+                        placeholder={r.markSource === "settle" ? px(r.mark) : px(r.avg)} value={r.markSource === "typed" ? settings.marks[r.key]?.price ?? "" : ""}
+                        title={r.signFlip ? `Opened at ${px(r.avg)} — check the sign` : r.markSource === "settle" ? "Settlement from the broker's latest statement. Type a price to override it until the next statement." : undefined}
                         onChange={(e) => setMark(r.key, "price", e.target.value)}
-                        aria-label={`Current price ${r.product} ${r.brokerName}`} /></td>
+                        aria-label={`Current price ${r.product} ${r.brokerName}`} />
+                        {r.markSource === "settle" && <div className="faint" style={{ fontSize: 10 }}>settle {pf.acct(r.broker)?.fromStatement ? new Date(`${pf.acct(r.broker).fromStatement.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : ""}</div>}</td>
                       <td><input className={`cell ${r.hasStop ? "" : "need"}`} type="number" step="0.01" placeholder="Set" value={settings.marks[r.key]?.stop ?? ""} onChange={(e) => setMark(r.key, "stop", e.target.value)} aria-label={`Stop ${r.product} ${r.brokerName}`} /></td>
                       <td className={pc(r.upnl)}><b>{signed(r.upnl)}</b></td>
-                      <td className={r.noMargin ? "warn" : ""} title={r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
+                      <td className={r.noMargin ? "warn" : ""} title={r.imLearned ? `${qty(r.lots)} × ${money(r.im / r.lots)} — what one of these has cost in initial margin, learned from the broker's statements` : r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
                       <td className={!r.hasStop || r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity) ? "bad" : ""}>{r.hasStop ? money(r.risk) : "—"}</td>
                       <td className="dim">{dt(r.openTs)}</td>
                       {anyExpiry && (
@@ -2800,8 +2858,8 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                     const s = statusOf(a.ratio, a, pf.minR);
                     return (
                       <tr key={a.id} className="clickable" onClick={() => setView(a.id)} title={`Show ${a.name} only`}>
-                        <td className="txt"><b>{a.name}</b></td>
-                        <td className="txt dim">{basis(a)}</td>
+                        <td className="txt"><b>{a.name}</b>{a.fromStatement && <div className="faint" style={{ fontSize: 11 }}>From Orient's statement of {new Date(`${a.fromStatement.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })} · {signed(a.fromStatement.sinceClose)} since</div>}</td>
+                        <td className="txt dim">{a.fromStatement ? "Broker's statements" : basis(a)}</td>
                         <td>{money(n(a.capital))}</td><td>{money(a.TNE)}</td><td>{money(a.IM)}</td>
                         <td><b className={s.cls === "dim" ? "faint" : s.cls}>{ratioTxt(a.ratio)}</b>{isFinite(a.ratio) && <span className={`pill ${s.cls}`} style={{ marginLeft: 6 }}><span className={s.cls}>{s.t}</span></span>}</td>
                         <td className={a.IM > 0 && a.lossToCall <= 0 ? "bad" : ""}>{a.IM > 0 ? money(a.lossToCall) : "—"}</td>
@@ -2843,213 +2901,6 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 }
 
 
-/*
- * ---------- spreads ----------
- *
- * Legs held in two accounts are one trade. The account tiles below stress each leg against
- * itself, which is right for margin — a broker will liquidate one account without caring
- * that you are hedged in another — and badly wrong as a picture of what the trade can cost.
- * This panel answers the second question and touches none of the first.
- */
-function SpreadsPanel({ pf, settings, setSettings, fills, view }) {
-  const S = settings.scenario;
-  const saved = useMemo(() => (settings.spreads || []).map(normaliseSpread), [settings.spreads]);
-  const [adding, setAdding] = useState(false);
-  const ask = useConfirm();
-
-  const setSpreads = (fn) => setSettings((st) => ({ ...st, spreads: fn(st.spreads || []) }));
-  const patch = (id, p) => setSpreads((list) => list.map((x) => (x.id === id ? { ...x, ...p } : x)));
-
-  // Resolve a stored spread's legs against the book as it stands right now.
-  const resolve = (sp) =>
-    sp.legs.map((leg) => {
-      const key = legKey(leg);
-      const row = pf.rows.find((r) => r.key === key);
-      const spec = settings.brokers.find((b) => b.id === leg.broker)?.products?.[leg.product] || {};
-      const pos = row ? (row.side === "Long" ? row.lots : -row.lots) : 0;
-      const mark = row ? row.mark : has(settings.marks[key]?.price) ? n(settings.marks[key].price) : null;
-      return resolveLeg(leg, { pos, size: row ? row.size : sizeOf(spec, leg.product), mark });
-    });
-
-  /*
-   * Suggestions, from fills the trader has already put on. Nothing is paired without them
-   * saying so — see lib/spreads.js. Anything already saved drops out of the list.
-   */
-  const have = new Set(saved.map((sp) => sp.legs.map(legKey).sort().join(" / ")));
-  const suggestions = useMemo(
-    () => suggestSpreads(fills || []).filter((c) => !have.has(c.key)).slice(0, 4),
-    [fills, settings.spreads],
-  );
-
-  const add = (legs, name) =>
-    setSpreads((list) => [
-      ...list,
-      { id: crypto.randomUUID(), name: name || legs.map((l) => l.product).join(" / "), legs: legs.map((l) => ({ ...l, ratio: 1 })), widen: { v: "", unit: "pts" } },
-    ]);
-
-  // Every open position, for building a spread by hand.
-  const openRows = pf.rows.filter((r) => view === "all" || r.broker === view);
-  const [pick, setPick] = useState([]);
-  const togglePick = (key) => setPick((ps) => (ps.includes(key) ? ps.filter((k) => k !== key) : [...ps, key]));
-  const addPicked = () => {
-    const legs = pick.map((k) => { const r = pf.rows.find((x) => x.key === k); return { broker: r.broker, product: r.product }; });
-    add(legs);
-    setPick([]); setAdding(false);
-  };
-
-  const shown = view === "all" ? saved : saved.filter((sp) => sp.legs.some((l) => l.broker === view));
-
-  if (!shown.length && !suggestions.length && !adding) return null;
-
-  return (
-    <section className="panel" style={{ marginTop: 12 }}>
-      <div className="ph">
-        <h2>Spreads<span className="dim">one trade, held as two or more legs</span></h2>
-        <div className="actions">
-          {openRows.length >= 2 && <button type="button" className="btn ghost" onClick={() => setAdding((a) => !a)}>{adding ? "Cancel" : "Build one"}</button>}
-        </div>
-      </div>
-
-      {suggestions.length > 0 && (
-        <div className="pb" style={{ borderBottom: "1px solid var(--line)" }}>
-          <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
-            These look like spreads you're already trading — opposite legs filled together, again and again.
-            Nothing is paired until you say so.
-          </div>
-          <div className="chips">
-            {suggestions.map((c) => (
-              <button key={c.key} type="button" className="chip" onClick={() => add(c.legs, c.name)}>
-                {c.name}
-                <span className="chip-tag">{c.crossAccount ? "2 accounts" : `${c.pairs} pairs`}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {adding && (
-        <div className="pb" style={{ borderBottom: "1px solid var(--line)" }}>
-          <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>Pick the legs. Two or more, and they can't all be the same way round.</div>
-          <div className="chips">
-            {openRows.map((r) => (
-              <button key={r.key} type="button" className={`chip ${pick.includes(r.key) ? "on" : ""}`} aria-pressed={pick.includes(r.key)} onClick={() => togglePick(r.key)}>
-                {r.product}<span className="chip-tag">{r.side} {qty(r.lots)} · {r.brokerName}</span>
-              </button>
-            ))}
-            <span className="chips-gap" />
-            <button type="button" className="btn" disabled={pick.length < 2} onClick={addPicked}>Add spread</button>
-          </div>
-        </div>
-      )}
-
-      {shown.length === 0 ? (
-        <div className="empty">No spreads set up yet.</div>
-      ) : (
-        shown.map((sp) => {
-          const legs = resolve(sp);
-          // The correlated move is the one already set on the first leg, so this panel and
-          // the leg's own row below are stressed by the same number rather than two.
-          const mv = S.moves[legs[0]?.key] || { v: S.defV, unit: S.defUnit };
-          const res = stressSpread(legs, mv, sp.widen);
-          const set = matchLegs(legs).matched > 0;
-          const noWiden = !has(sp.widen.v) || n(sp.widen.v) === 0;
-          const mvTxt = `${n(mv.v)}${mv.unit === "%" ? "%" : " pts"}`;
-          // A widening is a distance in the spread's own price, so it is printed like a price.
-          // money() would render 2 as "$2" and 2.5 as "$3", which is not what was typed.
-          const wTxt = sp.widen.unit === "%" ? `${n(sp.widen.v)}%` : n(sp.widen.v).toFixed(2);
-          return (
-            <div key={sp.id} style={{ borderTop: "1px solid var(--line)" }}>
-              <div className="ph" style={{ background: "transparent", borderBottom: 0, paddingBottom: 0 }}>
-                <h2 style={{ fontSize: 12 }}>{sp.name}
-                  {legs.some((l) => l.broker !== legs[0].broker) && <span className="dim">legged across {new Set(legs.map((l) => l.broker)).size} accounts</span>}
-                </h2>
-                <button type="button" className="btn ghost red" onClick={async () => {
-                  const { ok } = await ask({
-                    title: "Remove this spread?",
-                    body: "Only the pairing goes. Every fill, position and margin figure is untouched — each leg carries on showing in its own account.",
-                    confirmLabel: "Remove", tone: "danger",
-                  });
-                  if (ok) setSpreads((list) => list.filter((x) => x.id !== sp.id));
-                }}>Remove</button>
-              </div>
-              <div className="tw">
-                <table>
-                  <thead><tr><th className="txt">Leg</th><th className="txt">Account</th><th>Position</th><th>Price</th><th title="How many of this leg make one unit of the spread. 1:1 for a barrel-for-barrel oil spread.">Ratio</th></tr></thead>
-                  <tbody>
-                    {legs.map((l) => (
-                      <tr key={l.key}>
-                        <td className="txt">{l.product}</td>
-                        <td className="txt dim">{settings.brokers.find((b) => b.id === l.broker)?.name || l.broker}</td>
-                        <td>{l.pos ? <span className={`side ${l.pos > 0 ? "long" : "short"}`}>{l.pos > 0 ? "Long" : "Short"}</span> : <span className="faint">flat</span>} <span className="num">{l.pos ? qty(Math.abs(l.pos)) : ""}</span></td>
-                        <td className="num">{l.mark === null ? <span className="warn">no price</span> : l.mark.toFixed(5)}</td>
-                        <td>
-                          <input className="cell" style={{ width: 60 }} type="number" step="0.01" min="0" value={sp.legs.find((x) => legKey(x) === l.key)?.ratio ?? 1}
-                            onChange={(e) => patch(sp.id, { legs: sp.legs.map((x) => (legKey(x) === l.key ? { ...x, ratio: e.target.value } : x)) })} />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {!set ? (
-                <div className="pb warn" style={{ fontSize: 11 }}>
-                  Nothing is matched here — a spread needs at least two legs open, and not all the same way round.
-                  Each leg is stressed on its own in the accounts below, which is what it is.
-                </div>
-              ) : (
-                <>
-                  <div className="pb fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 260px))", alignItems: "end", paddingBottom: 0 }}>
-                    <F label="Spread now" hint={`${qty(res.matched)} units matched`}>
-                      <div className="num" style={{ fontSize: 18, fontWeight: 600, padding: "6px 0" }}>{res.value === null ? <span className="warn" style={{ fontSize: 13 }}>Price the legs</span> : res.value.toFixed(2)}</div>
-                    </F>
-                    <F label="Spread can move against you" hint="What this trade is actually a bet on">
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <input className="in" type="number" step="0.01" min="0" placeholder="0.00" value={sp.widen.v} onChange={(e) => patch(sp.id, { widen: { ...sp.widen, v: e.target.value } })} />
-                        <select className="in" style={{ width: 80 }} value={sp.widen.unit} onChange={(e) => patch(sp.id, { widen: { ...sp.widen, unit: e.target.value } })}>
-                          <option value="pts">pts</option><option value="%">%</option>
-                        </select>
-                      </div>
-                    </F>
-                  </div>
-                  <div className="strip">
-                    <div className="kpi"><label>Both legs move {mvTxt} together</label><b className={res.correlatedLoss ? "bad" : ""}>{money(-res.correlatedLoss)}</b>
-                      <span className="faint" style={{ fontSize: 11 }}>{res.residual.length ? `includes ${res.residual.map((r) => r.leg.product).join(", ")} unhedged` : "the legs nearly cancel"}</span></div>
-                    <div className="kpi"><label>{noWiden ? "Spread moves against you" : `Spread moves ${wTxt} against you`}</label><b className={res.widening ? "bad" : "faint"}>{noWiden ? "—" : money(-res.widening)}</b>
-                      <span className="faint" style={{ fontSize: 11 }}>{noWiden ? "not set" : `${qty(res.matched)} units`}</span></div>
-                    <div className="kpi"><label>This spread could lose</label><b className={res.loss ? "bad" : ""}>{money(-res.loss)}</b></div>
-                    <div className="kpi"><label>Stressed as separate positions</label><b className="faint">{money(-res.outright)}</b>
-                      <span className="faint" style={{ fontSize: 11 }}>what the accounts below show</span></div>
-                  </div>
-                  {noWiden && (
-                    <div className="pb warn" style={{ fontSize: 11 }}>
-                      Set how far the spread itself can move against you. Until you do, this figure is only the
-                      two legs moving together — and a spread trade loses money when the spread moves, not when oil does.
-                    </div>
-                  )}
-                  {res.unpriced.length > 0 && (
-                    <div className="pb warn" style={{ fontSize: 11 }}>
-                      No current price for {res.unpriced.join(", ")}, so the spread can't be priced and this is incomplete.
-                      Enter it on the account row below.
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })
-      )}
-
-      <p className="faint" style={{ fontSize: 11, margin: "10px 12px" }}>
-        Margin is unchanged by any of this. Each account is margined on its own and can be stopped out on its own —
-        being hedged in one account will not stop another being liquidated, so the account tiles below stay exactly as they are.
-        This panel says what the trade can cost; those say what the broker will do.
-      </p>
-    </section>
-  );
-}
-
-// ---------- scenarios ----------
 function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark }) {
   const S = settings.scenario, L = settings.limits;
   const brokers = settings.brokers.filter((b) => view === "all" || b.id === view);
@@ -3097,8 +2948,12 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
    * says which spread it belongs to and sends the trader to the figure that accounts for the
    * other leg.
    */
+  /*
+   * Hand-paired spreads are retired: TT books spreads as spread trades and the statements pair
+   * Orient's legs by exchange order id, so the Spreads panel that paired legs by hand is no longer
+   * shown and its saved pairs (still in settings, untouched) no longer label these rows.
+   */
   const legOf = {};
-  (settings.spreads || []).map(normaliseSpread).forEach((sp) => sp.legs.forEach((l) => { legOf[legKey(l)] = sp; }));
 
   return (
     <>
@@ -3123,8 +2978,6 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
           </div>
         </div>
       </section>
-
-      <SpreadsPanel pf={pf} settings={settings} setSettings={setSettings} fills={fills} view={view} />
 
       {brokers.map((b) => {
         const { acc, target, res, st, minMove, callMove, stopMove, optionsOn } = scenarioFor(pf, settings, b);
@@ -4567,7 +4420,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
  * Reconciling these figures against the book is the next step, and when it comes it will
  * propose, never post.
  */
-function StatementsPanel() {
+export function StatementsPanel({ fills = [], onChanged }) {
   const [list, setList] = useState([]);
   const listRef = useRef([]);
   const [pending, setPending] = useState([]);       // zips waiting on a password
@@ -4580,16 +4433,63 @@ function StatementsPanel() {
   const [shown, setShown] = useState(null);          // "<checksum>|<file name>" of the CSV on screen
   const fileRef = useRef(null);
   const folderRef = useRef(null);
+  const monthlyRef = useRef(null);
   const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
+  // Whether statements are being kept: null while loading, then ["ok" | "warn" | "bad", text].
+  const [keep, setKeep] = useState(null);
+  const NO_TABLE = "Statements can't be saved yet: the statements table hasn't been added to the database (supabase/migrations/0013_statements.sql). What you open now is shown but not kept.";
+
+  // The statements kept from earlier visits, read back on every visit.
+  useEffect(() => {
+    let live = true;
+    db.loadStatements()
+      .then((rows) => {
+        if (!live) return;
+        const { all } = mergeStatements(listRef.current, rows.map(fromStored));
+        listRef.current = all;
+        setList(all);
+        setKeep(["ok", rows.length ? `${plural(rows.length, "saved statement")} loaded` : null]);
+      })
+      .catch((e) => { if (live) setKeep(e.code === "NO_TABLE" ? ["warn", NO_TABLE] : ["bad", `Saved statements couldn't be loaded: ${e.message}`]); });
+    return () => { live = false; };
+  }, []);
+
+  // Keep what was just opened. Never fatal: a statement that didn't save is still on screen, and
+  // the message says so.
+  const keepOpened = async (added) => {
+    if (!added.length) return;
+    try {
+      await db.saveStatements(added.map(toStored));
+      setKeep(["ok", `${plural(added.length, "statement")} saved`]);
+      onChanged?.();
+    } catch (e) {
+      setKeep(e.code === "NO_TABLE" ? ["warn", NO_TABLE] : ["bad", `Opened, but not saved: ${e.message}`]);
+    }
+  };
+
+  // Deleting is for good, so it asks. The zip on the trader's computer is untouched.
+  const removeStatement = async (st) => {
+    const typed = window.prompt(`Delete the ${fmtDate(st.date)} statement (${st.zipName}) from RAMP?\n\nThe book's figures come from these statements, so this changes them. Your own copy of the zip is not affected.\n\nType DELETE to confirm.`);
+    if (typed === null) return;
+    if (typed.trim() !== "DELETE") { setKeep(["warn", "Not deleted — type DELETE to confirm."]); return; }
+    try { await db.deleteStatement(st.checksum); }
+    catch (e) { if (e.code !== "NO_TABLE") { setKeep(["bad", `Couldn't delete it: ${e.message}`]); return; } }
+    listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum);
+    setList(listRef.current);
+    if (shown?.startsWith(st.checksum)) setShown(null);
+    onChanged?.();
+  };
 
   const openAll = async (files, password) => {
     setBusy(true);
     const opened = [], locked = [], problems = [];
+    let notMonthly = 0;
     let wrong = false;
     for (const f of files) {
-      try { opened.push(await openStatementZip(f, password)); }
+      try { opened.push(/\.pdf$/i.test(f.name) ? await openMonthlyPdf(f, password) : await openStatementZip(f, password)); }
       catch (e) {
         if (e.code === "NEEDS_PASSWORD" || e.code === "BAD_PASSWORD") { locked.push(f); wrong = wrong || e.code === "BAD_PASSWORD"; }
+        else if (e.code === "NOT_MONTHLY") notMonthly++;
         else problems.push(e.message);
       }
     }
@@ -4604,18 +4504,21 @@ function StatementsPanel() {
     const parts = [];
     if (added.length) parts.push(`Opened ${plural(added.length, "statement")}`);
     if (repeated.length) parts.push(`${plural(repeated.length, "statement")} already open — skipped`);
+    if (notMonthly) parts.push(`${plural(notMonthly, "PDF")} that aren't monthly statements passed over`);
     if (problems.length) parts.push(problems.join(" · "));
     setMsg(parts.length ? [problems.length ? "bad" : "ok", parts.join(" · ")] : null);
     setBusy(false);
+    await keepOpened(added);
   };
 
   // Zips only; anything else in a folder (the broker's other attachments, say) is passed over quietly.
   const load = (fileList) => {
     const files = [...(fileList || [])];
-    const zips = files.filter((f) => /\.zip$/i.test(f.name));
+    // Daily zips, and monthly statement PDFs (a PDF that isn't one says so when opened).
+    const zips = files.filter((f) => /\.(zip|pdf)$/i.test(f.name));
     if (fileRef.current) fileRef.current.value = "";
     if (folderRef.current) folderRef.current.value = "";
-    if (!zips.length) { setBusy(false); setMsg(["bad", files.length ? "No statement .zip files found in what you chose." : "Choose the statement .zip files your broker sends."]); return; }
+    if (!zips.length) { setBusy(false); setMsg(["bad", files.length ? "No statement .zip or monthly .pdf files found in what you chose." : "Choose the statement .zip files your broker sends, or a monthly statement .pdf."]); return; }
     openAll(zips, pw.current);
   };
   // A drop can hold folders. Walk them; fall back to plain files where the browser can't.
@@ -4659,27 +4562,157 @@ function StatementsPanel() {
     const op = st.files.find((x) => x.kind === "csv" && isOpenPosition(x.name));
     const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
     if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
-    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions: pos && !pos.problems.length ? positionsOf(pos.lots) : null }];
+    const positions = pos && !pos.problems.length ? positionsOf(pos.lots) : null;
+    // The day's trades, for rebuilding spreads from the trade history (src/lib/spreadHistory.js).
+    const tf = st.files.find((x) => x.kind === "csv" && isTradeConfirmation(x.name));
+    const tc = tf ? readTradeConfirmations(Papa.parse(tf.text, { skipEmptyLines: true }).data) : null;
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || []), ...(tc?.problems || [])], main, failed, positions, lots: positions ? pos.lots : null, trades: tc?.trades || [], spreads: positions ? spreadsFromLots(pos.lots) : null }];
   })), [list]);
+
+  /*
+   * Spreads as the trader traded them, rebuilt from every Trade Confirmation opened or kept, each
+   * trade once. A statement shows them only when the rebuilt legs are exactly the lots Orient
+   * shows open that day — otherwise the history is incomplete and the leg view stays.
+   */
+  const history = useMemo(() => {
+    const trades = uniqueTrades(list.map((st) => summaries.get(st.checksum)?.trades || []));
+    // Orient's realised P/L per account per day, each day once (the sub-account's and the group's zips repeat it).
+    const pl = new Map();
+    for (const st of list) for (const a of summaries.get(st.checksum)?.accounts || []) if (st.date && !pl.has(`${a.no}|${st.date}`)) pl.set(`${a.no}|${st.date}`, { no: a.no, date: st.date, pl: a.pl });
+    const plTo = (date) => { const o = {}; for (const v of pl.values()) if (v.date <= date) o[v.no] = (o[v.no] || 0) + v.pl; return o; };
+    return { trades, plTo, first: trades[0]?.date || null };
+  }, [list, summaries]);
+  /*
+   * Monthly statements: read from the text kept when the PDF was opened (src/lib/monthly.js),
+   * Orient's own sums checked, and the month tied to the daily statements for the same account.
+   */
+  const monthlies = useMemo(() => {
+    const dailies = list.filter((st) => !isMonthly(st)).map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [], lots: summaries.get(st.checksum)?.lots || null }));
+    const read = list.filter(isMonthly).map((st) => {
+      try {
+        const lines = restoreLines(JSON.parse(st.files.find((f) => f.name === MONTHLY_FILE).text));
+        if (isGstInvoice(lines)) { const g = readGstInvoice(lines); return { st, gst: g, month: g.month, problems: g.problems }; }
+        const m = readMonthlyStatement(lines);
+        return { st, m, month: m.month, problems: m.problems };
+      } catch (e) { return { st, month: null, problems: [`Couldn't read it: ${e.message}`] }; }
+    });
+    const statements = read.filter((x) => x.m && !x.problems.length).map((x) => x.m);
+    const family = checkMonthlyFamily(statements);
+    const rows = read.map((x) => (x.gst
+      ? { ...x, failed: x.problems.length ? [] : checkGst(x.gst), tie: x.problems.length ? null : tieGst(x.gst, statements, dailies) }
+      : { ...x, failed: x.problems.length ? [] : checkMonthly(x.m), tie: x.problems.length ? null : tieToDaily(x.m, dailies) }));
+    /*
+     * A month at a time, newest first. Month end brings four documents — the group's statement,
+     * one per sub-account, the group's GST invoice — so each month says how many are in, and
+     * whether the group's figures are its sub-accounts' added up.
+     */
+    const months = [...new Set(rows.map((r) => r.month || "?"))].sort().reverse();
+    return months.map((month) => {
+      const mine = rows.filter((r) => (r.month || "?") === month)
+        .sort((a, b) => (a.gst ? 1 : 0) - (b.gst ? 1 : 0) || String(a.m?.account || "").length - String(b.m?.account || "").length || String(a.m?.account).localeCompare(String(b.m?.account)));
+      const fam = family.find((f) => f.month === month);
+      const groups = new Set(mine.filter((r) => r.m && r.m.account?.length <= 6).map((r) => r.m.account));
+      const subsSeen = new Set([...(fam?.subs || []), ...list.flatMap((st) => (summaries.get(st.checksum)?.accounts || []).map((a) => a.no)).filter((no) => [...groups].some((g) => no !== g && no.startsWith(g)))]);
+      const expected = groups.size ? groups.size + subsSeen.size + 1 : null;
+      return { month, rows: mine, family: fam, have: mine.length, expected };
+    });
+  }, [list, summaries]);
+  /*
+   * The trader's TT fills (RAMP's book) against Orient's Trade Confirmations, lot by lot
+   * (src/lib/fillMatch.js). Days count as covered on Orient's side when a daily statement for the
+   * account is open, trades or not.
+   */
+  const fillCheck = useMemo(() => {
+    if (!history.trades.length || !fills.length) return null;
+    const days = {};
+    for (const st of list) {
+      if (isMonthly(st) || !st.date) continue;
+      for (const a of summaries.get(st.checksum)?.accounts || []) (days[a.no] ||= new Set()).add(st.date.replaceAll("-", ""));
+    }
+    return matchFills(fills, history.trades, days);
+  }, [fills, history, list, summaries]);
+  /*
+   * The daily statements as a tree: a block per date, the group's statement at its head and the
+   * sub-accounts' beneath it. Positions are shown once, on the sub-account that holds them, not
+   * repeated on the group. The newest day is open; older days fold to their head row.
+   */
+  const [openDays, setOpenDays] = useState(null); // null: only the newest day open
+  const [openFiles, setOpenFiles] = useState(() => new Set()); // statements whose files are listed
+  const [showFillCheck, setShowFillCheck] = useState(false);
+  const isGroupSt = (st) => String(st.account || "").length > 4;
+  const dailyRows = useMemo(() => {
+    const daily = list.filter((st) => !isMonthly(st));
+    const dates = [...new Set(daily.map((st) => st.date || ""))].sort().reverse();
+    const out = [];
+    dates.forEach((date, i) => {
+      const mine = daily.filter((st) => (st.date || "") === date);
+      const groups = mine.filter(isGroupSt);
+      const subs = mine.filter((st) => !isGroupSt(st)).sort((a, b) => String(a.account).localeCompare(String(b.account)));
+      const open = openDays ? openDays.has(date) : i === 0;
+      const holders = subs.filter((st) => summaries.get(st.checksum)?.positions?.length).map((st) => st.account);
+      if (groups.length) groups.forEach((st, j) => out.push({ kind: "group", st, date, open, subs: subs.length, first: j === 0, posElsewhere: holders.length ? holders.join(", ") : null }));
+      else out.push({ kind: "nogroup", date, open, subs: subs.length });
+      if (open) subs.forEach((st) => out.push({ kind: "sub", st, date }));
+    });
+    return out;
+  }, [list, summaries, openDays]);
+  const newestDay = dailyRows[0]?.date ?? null;
+  const toggleDay = (date) => setOpenDays((prev) => {
+    const next = new Set(prev ?? (newestDay !== null ? [newestDay] : []));
+    if (next.has(date)) next.delete(date); else next.add(date);
+    return next;
+  });
+  const historyFor = (st, sm) => {
+    if (!sm?.lots?.length || !st.date) return null;
+    const accts = new Set(sm.lots.map((l) => l.account));
+    const trades = history.trades.filter((t) => accts.has(t.account));
+    if (!trades.length) return { ok: false, why: "No Trade Confirmations opened for this account yet." };
+    const chk = checkHistory(spreadBook(trades, st.date.replaceAll("-", "")), sm.lots, history.plTo(st.date));
+    const mine = (o) => Object.entries(o).filter(([k]) => accts.has(k)).reduce((t, [, v]) => t + v, 0);
+    return {
+      ok: chk.legsMatch, chk, since: trades[0].date,
+      positions: chk.positions.filter((p) => accts.has(p.account)),
+      bookUpl: mine(chk.bookUpl), orientUpl: mine(chk.orientUpl), gap: +mine(chk.pnlGap).toFixed(2),
+      why: chk.legsMatch ? null : (() => {
+        /*
+         * Which days' trades are missing. Orient's open lots carry the date each was traded; a lot
+         * from a day with no Trade Confirmation open is that day missing. Only when none is
+         * found does it point further back.
+         */
+        const have = new Set(trades.map((t) => t.date));
+        const gaps = [...new Set(sm.lots.map((l) => l.tradeDate).filter((d) => d && d <= st.date.replaceAll("-", "") && !have.has(d)))].sort();
+        const fmt = (d) => d.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1");
+        const diff = chk.mismatches.map((m) => `${m.contract.split("|").slice(1).join(" ")}: trades ${m.book}, Orient ${m.orient}`).join("; ");
+        return gaps.length
+          ? `Orient's open lots include trades from ${gaps.map(fmt).join(", ")}, and no Trade Confirmation for ${gaps.length === 1 ? "that day" : "those days"} is open (${diff}). Open ${gaps.length === 1 ? "that day's statement" : "those days' statements"}.`
+          : `The trades opened so far don't add up to Orient's open lots (${diff}). A day's statement is missing — or, if the account wasn't flat on ${fmt(trades[0].date)}, open the statements from before then.`;
+      })(),
+    };
+  };
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
   const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
   const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
 
   return (
-    <section className="panel" style={{ marginTop: 16 }}>
-      <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>Opened in this browser only · nothing is uploaded or saved</span></div>
+    <section className="panel">
+      <div className="ph"><h2>Orient statements<span className="dim">Upload each morning's daily zips, and the month-end PDFs. The book's cash, prices and margin come from these.</span></h2><span className="faint" style={{ fontSize: 11 }}>{isRemote ? "Saved to your RAMP account" : "Kept in this browser only"} · CSV files only, PDFs aren't kept</span></div>
       <div className="pb fg">
-        <input ref={fileRef} type="file" accept=".zip" multiple hidden onChange={(e) => load(e.target.files)} />
+        <input ref={fileRef} type="file" accept=".zip,.pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
         <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => load(e.target.files)} />
+        <input ref={monthlyRef} type="file" accept=".pdf,application/pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
           onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
           onDrop={(e) => { e.preventDefault(); setOver(false); drop(e.dataTransfer); }}>
-          <b>{busy ? "Opening…" : "Drop statement zips or folders here"}</b>{!busy && " or click to choose zips"}<br />
-          <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips are fine · the same zip twice is skipped</span>
+          <b>{busy ? "Opening…" : "Drop statement zips, monthly PDFs or folders here"}</b>{!busy && " or click to choose them"}<br />
+          <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips and PDFs are fine · the same file twice is skipped</span>
         </div>
-        <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of statements</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn ghost" disabled={busy} onClick={() => fileRef.current?.click()}>Upload daily statements (zips)</button>
+          <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of daily statements</button>
+          <button className="btn ghost" disabled={busy} onClick={() => monthlyRef.current?.click()} title="Orient's month-end PDFs: each sub-account, the group, and the GST invoice. Password-protected is fine.">Upload monthly statements (PDFs)</button>
+        </div>
 
         {askPw && (
           <form onSubmit={submitPw}>
@@ -4694,21 +4727,162 @@ function StatementsPanel() {
           </form>
         )}
         {msg && <div className={msg[0]}>{msg[1]}</div>}
+        {keep && keep[1] && <div className={keep[0]} style={{ fontSize: 12 }}>{keep[1]}</div>}
 
-        {list.length > 0 && (
+        {monthlies.length > 0 && (
+          <div className="tw" style={{ marginBottom: 12 }}>
+            <table>
+              <thead><tr><th className="txt">Month end</th><th className="txt">Account</th><th>Closing balance</th><th>Total equity</th><th>Margin excess</th><th>Realised P&L</th><th>Unrealised</th><th className="txt">Orient's sums</th><th className="txt">Against the other statements</th><th></th></tr></thead>
+              <tbody>
+                {monthlies.map((mo) => (
+                  <React.Fragment key={mo.month}>
+                    <tr className="legs-head">
+                      <td className="txt" colSpan={10}>
+                        <b>{mo.month !== "?" ? new Date(`${mo.month}-15T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" }) : "Month not read"}</b>
+                        {mo.expected && <span className={mo.have >= mo.expected ? "ok" : "warn"}> · {mo.have} of {mo.expected} month-end documents</span>}
+                        {mo.family?.subs.length > 0 && (mo.family.failed.length
+                          ? <span className="warn" title={mo.family.failed.map((c) => `${c.label}: ${c.got.toFixed(2)} vs ${c.want.toFixed(2)}`).join("\n")}> · group is not its sub-accounts added up ({mo.family.failed.length})</span>
+                          : <span className="ok"> · group = its sub-accounts added up</span>)}
+                      </td>
+                    </tr>
+                    {mo.rows.map(({ st, m, gst, problems: pr, failed, tie }) => {
+                      const s2 = m?.summary || {};
+                      const tieBad = tie ? tie.lines.filter((l) => !l.ok) : [];
+                      const tieTitle = tie ? [...tie.lines.map((l) => `${l.ok ? "✓" : "✗"} ${l.label}${l.ok || l.got === null ? "" : `: ${l.got.toFixed(2)} vs ${l.want?.toFixed?.(2)}`}${l.note ? ` — ${l.note}` : ""}`), ...(tie.missing ? [tie.missing] : [])].join("\n") : undefined;
+                      const feeTot = (re) => (gst ? gst.fees.filter((f) => re.test(f.type)).reduce((t, f) => t + f.amount, 0) : 0);
+                      const tKey = `trades|${st.checksum}`, tOpen = openFiles.has(tKey);
+                      const vs = tOpen && m?.deals?.length ? dealsAgainstFills(m, fills) : null;
+                      return (
+                        <React.Fragment key={st.checksum}>
+                        <tr>
+                          <td className="txt">{gst ? "GST invoice" : "Statement"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div>
+                            {m?.deals?.length > 0 && (
+                              <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11, marginTop: 2 }} aria-expanded={tOpen}
+                                onClick={() => setOpenFiles((o) => { const n2 = new Set(o); if (n2.has(tKey)) n2.delete(tKey); else n2.add(tKey); return n2; })}>
+                                {m.deals.length} trade lines {tOpen ? "▾" : "▸"}
+                              </button>
+                            )}
+                          </td>
+                          <td className="txt">{st.account || "—"}</td>
+                          {pr.length ? <td colSpan={7} className="txt bad">{pr.join(" · ")}</td>
+                            : gst ? <>
+                              <td className="txt" colSpan={5}>Fees: commission {cents(feeTot(/^commission/i))} · exchange {cents(feeTot(/^exchange/i))} · NFA {cents(feeTot(/^nfa/i))} · bank {cents(feeTot(/bank/i))}{gst.invoice && <span className="faint"> · {gst.invoice}</span>}</td>
+                              <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
+                              <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>{!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}</td>
+                            </> : <>
+                              <td>{cents(s2.ending)}</td><td>{cents(s2.totalEquity)}</td><td className={s2.excess < 0 ? "bad" : ""}>{cents(s2.excess)}</td>
+                              <td>{cents(s2.foRealized)}</td><td>{cents(s2.foUnrealized)}</td>
+                              <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got?.toFixed?.(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
+                              <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>{!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}</td>
+                            </>}
+                          <td><button className="btn ghost faint" style={{ padding: "0 6px", fontSize: 11 }} onClick={() => removeStatement(st)} title="Asks you to type DELETE first">Delete…</button></td>
+                        </tr>
+                        {vs && (
+                          <tr>
+                            <td colSpan={10} className="txt">
+                              <div style={{ fontSize: 12, margin: "4px 0 6px" }}>
+                                <b>Every trade on this statement</b>
+                                {vs.lots ? <span className={vs.matched === vs.lots ? "ok" : "warn"}> · {vs.matched} of {vs.lots} lots match your TT fills</span> : <span className="faint"> · no TT fills in RAMP for these days to compare with</span>}
+                                {vs.extra.length > 0 && <span className="warn"> · {plural(vs.extra.length, "TT fill lot")} this month not on the statement</span>}
+                                <span className="faint"> · open at month end = still open on {fmtDate(m.date)}</span>
+                              </div>
+                              <table className="postable">
+                                <thead><tr><th className="txt">Trade date</th><th className="txt">Sub-account</th><th className="txt">Contract</th><th>Bought</th><th>Sold</th><th>Price</th><th className="txt">At month end</th><th>Unrealised</th><th className="txt">Your TT fills</th></tr></thead>
+                                <tbody>
+                                  {vs.lines.map((d, i) => (
+                                    <tr key={i}>
+                                      <td className="txt">{new Date(`${d.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</td>
+                                      <td className="txt">{d.account ? d.account.slice(-4) : "—"}</td>
+                                      <td className="txt">{d.code} {d.month ? new Date(`${d.month.slice(0, 4)}-${d.month.slice(4)}-15T12:00:00`).toLocaleDateString("en-US", { month: "short" }) + d.month.slice(2, 4) : ""}</td>
+                                      <td>{d.buy || ""}</td><td>{d.sell || ""}</td>
+                                      <td>{d.price}</td>
+                                      <td className="txt">{d.status === "open" ? "Open" : "Closed"}</td>
+                                      <td className={d.upl === null ? "faint" : d.upl < 0 ? "bad" : "ok"}>{d.upl === null ? "" : cents(d.upl)}</td>
+                                      <td className={`txt ${!d.compared ? "faint" : d.matched === d.lots ? "ok" : "warn"}`}>{!d.compared ? "not in RAMP's dates" : d.matched === d.lots ? "✓ matched" : d.matched === 0 ? "not in your fills" : `${d.lots - d.matched} of ${d.lots} not in your fills`}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              {vs.extra.length > 0 && (
+                                <div className="warn" style={{ fontSize: 11, marginTop: 4 }}>In your TT fills but not on this statement: {vs.extra.slice(0, 8).map((x) => `${x.contract} ${x.side === "B" ? "bought" : "sold"} at ${x.price} (${new Date(x.ts).toLocaleDateString(undefined, { day: "numeric", month: "short" })})`).join(" · ")}{vs.extra.length > 8 ? ` · +${vs.extra.length - 8} more` : ""}</div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {fillCheck && (() => {
+          const fd = (d) => d.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1");
+          const issues = fillCheck.missing.length + fillCheck.extra.length;
+          return (
+            <div style={{ marginBottom: 12 }}>
+              <div className={issues ? "warn" : "ok"} style={{ fontSize: 12, marginBottom: 4 }}>
+                <b>Your TT fills against Orient's trade confirmations:</b> {fillCheck.matched} lot{fillCheck.matched === 1 ? "" : "s"} matched
+                {fillCheck.missing.length > 0 && ` · ${fillCheck.missing.length} Orient booked that RAMP doesn't have`}
+                {fillCheck.extra.length > 0 && ` · ${fillCheck.extra.length} in RAMP that Orient didn't book`}
+                {!issues && fillCheck.days.length > 0 && " · every lot ties, both ways"}
+                {!fillCheck.days.length && <span className="faint"> · no days yet where both TT fills and Orient statements are open</span>}
+                {fillCheck.offsetHours !== null && <span className="faint" title="Read from the fills themselves: the hours between TT's time and Orient's for lots that could only be each other."> · Orient's clock is TT's {fillCheck.offsetHours >= 0 ? "+" : ""}{fillCheck.offsetHours}h</span>}
+              </div>
+              {fillCheck.days.length > 0 && <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11, marginBottom: 4 }} aria-expanded={showFillCheck} onClick={() => setShowFillCheck((v) => !v)}>{showFillCheck ? "Hide the comparison ▾" : "Show the comparison, day by day ▸"}</button>}
+              {showFillCheck && fillCheck.days.length > 0 && (
+                <div className="tw">
+                  <table className="postable">
+                    <thead><tr><th className="txt">Orient trade date</th><th className="txt">Account</th><th>Orient lots</th><th>Matched</th><th>Missing from RAMP</th><th>Not at Orient</th></tr></thead>
+                    <tbody>
+                      {fillCheck.days.map((d) => (
+                        <tr key={`${d.account}|${d.date}`}>
+                          <td className="txt">{fd(d.date)}</td><td className="txt">{d.account.slice(-4)}</td><td>{d.orient}</td><td>{d.matched}</td>
+                          <td className={d.missing ? "bad" : "faint"}>{d.missing || "—"}</td><td className={d.extra ? "bad" : "faint"}>{d.extra || "—"}</td>
+                        </tr>
+                      ))}
+                      {[...fillCheck.missing.map((x) => ({ k: `m|${x.tradeId}`, t: `Missing from RAMP: ${fd(x.date)} ${x.time ? `(${x.time.split(" ")[1] || x.time} Orient) ` : ""}${x.contract.replace(/ (\d{4})(\d{2})$/, " $2/$1")} ${x.side === "B" ? "bought" : "sold"} at ${x.price} — Orient trade ${x.tradeId}` })),
+                         ...fillCheck.extra.map((x) => ({ k: `e|${x.ref}`, t: `Not at Orient: ${new Date(x.ts).toLocaleString()} ${x.product} ${x.side === "B" ? "bought" : "sold"} at ${x.price} — RAMP fill ${String(x.ref).split("|")[0]} (stored twice, or on the wrong account?)` }))]
+                        .slice(0, 25).map((x) => <tr key={x.k}><td className="txt bad" colSpan={6} style={{ whiteSpace: "normal" }}>{x.t}</td></tr>)}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {list.some((st) => !isMonthly(st)) && (
           <>
             <div className="tw">
               <table>
-                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
+                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th title="Net equity as a share of initial margin — the ratio margin calls are set on">TNE / IM</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th></tr></thead>
                 <tbody>
-                  {list.map((st) => (
-                    <tr key={st.checksum}>
-                      <td className="txt">{fmtDate(st.date)}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                  {dailyRows.map((row) => row.kind === "nogroup" ? (
+                    <tr key={`nogroup|${row.date}`} className="dayhead">
+                      <td className="txt" colSpan={9}>
+                        <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>
+                        <b>{fmtDate(row.date || null)}</b> <span className="faint">· group statement not open · {row.subs} sub-account statement{row.subs === 1 ? "" : "s"}</span>
+                      </td>
+                    </tr>
+                  ) : ((st) => (
+                    <tr key={st.checksum} className={row.kind === "group" ? "dayhead" : "daysub"}>
+                      <td className="txt">{row.kind === "sub"
+                        ? <div style={{ paddingLeft: 22 }}><span className="faint">└ </span>Sub-account<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></div>
+                        : <>
+                            {row.first && <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>}
+                            <b>{fmtDate(st.date)}</b> <span className="faint">· group</span>
+                            <div className="faint" style={{ fontSize: 10 }}>{st.zipName}{!row.open && row.subs ? ` · ${row.subs} sub-account statement${row.subs === 1 ? "" : "s"} folded` : ""}</div>
+                          </>}
+                      </td>
                       <td className="txt">{st.account || "—"}</td>
                       {(() => {
                         const sm = summaries.get(st.checksum);
-                        if (!sm) return <td colSpan={5} className="txt faint">No Financial Summary in this zip</td>;
-                        if (sm.problems.length) return <td colSpan={5} className="txt bad">Couldn't read the Financial Summary: {sm.problems[0]}{sm.problems.length > 1 ? ` (+${sm.problems.length - 1} more)` : ""}</td>;
+                        if (!sm) return <td colSpan={6} className="txt faint">No Financial Summary in this zip</td>;
+                        if (sm.problems.length) return <td colSpan={6} className="txt bad">Couldn't read the Financial Summary: {sm.problems[0]}{sm.problems.length > 1 ? ` (+${sm.problems.length - 1} more)` : ""}</td>;
                         const m = sm.main;
                         const cur = m?.ccy || "USD";
                         return (
@@ -4716,12 +4890,99 @@ function StatementsPanel() {
                             <td>{m ? cents(m.tne, cur) : "—"}</td>
                             <td>{m ? cents(m.im, cur) : "—"}</td>
                             <td className={m && m.excess < 0 ? "bad" : ""}>{m ? cents(m.excess, cur) : "—"}</td>
+                            <td className={m && m.im > 0 && m.tne / m.im < 1 ? "bad" : ""}>{m && m.im > 0 ? ratioTxt(m.tne / m.im) : "—"}</td>
                             <td className="txt" style={{ fontSize: 12 }}>
-                              {!sm.positions ? <span className="faint">No Open Position file</span>
+                              {row.posElsewhere ? <span className="faint">Held in {row.posElsewhere} — {row.open ? "below" : "open the day to see them"}</span>
+                                : !sm.positions ? <span className="faint">No Open Position file</span>
                                 : !sm.positions.length ? <span className="faint">None</span>
-                                : sm.positions.map((ps) => (
-                                  <div key={`${ps.account}|${ps.label}`}>{ps.label} <b className={ps.lots > 0 ? "ok" : "bad"}>{ps.lots > 0 ? "+" : ""}{ps.lots}</b> @ {ps.avg} · settle {ps.settle ?? "—"} · {cents(ps.upl, cur)}</div>
-                                ))}
+                                : (() => {
+                                  /*
+                                   * A small table per statement: spreads first — paired by Orient's exchange
+                                   * order id, else by rule (src/lib/statementSpreads.js) — then anything left
+                                   * outright, then the legs as Orient lists them. The total is the legs' P/L,
+                                   * which is Orient's own figure; the spreads above add up to it.
+                                   */
+                                  const sign = (n) => <b className={n > 0 ? "ok" : "bad"}>{n > 0 ? "+" : ""}{n}</b>;
+                                  const px = (v) => (v === null || v === undefined ? "—" : +(+v).toFixed(4));
+                                  const total = sm.positions.reduce((t, ps) => t + ps.upl, 0);
+                                  /*
+                                   * Spreads paired by rule are built from legs Orient left open after closing each
+                                   * contract first-in-first-out on its own — so their legs can come from different
+                                   * trades, and an entry price or P/L for the pair would be one the trader never
+                                   * had. Their lots and settlement are right; their entry and P/L are not shown,
+                                   * and their P/L is kept together on one line so the table still adds up.
+                                   */
+                                  const MIXED = "Orient closes each contract first-in-first-out on its own, so the legs left open can come from different spread trades. The lots and settlement price are right; an entry price or P/L for this pair would be one you never traded.";
+                                  const ruled = sm.spreads.spreads.filter((sp) => sp.by === "rule");
+                                  const mixedUpl = ruled.length ? ruled.reduce((t, sp) => t + sp.upl, 0) : null;
+                                  const h = historyFor(st, sm);
+                                  const legRows = (
+                                    <>
+                                      <tr className="legs-head"><td className="txt" colSpan={5}>Legs, as Orient lists them</td></tr>
+                                      {sm.positions.map((ps) => (
+                                        <tr key={`leg|${ps.account}|${ps.label}`} className="leg">
+                                          <td className="txt">{ps.label}</td><td>{ps.lots > 0 ? "+" : ""}{ps.lots}</td><td>{px(ps.avg)}</td><td>{px(ps.settle)}</td><td>{cents(ps.upl, cur)}</td>
+                                        </tr>
+                                      ))}
+                                    </>
+                                  );
+                                  if (h?.ok) return (
+                                    /*
+                                     * Spreads as traded: entry is the price each spread was actually done at, closed
+                                     * first in first out spread against spread. Orient's open legs underneath. The two
+                                     * totals differ by P/L Orient has already booked as realised by closing each leg on
+                                     * its own; the last line checks the two agree in total, to the cent.
+                                     */
+                                    <table className="postable">
+                                      <thead><tr><th className="txt">Spread, as traded</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
+                                      <tbody>
+                                        {h.positions.map((p, i) => (
+                                          <tr key={`h|${i}`}>
+                                            <td className="txt">{p.label}{p.kind === "Outright" && <span className="faint"> outright</span>}</td>
+                                            <td>{sign(p.lots)}</td><td>{px(p.entry)}</td><td>{px(p.settle)}</td><td className={p.upl < 0 ? "bad" : ""}>{p.upl === null ? "—" : cents(p.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        <tr className="total"><td className="txt" colSpan={4}>Spreads' P/L</td><td className={h.bookUpl < 0 ? "bad" : ""}>{cents(h.bookUpl, cur)}</td></tr>
+                                        {legRows}
+                                        <tr className="total"><td className="txt" colSpan={4}>Orient's open legs</td><td className={total < 0 ? "bad" : ""}>{cents(total, cur)}</td></tr>
+                                        <tr><td className="txt faint" colSpan={5} style={{ whiteSpace: "normal" }}>
+                                          The {cents(h.bookUpl - total, cur)} between the two is P/L Orient has already booked as realised, by closing each contract first in first out on its own. From your trade confirmations since {h.since.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1")}.{" "}
+                                          {Math.abs(h.gap) < 0.01
+                                            ? <span className="ok">Realised + unrealised ties to Orient's to the cent.</span>
+                                            : <span className="warn">Realised + unrealised differs from Orient's by {cents(h.gap, cur)} — a day's statement may be missing.</span>}
+                                        </td></tr>
+                                      </tbody>
+                                    </table>
+                                  );
+                                  return (
+                                    <table className="postable">
+                                      <thead><tr><th className="txt">Position</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
+                                      <tbody>
+                                        {h && !h.ok && <tr><td className="txt warn" colSpan={5} style={{ whiteSpace: "normal" }}>Spreads as traded not shown: {h.why}</td></tr>}
+                                        {sm.spreads.spreads.map((sp, i) => (
+                                          <tr key={`sp|${i}`}>
+                                            <td className="txt">{sp.label}{sp.by === "rule" && <span className="faint" title={MIXED}> · legs from different trades</span>}</td>
+                                            <td>{sign(sp.lots)}</td>
+                                            {sp.by === "rule"
+                                              ? <><td className="faint" title={MIXED}>mixed</td><td>{px(sp.settle)}</td><td className="faint" title={MIXED}>not split</td></>
+                                              : <><td>{px(sp.entry)}</td><td>{px(sp.settle)}</td><td className={sp.upl < 0 ? "bad" : ""}>{cents(sp.upl, cur)}</td></>}
+                                          </tr>
+                                        ))}
+                                        {mixedUpl !== null && (
+                                          <tr><td className="txt faint" colSpan={4} title={MIXED}>Not split by spread (legs from different trades)</td><td className={mixedUpl < 0 ? "bad" : ""}>{cents(mixedUpl, cur)}</td></tr>
+                                        )}
+                                        {sm.spreads.outrights.map((o, i) => (
+                                          <tr key={`out|${i}`}>
+                                            <td className="txt">{o.label} <span className="faint">outright</span></td>
+                                            <td>{sign(o.lots)}</td><td>{px(o.avg)}</td><td>{px(o.settle)}</td><td className={o.upl < 0 ? "bad" : ""}>{cents(o.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        {legRows}
+                                        <tr className="total"><td className="txt" colSpan={4}>Total</td><td className={total < 0 ? "bad" : ""}>{cents(total, cur)}</td></tr>
+                                      </tbody>
+                                    </table>
+                                  );
+                                })()}
                             </td>
                             <td className={`txt ${sm.failed.length ? "warn" : "ok"}`} title={sm.failed.map((c) => (isFinite(c.got) ? `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}` : c.label)).join("\n") || undefined}>
                               {sm.failed.length ? `${sm.failed.length} don't add up` : "Add up"}
@@ -4730,6 +4991,12 @@ function StatementsPanel() {
                         );
                       })()}
                       <td className="txt">
+                        {/* Folded to a count; the files are there when wanted. */}
+                        <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11 }} aria-expanded={openFiles.has(st.checksum)} onClick={() => setOpenFiles((o) => { const n2 = new Set(o); if (n2.has(st.checksum)) n2.delete(st.checksum); else n2.add(st.checksum); return n2; })}>
+                          {st.files.length} file{st.files.length === 1 ? "" : "s"} {openFiles.has(st.checksum) ? "▾" : "▸"}
+                        </button>
+                        {openFiles.has(st.checksum) && <div style={{ marginTop: 4 }}>
+                        {st.stored && <span className="faint" style={{ marginRight: 8, fontSize: 11 }} title="Saved statements keep their CSV files only. Open the zip again to see its PDF.">Saved · PDF not kept</span>}
                         {st.files.map((f) => {
                           const id = `${st.checksum}|${f.name}`;
                           return f.kind === "csv"
@@ -4738,20 +5005,23 @@ function StatementsPanel() {
                               ? <button key={f.name} className="btn ghost" style={{ margin: "2px 4px 2px 0" }} onClick={() => openPdf(f.blob)} title="Opens in a new tab. If the PDF has its own password, your PDF viewer will ask for it.">{f.name} ↗</button>
                               : <span key={f.name} className="faint" style={{ marginRight: 8 }}>{f.name}</span>;
                         })}
+                        <div style={{ marginTop: 6 }}><button className="btn ghost bad" style={{ padding: "0 8px", fontSize: 11 }} onClick={() => removeStatement(st)} title="Asks you to type DELETE first">Delete this statement…</button></div>
+                        </div>}
                       </td>
-                      <td><button className="btn ghost" onClick={() => { listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum); setList(listRef.current); if (shown?.startsWith(st.checksum)) setShown(null); }} aria-label="Close statement">✕</button></td>
                     </tr>
-                  ))}
+                  ))(row.st))}
                 </tbody>
               </table>
             </div>
             {read.length > 1 && (
               <div className={carry.length ? "warn" : "ok"} style={{ fontSize: 12 }}>
                 {carry.length
-                  ? <>Day to day: {carry.length} opening balance{carry.length === 1 ? " doesn't" : "s don't"} match the previous statement's closing balance — usually a missing day in between.
-                      <ul style={{ margin: "4px 0 0 16px" }}>{carry.slice(0, 10).map((b) => <li key={`${b.date}|${b.no}`}>{fmtDate(b.date)}, account {b.no}: opens at {cents(b.beginning)}, previous statement ({fmtDate(b.prevDate)}) closed at {cents(b.prevEnding)}</li>)}</ul>
+                  ? <>Day to day: {carry.length} balance{carry.length === 1 ? " doesn't" : "s don't"} carry over — usually a missing day in between, or two statements for one day that disagree.
+                      <ul style={{ margin: "4px 0 0 16px" }}>{carry.slice(0, 10).map((b, i) => <li key={`${b.date}|${b.no}|${i}`}>{b.sameDay
+                        ? <>{fmtDate(b.date)}, account {b.no}: two statements for this day disagree — one opens at {cents(b.otherBeginning)} and closes at {cents(b.otherEnding)}, the other opens at {cents(b.beginning)} and closes at {cents(b.ending)}</>
+                        : <>{fmtDate(b.date)}, account {b.no}: opens at {cents(b.beginning)}, previous day ({fmtDate(b.prevDate)}) closed at {cents(b.prevEnding)}</>}</li>)}</ul>
                       {carry.length > 10 && <span className="faint"> …and {carry.length - 10} more</span>}</>
-                  : `Day to day: every opening balance matches the previous statement's closing balance, across ${read.length} statements.`}
+                  : `Day to day: every opening balance matches the previous day's closing balance, across ${read.length} statements.`}
               </div>
             )}
             {shown && (() => {
@@ -4772,7 +5042,7 @@ function StatementsPanel() {
             })()}
           </>
         )}
-        <div className="faint" style={{ fontSize: 11 }}>Figures match within ${TOL.toFixed(2)} (a cent either way, for rounding). For reading only for now: RAMP doesn't use these figures yet. Checking them against your book comes next, and will propose changes for you to confirm, never post them.</div>
+        <div className="faint" style={{ fontSize: 11 }}>Figures match within ${TOL.toFixed(2)} (a cent either way, for rounding). The book takes the latest statement's equity, settlement prices, margin and deposits from here.</div>
       </div>
     </section>
   );
@@ -4817,12 +5087,29 @@ function FundsTab({ pf, settings, setSettings, view }) {
   };
   const setStmt = (id, v) => setSettings((s) => ({ ...s, statement: { ...(s.statement || {}), [id]: v } }));
   const accts = pf.accounts.filter((a) => view === "all" || a.id === view);
+  /*
+   * The ledger: for an account the broker's statements cover, its deposits and withdrawals come
+   * from them (read-only). Anything typed for that account is a fallback, and says whether it is
+   * counted: only while no statement shows it yet.
+   */
+  const fed = accts.filter((a) => a.fromStatement);
+  const ledger = [
+    ...fed.flatMap((a) => a.fromStatement.cash.map((x) => ({ id: `st|${a.id}|${x.account}|${x.date}`, ts: `${x.date}T12:00:00`, broker: a.id, type: x.amount > 0 ? "deposit" : "withdrawal", amount: Math.abs(x.amount), note: `Sub-account ${x.account.slice(-4)} · Cash Adjustments`, source: "statement" }))),
+    ...cash.map((c) => {
+      const a = fed.find((x) => x.id === c.broker);
+      if (!a || c.type === "charge") return c;
+      const onIt = a.fromStatement.onStatement(c);
+      const after = c.ts.slice(0, 10) > a.fromStatement.date;
+      return { ...c, status: onIt ? { counted: false, text: "On Orient's statement — not counted again" } : after ? { counted: true, text: "Not yet on a statement — counted for now" } : { counted: false, text: "Not on Orient's statements — not counted" } };
+    }),
+  ].sort((x, y) => new Date(y.ts) - new Date(x.ts));
 
   return (
     <>
     <div className="grid-fills">
       <section className="panel">
         <div className="ph"><h2>Record money in, out or charged</h2></div>
+        {fed.length > 0 && <div className="faint" style={{ fontSize: 12, padding: "0 16px" }}>For {fed.map((a) => a.name).join(", ")}, Orient's statements fill the ledger. Type an entry only for money in transit — it counts until a statement shows it.</div>}
         <div className="pb fg">
           <div className="seg seg3" role="group" aria-label="Type">
             <button className={f.type === "deposit" ? "on-buy" : ""} aria-pressed={f.type === "deposit"} onClick={() => set("type", "deposit")}>Deposit</button>
@@ -4860,6 +5147,42 @@ function FundsTab({ pf, settings, setSettings, view }) {
                   const st = settings.statement?.[a.id];
                   const diff = has(st) ? n(st) - a.TNE : null;
                   const ok = diff !== null && Math.abs(diff) < 1;
+                  if (a.fromStatement) {
+                    // Run on the broker's statements: Orient's equity at the close, plus what has changed since.
+                    const fs = a.fromStatement;
+                    const dep = sum(fs.cash.filter((x) => x.amount > 0), (x) => x.amount), wd = sum(fs.cash.filter((x) => x.amount < 0), (x) => -x.amount);
+                    const transit = sum(fs.transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+                    const stDate = new Date(`${fs.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+                    const fp = fs.fillsPl, orientPl = +(fs.sums.pl + fs.sums.upl).toFixed(2), mine = +(fp.realised + fp.open).toFixed(2), gap = +(mine - orientPl).toFixed(2);
+                    return (
+                      <React.Fragment key={a.id}>
+                      <tr>
+                        <td className="txt"><b>{a.name}</b><div className="faint" style={{ fontSize: 11 }}>From Orient's statements ({fs.days} days)</div></td>
+                        <td className="ok">{dep ? money(dep) : "—"}</td>
+                        <td className="bad">{wd ? money(-wd) : "—"}</td>
+                        <td><b>{money(fs.sums.opening + dep - wd)}</b>{fs.sums.opening ? <div className="faint" style={{ fontSize: 10 }}>incl. {money(fs.sums.opening)} opening balance</div> : null}</td>
+                        <td className={pc(fs.sums.pl)}>{signed(fs.sums.pl)}<div className="faint" style={{ fontSize: 10 }}>Orient's Profit/Loss</div></td>
+                        <td className={fs.sums.charges ? "bad" : "faint"} title={`Commission ${fs.sums.commission.toFixed(2)} · fees ${fs.sums.fee.toFixed(2)} · GST ${fs.sums.gst.toFixed(2)} · interest ${fs.sums.interest.toFixed(2)}`}>{fs.sums.charges ? money(fs.sums.charges) : "—"}<div className="faint" style={{ fontSize: 10 }}>commission, fees, GST, interest</div></td>
+                        <td className={pc(fs.sums.upl)}>{signed(fs.sums.upl)}<div className="faint" style={{ fontSize: 10 }}>at the close of {stDate}</div></td>
+                        <td><b>{money(a.TNE)}</b><div className="faint" style={{ fontSize: 10 }}>{money(fs.equity)} at the close · <span className={pc(fs.sinceClose)}>{signed(fs.sinceClose)}</span> since{transit ? <> · {signed(transit)} in transit</> : null}</div></td>
+                        <td className={`txt ${Math.abs(fs.sums.unexplained) < 0.01 ? "ok" : "warn"}`} colSpan={2} style={{ fontSize: 12 }}>
+                          {Math.abs(fs.sums.unexplained) < 0.01 ? "✓ Adds up to Orient's equity, to the cent" : <>{signed(fs.sums.unexplained)} not explained by the statements loaded — a day's statement may be missing</>}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="txt">Your TT fills<div className="faint" style={{ fontSize: 11 }}>Up to Orient's close of {stDate} · {fs.method === "fifo" ? "first in, first out" : <span className="warn">matched {fs.method} — Orient uses first in, first out</span>}</div></td>
+                        <td colSpan={3} className="txt faint" style={{ fontSize: 12 }}>Your P/L, worked out from your fills, against Orient's</td>
+                        <td className={pc(fp.realised)}>{signed(fp.realised)}<div className="faint" style={{ fontSize: 10 }}>Orient: {signed(fs.sums.pl)}</div></td>
+                        <td className="faint" style={{ fontSize: 11 }}>before charges</td>
+                        <td className={pc(fp.open)}>{signed(fp.open)}<div className="faint" style={{ fontSize: 10 }}>Orient: {signed(fs.sums.upl)}{fp.unpriced ? <span className="warn"> · {fp.unpriced} not priced</span> : null}</div></td>
+                        <td><b className={pc(mine)}>{signed(mine)}</b><div className="faint" style={{ fontSize: 10 }}>Orient: {signed(orientPl)}</div></td>
+                        <td className={`txt ${Math.abs(gap) < 0.01 ? "ok" : "warn"}`} colSpan={2} style={{ fontSize: 12 }} title="Realised and open can split differently if trades are matched differently; the total should agree.">
+                          {Math.abs(gap) < 0.01 ? "✓ Your fills tie to Orient's P/L, to the cent" : <>{signed(gap)} between your fills and Orient — open Statements to see which trades don't match</>}
+                        </td>
+                      </tr>
+                      </React.Fragment>
+                    );
+                  }
                   return (
                     <tr key={a.id}>
                       <td className="txt"><b>{a.name}</b>{!a.fund.fromLedger && <div className="faint" style={{ fontSize: 11 }}>No ledger yet: using Capital {money(n(settings.brokers.find((b) => b.id === a.id)?.capital))}</div>}</td>
@@ -4878,7 +5201,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
               </tbody>
             </table>
           </div>
-          <div className="pb faint" style={{ fontSize: 11 }}>Nexus equity = deposits − withdrawals + realized P&amp;L (after commission and swap) − charges + open P&amp;L at the current prices you've entered. A difference usually means a missing deposit or withdrawal, fees the broker charged outside the fills, or a current price that isn't up to date.</div>
+          <div className="pb faint" style={{ fontSize: 11 }}>Nexus equity = deposits − withdrawals + realized P&amp;L (after commission and swap) − charges + open P&amp;L at the current prices you've entered. A difference usually means a missing deposit or withdrawal, fees the broker charged outside the fills, or a current price that isn't up to date. For an account on Orient's statements every column is Orient's own sum over the statements loaded, and equity is Orient's at the last close plus what has changed since.</div>
         </section>
 
         {(() => {
@@ -4905,21 +5228,21 @@ function FundsTab({ pf, settings, setSettings, view }) {
         })()}
 
         <section className="panel">
-          <div className="ph"><h2>Ledger<span className="dim">{cash.length}</span></h2></div>
-          {cash.length === 0 ? <div className="empty">No deposits, withdrawals or charges recorded yet.</div> : (
+          <div className="ph"><h2>Ledger<span className="dim">{ledger.length}</span></h2></div>
+          {ledger.length === 0 ? <div className="empty">No deposits, withdrawals or charges recorded yet.</div> : (
             <div className="tw tall">
               <table>
                 <thead><tr><th className="txt">Date</th><th className="txt">Account</th><th className="txt">Type</th><th>Amount</th><th className="txt">Note</th><th className="txt">Source</th><th></th></tr></thead>
                 <tbody>
-                  {cash.map((c) => (
-                    <tr key={c.id}>
+                  {ledger.map((c) => (
+                    <tr key={c.id} className={c.source === "statement" ? "" : undefined}>
                       <td className="txt dim">{new Date(c.ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</td>
                       <td className="txt">{bname(c.broker)}</td>
                       <td className="txt"><span className={`side ${c.type === "deposit" ? "long" : c.type === "charge" ? "chg" : "short"}`}>{c.type === "deposit" ? "Deposit" : c.type === "charge" ? "Charge" : "Withdrawal"}</span></td>
                       <td className={c.type === "deposit" ? "ok" : "bad"}><b>{c.type === "deposit" ? "+" : "−"}{money(n(c.amount))}</b>{c.recurring === "monthly" && <div className="faint" style={{ fontSize: 10 }}>a month · {monthsCharged(c)}× = {money(chargeTotal(c))}</div>}</td>
                       <td className="txt dim">{c.type === "charge" && <b style={{ color: "var(--text)", fontWeight: 500 }}>{c.category}{c.recurring === "monthly" ? (c.endTs ? ` (monthly, stopped ${new Date(c.endTs).toLocaleDateString(undefined, { day: "numeric", month: "short" })})` : " (monthly)") : ""}{c.note ? " · " : ""}</b>}{c.note || (c.type === "charge" ? "" : "—")}</td>
-                      <td className="txt faint">{c.source === "csv" ? "Upload" : "Manual"}</td>
-                      <td style={{ whiteSpace: "nowrap" }}>{c.recurring === "monthly" && !c.endTs && <button className="btn ghost" style={{ marginRight: 4 }} onClick={() => stopMonthly(c.id)}>Stop</button>}<button className="btn ghost" onClick={() => remove(c.id)} aria-label="Delete entry">✕</button></td>
+                      <td className="txt faint">{c.source === "statement" ? <span className="ok">Orient's statement</span> : c.source === "csv" ? "Upload" : "Manual"}{c.status && <div className={c.status.counted ? "warn" : "faint"} style={{ fontSize: 10 }}>{c.status.text}</div>}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>{c.source !== "statement" && <>{c.recurring === "monthly" && !c.endTs && <button className="btn ghost" style={{ marginRight: 4 }} onClick={() => stopMonthly(c.id)}>Stop</button>}<button className="btn ghost" onClick={() => remove(c.id)} aria-label="Delete entry">✕</button></>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -4929,7 +5252,6 @@ function FundsTab({ pf, settings, setSettings, view }) {
         </section>
       </div>
     </div>
-    <StatementsPanel />
     </>
   );
 }

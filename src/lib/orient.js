@@ -135,18 +135,42 @@ export function checkFamily(accounts) {
 }
 
 /*
- * Day to day: each statement's beginning balance should be the previous statement's ending
- * balance, account by account. days: [{ date: "YYYY-MM-DD", accounts }]. A break means a
- * missing statement in between, or something moved that the statement didn't show.
+ * Day to day: each day's beginning balance should be the previous day's ending balance, account
+ * by account. days: [{ date: "YYYY-MM-DD", accounts }]. A break means a missing statement in
+ * between, or something moved that the statement didn't show.
+ *
+ * Compared DAY to day, not statement to statement. Orient sends a zip per sub-account and one
+ * for the group, all dated the same day and holding the same sub-account, so "the statement
+ * before this one" was often the same day — whose closing balance is not this one's opening, and
+ * the check cried "missing day" over two statements that agreed. Worse, when the statement just
+ * before didn't hold the account at all, a real break across days went unchecked.
+ *
+ * So each day is first reduced to one balance per account, then each account is compared with
+ * the latest earlier day that has it. Two statements for one day and account that disagree are
+ * reported as that ({ sameDay: true }) — they should be the same figures from two files.
  */
 export function checkCarryOver(days) {
-  const sorted = [...days].filter((d) => d.date && d.accounts?.length).sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map();
   const breaks = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = new Map(sorted[i - 1].accounts.map((a) => [a.no, a]));
-    for (const a of sorted[i].accounts) {
-      const p = prev.get(a.no);
-      if (p && !near(a.beginning, p.ending)) breaks.push({ date: sorted[i].date, prevDate: sorted[i - 1].date, no: a.no, beginning: a.beginning, prevEnding: p.ending });
+  for (const d of days) {
+    if (!d.date || !d.accounts?.length) continue;
+    if (!byDate.has(d.date)) byDate.set(d.date, new Map());
+    const day = byDate.get(d.date);
+    for (const a of d.accounts) {
+      const seen = day.get(a.no);
+      if (!seen) { day.set(a.no, a); continue; }
+      if (!near(seen.beginning, a.beginning) || !near(seen.ending, a.ending)) {
+        breaks.push({ date: d.date, no: a.no, sameDay: true, beginning: a.beginning, ending: a.ending, otherBeginning: seen.beginning, otherEnding: seen.ending });
+      }
+    }
+  }
+  const dates = [...byDate.keys()].sort();
+  for (let i = 1; i < dates.length; i++) {
+    for (const [no, a] of byDate.get(dates[i])) {
+      const j = dates.slice(0, i).findLastIndex((dt) => byDate.get(dt).has(no));
+      if (j < 0) continue;
+      const p = byDate.get(dates[j]).get(no);
+      if (!near(a.beginning, p.ending)) breaks.push({ date: dates[i], prevDate: dates[j], no, beginning: a.beginning, prevEnding: p.ending });
     }
   }
   return breaks;
@@ -186,6 +210,20 @@ export const POSITION_COLUMNS = {
 
 export const isOpenPosition = (fileName) => /^open position/i.test(String(fileName || "").trim());
 export const plainAccount = (s) => String(s ?? "").replace(/-/g, "").trim();
+
+/*
+ * The sub-account a lot sits in, as the Financial Summary numbers it.
+ *
+ * A sub-account's own statement writes it in full ("1-00305-001-1" → 1003050011). The GROUP
+ * statement writes only its short code — "0011", which Excel shows as 11 — and read as an
+ * account number that matched nothing, so every group row with positions reported its own
+ * figures as not adding up. The short code is the full number's last four digits, so it is
+ * joined to the group's. Anything else is left as it is, so a real mismatch still shows.
+ */
+export const subAccount = (sub, group) => {
+  const s = plainAccount(sub), g = plainAccount(group);
+  return /^\d{1,4}$/.test(s) && /^\d+$/.test(g) ? g + s.padStart(4, "0") : s;
+};
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // 202612 → "Dec26"
 export const monthLabel = (yyyymm) => { const m = /^(\d{4})(\d{2})$/.exec(String(yyyymm || "")); return m && +m[2] >= 1 && +m[2] <= 12 ? `${MONTHS[+m[2] - 1]}${m[1].slice(2)}` : String(yyyymm || ""); };
@@ -205,6 +243,9 @@ export function readOpenPositions(rows) {
     if (i < 0) missing.push(label); else at[k] = i;
   }
   if (missing.length) return { lots: [], problems: [`The Open Position file has no ${missing.map((m) => `"${m}"`).join(", ")} column${missing.length === 1 ? "" : "s"}. Orient may have changed the layout.`] };
+  // The exchange's order id, which the legs of one spread trade share. Optional: without it the
+  // legs are paired by rule instead (src/lib/statementSpreads.js).
+  const orderAt = header.indexOf(norm("ExchangeOrderID"));
 
   const problems = [], lots = [];
   data.slice(1).forEach((r, idx) => {
@@ -219,7 +260,8 @@ export function readOpenPositions(rows) {
     const side = cell("side").toUpperCase();
     if (side !== "B" && side !== "S") problems.push(`Open Position row ${row}, "BuySell": "${cell("side")}" is neither B nor S.`);
     const lot = {
-      tradeId: cell("tradeId"), account: plainAccount(cell("sub")), group: plainAccount(cell("group")),
+      tradeId: cell("tradeId"), account: subAccount(cell("sub"), cell("group")), group: plainAccount(cell("group")),
+      orderId: orderAt < 0 ? "" : String(r[orderAt] ?? "").trim(),
       code: cell("code"), month: cell("month"), expiry: cell("expiry"), kind: cell("kind").toUpperCase(), exchange: cell("exchange"),
       tradeDate: cell("tradeDate"), ccy: cell("ccy"),
       side, strike: num("strike", true), price: num("price"), qty: num("qty"), settle: num("settle"), upl: num("upl"),

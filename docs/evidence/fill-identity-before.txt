@@ -1,0 +1,42 @@
+ok   1a  CSV, then feed: stored once
+ok   1b  feed, then CSV: stored once
+FAIL 1c  CSV read in the wrong zone, then feed: stored once 
+  got  2 
+  want 1
+ok   2   live + resend + replay: stored once
+FAIL 3a  partial fills: both stored 
+  got  [1] 
+  want [1,2]
+FAIL 3b  partial fills: position is -3 
+  got  -1 
+  want -3
+FAIL 3c  partial fills: re-import adds nothing 
+  got  1 
+  want 2
+FAIL 3d  partial fills: same file in another order adds nothing 
+  got  1 
+  want 2
+FAIL 3e  a fill dropped by an older import is put back, once 
+  got  [1] 
+  want [1,2]
+FAIL 3f  …and stays put back on the next re-import 
+  got  1 
+  want 2
+FAIL 4a  London, then Singapore: stored once 
+  got  2 
+  want 1
+FAIL 4b  …and the position is still -1 
+  got  -2 
+  want -1
+ok   4c  same order, same price, a real later fill: both stored
+ok   5a  spread by feed: three rows, one of them the trade
+ok   5b  …then the same spread by CSV adds nothing
+ok   5c  …and counts as one short spread
+ok   6a  a bust removes the fill
+ok   6b  a bust ahead of its fill: nothing stored
+ok   6c  a correction replaces the fill
+ok   7   LastQty, not CumQty
+ok   8   identical rows in one file: stored once (pending Y4)
+ok   9   the same file for two users: one row each
+
+9 FAILED of 22

@@ -25,6 +25,14 @@ const myId = async () => {
   return data.user.id;
 };
 
+
+// The statements table not existing yet (migration 0013 not run) is a setup step, not a fault.
+const noTable = (error) => {
+  const e = new Error(error.message);
+  if (error.code === "42P01" || error.code === "PGRST205" || /could not find the table|does not exist/i.test(error.message || "")) e.code = "NO_TABLE";
+  return e;
+};
+
 const remote = {
   /*
    * This account's subscription, or null if it has none.
@@ -128,6 +136,30 @@ const remote = {
     }
     // The rows that were new were refreshed too; only the repairs are worth reporting.
     return { added, updated: Math.max(0, updated - added) };
+  },
+  /*
+   * Broker statements the trader has opened: the CSV files' text, one row per zip, unique by
+   * the zip's checksum (supabase/migrations/0013_statements.sql). Saving the same zip twice,
+   * from any device, keeps one. A database without the table yet says so with code NO_TABLE,
+   * so the page can tell the trader rather than fail quietly.
+   */
+  async loadStatements() {
+    const { data, error } = await supabase.from("statements").select("checksum, zip_name, statement_date, account, files").order("statement_date", { ascending: false });
+    if (error) throw noTable(error);
+    return data || [];
+  },
+  async saveStatements(rows) {
+    if (!rows.length) return 0;
+    const uid = await myId();
+    const { data, error } = await supabase.from("statements")
+      .upsert(rows.map((r) => ({ ...r, user_id: uid })), { onConflict: "user_id,checksum", ignoreDuplicates: true })
+      .select("checksum");
+    if (error) throw noTable(error);
+    return (data || []).length;
+  },
+  async deleteStatement(checksum) {
+    const { error } = await supabase.from("statements").delete().eq("checksum", checksum);
+    if (error) throw noTable(error);
   },
   async deleteFill(id) {
     const { error } = await supabase.from("fills").delete().eq("id", id);
@@ -271,7 +303,7 @@ export const auth = isRemote
     };
 
 // ---------- Browser storage (used until a database is connected) ----------
-const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills";
+const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills", LS_STATEMENTS = "mrt:statements";
 const readFills = () => JSON.parse(localStorage.getItem(LS_FILLS) || "[]");
 const writeFills = (f) => localStorage.setItem(LS_FILLS, JSON.stringify(f));
 
@@ -309,6 +341,16 @@ const local = {
     writeFills([...cur, ...fresh]);
     return { added: fresh.length, updated };
   },
+  // Browser-storage mode keeps statements in this browser only, like everything else here.
+  async loadStatements() { try { return JSON.parse(localStorage.getItem(LS_STATEMENTS) || "[]"); } catch { return []; } },
+  async saveStatements(rows) {
+    const cur = await this.loadStatements();
+    const have = new Set(cur.map((r) => r.checksum));
+    const fresh = rows.filter((r) => !have.has(r.checksum));
+    localStorage.setItem(LS_STATEMENTS, JSON.stringify([...cur, ...fresh]));
+    return fresh.length;
+  },
+  async deleteStatement(checksum) { localStorage.setItem(LS_STATEMENTS, JSON.stringify((await this.loadStatements()).filter((r) => r.checksum !== checksum))); },
   async deleteFill(id) { writeFills(readFills().filter((f) => f.id !== id)); },
   async deleteAllFills() { writeFills([]); },
   async deleteBrokerFills(broker) { writeFills(readFills().filter((f) => (f.broker || "default") !== broker)); },
