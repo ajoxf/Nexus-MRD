@@ -173,7 +173,7 @@ export async function openMonthlyPdf(file, password = "") {
   const pdfjs = await import("pdfjs-dist");
   const { default: workerSrc } = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
   pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
-  const { linesFromItems, readMonthlyStatement } = await import("./monthly.js");
+  const { linesFromItems, readMonthlyStatement, isGstInvoice, readGstInvoice } = await import("./monthly.js");
 
   const buf = await file.arrayBuffer();
   const sum = await checksum(buf);
@@ -195,8 +195,11 @@ export async function openMonthlyPdf(file, password = "") {
   }
   await doc.destroy().catch(() => {});
   const lines = linesFromItems(pages);
-  const m = readMonthlyStatement(lines);
-  if (!lines.some((l) => /MONTHLY STATEMENT/i.test(l.text))) throw fail("NOT_MONTHLY", `${file.name} isn't an Orient monthly statement.`);
+  // Month end brings four: the group's statement, one per sub-account, and the group's GST invoice.
+  const gst = isGstInvoice(lines);
+  if (!gst && !lines.some((l) => /MONTHLY STATEMENT/i.test(l.text))) throw fail("NOT_MONTHLY", `${file.name} isn't an Orient monthly statement.`);
+  const m = gst ? readGstInvoice(lines) : readMonthlyStatement(lines);
+  if (gst) m.short = m.account;
   return {
     zipName: file.name,
     date: m.date,

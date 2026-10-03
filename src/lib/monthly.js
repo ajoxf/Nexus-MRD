@@ -76,7 +76,8 @@ export function readMonthlyStatement(lines) {
   const dt = /Statement Date\s*:\s*(\d{2})\/(\d{2})\/(\d{4})/.exec(all);
   const account = acct ? plainAccount(acct[1]) : null;
   const out = {
-    account, short: account ? account.slice(-4) : null,
+    // A sub-account goes by its last four digits (0011); the group by its own number (100305).
+    account, short: account ? (account.length > 6 ? account.slice(-4) : account) : null,
     month: per ? `${per[2]}-${String(MONTHS[per[1].slice(0, 3).toLowerCase()] || 0).padStart(2, "0")}` : null,
     date: dt ? `${dt[3]}-${dt[2]}-${dt[1]}` : null,
     summary: {}, journal: [], trades: [], realised: [], open: [], openNet: null, problems,
@@ -203,3 +204,124 @@ export function tieToDaily(m, dailies) {
 
 // Lines as kept (page, y, cells) back into lines as read (with their text).
 export const restoreLines = (kept) => (kept || []).map((l) => ({ ...l, text: l.cells.map((c) => c.str).join("  ") }));
+
+/*
+ * Orient's monthly GST statement — a TAX INVOICE for the group: every fee charged, day by day, per
+ * sub-account. Not a statement of account, so it is read and checked on its own:
+ *   - its fee types, added up per sub-account, against that sub-account's monthly statement
+ *     (Commission, Exchange Fee, and NFA + bank charges as Miscellaneous Fee)
+ *   - each day's fees against that day's daily statement
+ * Amounts on the invoice are charges as positive numbers; a refund is in brackets. Here they are
+ * turned round to the statements' sign: a charge is negative.
+ */
+export const isGstInvoice = (lines) => lines.some((l) => /^TAX INVOICE$/.test(l.text.trim()));
+
+export function readGstInvoice(lines) {
+  const all = lines.map((l) => l.text).join("\n");
+  const acct = /Account Number\s*:\s+(\d+)/.exec(all);
+  const per = /Statement Period\s*:\s+([A-Za-z]{3})-(\d{2})/.exec(all);
+  const dt = /Date\s*:\s+(\d{2})-(\d{2})-(\d{2})/.exec(all);
+  const inv = /Invoice Number\s*:\s+(.+)$/m.exec(all);
+  const out = {
+    account: acct ? acct[1] : null,
+    month: per ? `20${per[2]}-${String(MONTHS[per[1].toLowerCase()]).padStart(2, "0")}` : null,
+    date: dt ? `20${dt[3]}-${dt[2]}-${dt[1]}` : null,
+    invoice: inv ? inv[1].trim() : null,
+    fees: [], problems: [],
+  };
+  let sub = null, date = null, type = null, inSummary = false;
+  out.summaryTotal = 0;
+  for (const l of lines) {
+    const c = l.cells.map((x) => x.str);
+    // The SUMMARY box at the top: original amounts per product/exchange, added up.
+    if (/^SUMMARY$/.test(l.text.trim())) { inSummary = true; continue; }
+    if (inSummary && !/^ACCOUNT NUMBER/.test(l.text)) {
+      const i = c.findIndex((x) => /^[A-Z]{3}$/.test(x) && x !== "FUT");
+      if (i >= 0 && money(c[i + 1]) !== null) out.summaryTotal += money(c[i + 1]);
+      continue;
+    }
+    inSummary = false;
+    const a = /^ACCOUNT NUMBER\s*:\s*([\d-]+)/.exec(l.text);
+    if (a) { sub = plainAccount(a[1]); date = null; type = null; continue; }
+    if (!sub || c.length < 6) continue;
+    const rate = money(c[c.length - 1]), orig = money(c[c.length - 5]), ccy = c[c.length - 6];
+    if (rate === null || orig === null || !/^[A-Z]{3}$/.test(ccy)) continue;
+    if (/^\d{2}\/\d{2}\/\d{2}$/.test(c[0])) date = c[0];
+    const named = c.find((x) => /^(Commission|Exchange Fee|NFA|BANK CHARGES|GST|Interest)/i.test(x));
+    if (named) type = named;
+    if (!date || !type) { out.problems.push(`GST statement: a fee line with no date or description ("${l.text}").`); continue; }
+    const [d, mo, y] = date.split("/");
+    out.fees.push({ account: sub, date: `20${y}-${mo}-${d}`, type, ccy, amount: -orig });
+  }
+  if (!out.account) out.problems.push("No account number found on the GST statement.");
+  if (!out.fees.length) out.problems.push("No fee lines found on the GST statement.");
+  return out;
+}
+
+// Fees by kind, as the monthly statement's Financial Summary splits them.
+const feeKind = (type) => (/^commission/i.test(type) ? "commission" : /^exchange fee/i.test(type) ? "exchangeFee" : "miscFee");
+
+/*
+ * The GST statement against the monthly statements (one per sub-account, same month) and the
+ * daily statements. dailies as for tieToDaily. Returns lines like tieToDaily's.
+ */
+export function tieGst(g, monthlies, dailies) {
+  const lines = [];
+  const byAcct = new Map();
+  for (const f of g.fees) {
+    const t = byAcct.get(f.account) || { commission: 0, exchangeFee: 0, miscFee: 0 };
+    t[feeKind(f.type)] += f.amount;
+    byAcct.set(f.account, t);
+  }
+  for (const [acct, t] of byAcct) {
+    const m = monthlies.find((x) => x.account === acct && x.month === g.month);
+    if (!m) { lines.push({ label: `${acct.slice(-4)}: no monthly statement for ${g.month} open to compare`, ok: false, got: null, want: null, missing: true }); continue; }
+    for (const [k, label] of [["commission", "Commission"], ["exchangeFee", "Exchange fee"], ["miscFee", "NFA + bank charges = Miscellaneous fee"]]) {
+      lines.push({ label: `${acct.slice(-4)}: ${label} = the monthly statement's`, got: sum([t[k]]), want: m.summary[k], ok: near(t[k], m.summary[k]) });
+    }
+  }
+  // Day by day: commission, and exchange fee + NFA, against the daily Financial Summary.
+  const days = new Map();
+  for (const f of g.fees) {
+    const k = `${f.account}|${f.date}`;
+    const d = days.get(k) || { account: f.account, date: f.date, commission: 0, fee: 0 };
+    if (feeKind(f.type) === "commission") d.commission += f.amount; else if (!/bank/i.test(f.type)) d.fee += f.amount;
+    days.set(k, d);
+  }
+  let compared = 0;
+  const bad = [];
+  for (const d of days.values()) {
+    const daily = dailies.find((x) => x.date === d.date && (x.accounts || []).some((a) => a.no === d.account));
+    if (!daily) continue;
+    const a = daily.accounts.find((x) => x.no === d.account);
+    compared++;
+    if (!near(d.commission, a.commission) || !near(d.fee, a.fee)) bad.push(`${d.date} ${d.account.slice(-4)}: invoice commission ${sum([d.commission])} / fees ${sum([d.fee])}, daily ${a.commission} / ${a.fee}`);
+  }
+  if (compared) lines.push({ label: `Each day's fees = that day's daily statement (${compared} day${compared === 1 ? "" : "s"})`, ok: !bad.length, got: null, want: null, note: bad.join("; ") || null });
+  return { lines, missing: compared < days.size ? `${days.size - compared} of the invoice's ${days.size} days have no daily statement open.` : null };
+}
+
+// The invoice against itself: its summary box = its fee lines.
+export function checkGst(g) {
+  const lines = -sum(g.fees.map((f) => f.amount));
+  return near(g.summaryTotal, lines) ? [] : [{ label: "The invoice's summary total = its fee lines added up", got: sum([g.summaryTotal]), want: lines }];
+}
+
+/*
+ * The group's monthly statement against its sub-accounts' for the same month, line by line —
+ * the group is their sum. statements: readMonthlyStatement results. Returns per month:
+ * { month, group, subs, failed: [{ label, got, want }] } for each month with a group statement.
+ */
+export function checkMonthlyFamily(statements) {
+  const out = [];
+  for (const g of statements.filter((x) => x.account && x.account.length <= 6)) {
+    const subs = statements.filter((x) => x.month === g.month && x.account !== g.account && x.account?.startsWith(g.account));
+    if (!subs.length) { out.push({ month: g.month, group: g.account, subs: [], failed: [] }); continue; }
+    const failed = Object.entries(SUMMARY_LINES)
+      .filter(([k]) => g.summary[k] !== undefined)
+      .map(([k, label]) => ({ label: `${label}: group is not the sum of its sub-accounts`, got: g.summary[k], want: sum(subs.map((x) => x.summary[k])) }))
+      .filter((c) => !near(c.got, c.want));
+    out.push({ month: g.month, group: g.account, subs: subs.map((x) => x.account), failed });
+  }
+  return out;
+}

@@ -1,4 +1,4 @@
-import { linesFromItems, readMonthlyStatement, checkMonthly, tieToDaily, money } from '../src/lib/monthly.js';
+import { linesFromItems, readMonthlyStatement, checkMonthly, tieToDaily, money, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from '../src/lib/monthly.js';
 
 /*
  * Orient's monthly statement, as the PDF's text comes out: positioned fragments. The layout —
@@ -116,6 +116,42 @@ is('…each day counted once, the next month left out', t.lines[2].want, 26202.4
 const short = tieToDaily(m, dailies.map((d) => (d.date === '2026-08-31' ? { ...d, lots: d.lots.slice(1) } : d)));
 is('a position that differs is named', short.lines[3].note, 'CL 202610: monthly 6, daily 5');
 is('no daily statements open: says so', tieToDaily(m, []).missing.startsWith('No daily statements'), true);
+
+// ---------- The GST statement (a tax invoice): every fee, day by day ----------
+const fee = (y, date, type, amt) => [y, [...(date ? [[date, 52]] : []), ...(type ? [[type, 131], ['Zero\u2011rated', 251], ['FUT', 351], ['NYMEX', 457]] : []), ['USD', 563], [amt, 699], ['0.00', 807], ['1.00', 903], ['0.00', 1011], ['1.2700000', 1084]]];
+const gstLines = linesFromItems([page([
+  [1500, [['TAX INVOICE', 762]]],
+  [1480, [['TEST TRADER', 138], ['Account Number :', 762], ['200100', 1092]]],
+  [1470, [['Statement Period :', 762], ['Aug\u201126', 1093]]],
+  [1460, [['Date :', 762], ['31\u201108\u201126', 1083]]],
+  [1450, [['Invoice Number :', 762], ['OFIS 2026\u201108\u201100001', 1013]]],
+  [1440, [['SUMMARY', 48]]],
+  [1430, [['Product', 52], ['Tax Group', 147], ['Exchange', 265], ['CCY', 388], ['Original Amount', 513], ['Original GST Amount', 624], ['SGD Amount', 801], ['SGD GST Amount', 911], ['Total in SGD', 1070]]],
+  [1420, [['FUT', 52], ['Zero\u2011rated', 147], ['USD', 388], ['(266.30)', 559], ['0.00', 712], ['(337.99)', 827], ['0.00', 979], ['(337.99)', 1094]]],
+  [1410, [['NYMEX', 265], ['USD', 388], ['713.68', 566], ['0.00', 712], ['907.53', 834], ['0.00', 979], ['907.53', 1101]]],
+  [1400, [['ACCOUNT NUMBER : 2001000011', 48]]],
+  fee(1390, '19/08/26', 'Commission', '48.00'), fee(1380, null, 'Exchange Fee', '8.27'), fee(1370, null, 'NFA', '0.06'),
+  fee(1360, '20/08/26', 'Commission', '288.00'),
+  fee(1350, '21/08/26', 'Commission', '9.80'), fee(1340, null, null, '(321.30)'), fee(1330, null, 'Exchange Fee', '297.71'), fee(1320, null, 'NFA', '2.34'),
+  fee(1310, '24/08/26', 'BANK CHARGES', '55.00'), fee(1300, null, 'Commission', '59.50'),
+])]);
+const g = readGstInvoice(gstLines);
+is('a GST statement is told apart from a statement', [isGstInvoice(gstLines), isGstInvoice(linesFromItems(pages))], [true, false]);
+is('GST statement: account, month, date, invoice', [g.account, g.month, g.date, g.invoice, g.problems], ['200100', '2026-08', '2026-08-31', 'OFIS 2026-08-00001', []]);
+is('the refund line, with no date or description of its own, is the commission of the day above',
+   g.fees.filter((f) => f.date === '2026-08-21').map((f) => [f.type, f.amount]), [['Commission', -9.8], ['Commission', 321.3], ['Exchange Fee', -297.71], ['NFA', -2.34]]);
+is('its summary box = its fee lines', checkGst(g), []);
+is('…and a summary that does not is named', checkGst({ ...g, summaryTotal: 400 }).length, 1);
+const gt = tieGst(g, [m], [{ date: '2026-08-19', accounts: [{ no: '2001000011', commission: -48, fee: -8.33 }] }, { date: '2026-08-21', accounts: [{ no: '2001000011', commission: 311.5, fee: -300 }] }]);
+is('fees by kind = the sub-account\'s monthly statement: commission, exchange fee, NFA + bank', gt.lines.slice(0, 3).map((l) => [l.got, l.want, l.ok]), [[-84, -84, true], [-305.98, -305.98, true], [-57.4, -57.4, true]]);
+is('each day\'s fees against the daily statement: a day that differs is named', [gt.lines[3].ok, gt.lines[3].note], [false, '2026-08-21 0011: invoice commission 311.5 / fees -300.05, daily 311.5 / -300']);
+
+// ---------- The group against its sub-accounts ----------
+const sub0000 = { account: '2001000000', month: '2026-08', summary: { ending: 70050, totalEquity: 70050, im: 0, excess: 70050, commission: 0 } };
+const grp = { account: '200100', month: '2026-08', summary: { ending: 87805.02, totalEquity: 45420.02, im: 48135.03, excess: -2715.01, commission: -84 } };
+const sub0011 = { account: '2001000011', month: '2026-08', summary: { ending: 17755.02, totalEquity: -24629.98, im: 48135.03, excess: -72765.01, commission: -84 } };
+is('the group\'s month = its sub-accounts\' added up', checkMonthlyFamily([grp, sub0000, sub0011]).map((f) => [f.group, f.subs.length, f.failed]), [['200100', 2, []]]);
+is('…and a line that is not is named', checkMonthlyFamily([{ ...grp, summary: { ...grp.summary, ending: 88000 } }, sub0000, sub0011])[0].failed.map((c) => c.label), ['Ending Balance: group is not the sum of its sub-accounts']);
 
 is('money: brackets are negative', [money('(8,000.00)'), money('321.30'), money('USD'), money('0.00')], [-8000, 321.3, null, 0]);
 

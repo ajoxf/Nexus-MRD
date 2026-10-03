@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
-import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines } from "./lib/monthly.js";
+import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
@@ -4733,12 +4733,34 @@ function StatementsPanel() {
    */
   const monthlies = useMemo(() => {
     const dailies = list.filter((st) => !isMonthly(st)).map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [], lots: summaries.get(st.checksum)?.lots || null }));
-    return list.filter(isMonthly).map((st) => {
-      let m;
-      try { m = readMonthlyStatement(restoreLines(JSON.parse(st.files.find((f) => f.name === MONTHLY_FILE).text))); }
-      catch (e) { return { st, m: null, problems: [`Couldn't read it: ${e.message}`] }; }
-      return { st, m, problems: m.problems, failed: m.problems.length ? [] : checkMonthly(m), tie: m.problems.length ? null : tieToDaily(m, dailies) };
-    }).sort((a, b) => String(b.st.date || "").localeCompare(String(a.st.date || "")));
+    const read = list.filter(isMonthly).map((st) => {
+      try {
+        const lines = restoreLines(JSON.parse(st.files.find((f) => f.name === MONTHLY_FILE).text));
+        if (isGstInvoice(lines)) { const g = readGstInvoice(lines); return { st, gst: g, month: g.month, problems: g.problems }; }
+        const m = readMonthlyStatement(lines);
+        return { st, m, month: m.month, problems: m.problems };
+      } catch (e) { return { st, month: null, problems: [`Couldn't read it: ${e.message}`] }; }
+    });
+    const statements = read.filter((x) => x.m && !x.problems.length).map((x) => x.m);
+    const family = checkMonthlyFamily(statements);
+    const rows = read.map((x) => (x.gst
+      ? { ...x, failed: x.problems.length ? [] : checkGst(x.gst), tie: x.problems.length ? null : tieGst(x.gst, statements, dailies) }
+      : { ...x, failed: x.problems.length ? [] : checkMonthly(x.m), tie: x.problems.length ? null : tieToDaily(x.m, dailies) }));
+    /*
+     * A month at a time, newest first. Month end brings four documents — the group's statement,
+     * one per sub-account, the group's GST invoice — so each month says how many are in, and
+     * whether the group's figures are its sub-accounts' added up.
+     */
+    const months = [...new Set(rows.map((r) => r.month || "?"))].sort().reverse();
+    return months.map((month) => {
+      const mine = rows.filter((r) => (r.month || "?") === month)
+        .sort((a, b) => (a.gst ? 1 : 0) - (b.gst ? 1 : 0) || String(a.m?.account || "").length - String(b.m?.account || "").length || String(a.m?.account).localeCompare(String(b.m?.account)));
+      const fam = family.find((f) => f.month === month);
+      const groups = new Set(mine.filter((r) => r.m && r.m.account?.length <= 6).map((r) => r.m.account));
+      const subsSeen = new Set([...(fam?.subs || []), ...list.flatMap((st) => (summaries.get(st.checksum)?.accounts || []).map((a) => a.no)).filter((no) => [...groups].some((g) => no !== g && no.startsWith(g)))]);
+      const expected = groups.size ? groups.size + subsSeen.size + 1 : null;
+      return { month, rows: mine, family: fam, have: mine.length, expected };
+    });
   }, [list, summaries]);
   const historyFor = (st, sm) => {
     if (!sm?.lots?.length || !st.date) return null;
@@ -4792,28 +4814,45 @@ function StatementsPanel() {
         {monthlies.length > 0 && (
           <div className="tw" style={{ marginBottom: 12 }}>
             <table>
-              <thead><tr><th className="txt">Monthly statement</th><th className="txt">Account</th><th>Closing balance</th><th>Total equity</th><th>Margin excess</th><th>Realised P&L</th><th>Unrealised</th><th className="txt">Orient's sums</th><th className="txt">Against the daily statements</th><th></th></tr></thead>
+              <thead><tr><th className="txt">Month end</th><th className="txt">Account</th><th>Closing balance</th><th>Total equity</th><th>Margin excess</th><th>Realised P&L</th><th>Unrealised</th><th className="txt">Orient's sums</th><th className="txt">Against the other statements</th><th></th></tr></thead>
               <tbody>
-                {monthlies.map(({ st, m, problems: pr, failed, tie }) => {
-                  const s2 = m?.summary || {};
-                  const tieBad = tie ? tie.lines.filter((l) => !l.ok) : [];
-                  const tieTitle = tie ? [...tie.lines.map((l) => `${l.ok ? "✓" : "✗"} ${l.label}${l.ok || l.got === null ? "" : `: monthly ${l.got.toFixed(2)}, daily ${l.want.toFixed(2)}`}${l.note ? ` — ${l.note}` : ""}`), ...(tie.missing ? [tie.missing] : [])].join("\n") : undefined;
-                  return (
-                    <tr key={st.checksum}>
-                      <td className="txt">{m?.month ? new Date(`${m.month}-15T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" }) : "—"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
-                      <td className="txt">{st.account || "—"}</td>
-                      {pr.length ? <td colSpan={7} className="txt bad">{pr.join(" · ")}</td> : <>
-                        <td>{cents(s2.ending)}</td><td>{cents(s2.totalEquity)}</td><td className={s2.excess < 0 ? "bad" : ""}>{cents(s2.excess)}</td>
-                        <td>{cents(s2.foRealized)}</td><td>{cents(s2.foUnrealized)}</td>
-                        <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got?.toFixed?.(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
-                        <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>
-                          {!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}
-                        </td>
-                      </>}
-                      <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
+                {monthlies.map((mo) => (
+                  <React.Fragment key={mo.month}>
+                    <tr className="legs-head">
+                      <td className="txt" colSpan={10}>
+                        <b>{mo.month !== "?" ? new Date(`${mo.month}-15T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" }) : "Month not read"}</b>
+                        {mo.expected && <span className={mo.have >= mo.expected ? "ok" : "warn"}> · {mo.have} of {mo.expected} month-end documents</span>}
+                        {mo.family?.subs.length > 0 && (mo.family.failed.length
+                          ? <span className="warn" title={mo.family.failed.map((c) => `${c.label}: ${c.got.toFixed(2)} vs ${c.want.toFixed(2)}`).join("\n")}> · group is not its sub-accounts added up ({mo.family.failed.length})</span>
+                          : <span className="ok"> · group = its sub-accounts added up</span>)}
+                      </td>
                     </tr>
-                  );
-                })}
+                    {mo.rows.map(({ st, m, gst, problems: pr, failed, tie }) => {
+                      const s2 = m?.summary || {};
+                      const tieBad = tie ? tie.lines.filter((l) => !l.ok) : [];
+                      const tieTitle = tie ? [...tie.lines.map((l) => `${l.ok ? "✓" : "✗"} ${l.label}${l.ok || l.got === null ? "" : `: ${l.got.toFixed(2)} vs ${l.want?.toFixed?.(2)}`}${l.note ? ` — ${l.note}` : ""}`), ...(tie.missing ? [tie.missing] : [])].join("\n") : undefined;
+                      const feeTot = (re) => (gst ? gst.fees.filter((f) => re.test(f.type)).reduce((t, f) => t + f.amount, 0) : 0);
+                      return (
+                        <tr key={st.checksum}>
+                          <td className="txt">{gst ? "GST invoice" : "Statement"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                          <td className="txt">{st.account || "—"}</td>
+                          {pr.length ? <td colSpan={7} className="txt bad">{pr.join(" · ")}</td>
+                            : gst ? <>
+                              <td className="txt" colSpan={5}>Fees: commission {cents(feeTot(/^commission/i))} · exchange {cents(feeTot(/^exchange/i))} · NFA {cents(feeTot(/^nfa/i))} · bank {cents(feeTot(/bank/i))}{gst.invoice && <span className="faint"> · {gst.invoice}</span>}</td>
+                              <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got.toFixed(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
+                              <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>{!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}</td>
+                            </> : <>
+                              <td>{cents(s2.ending)}</td><td>{cents(s2.totalEquity)}</td><td className={s2.excess < 0 ? "bad" : ""}>{cents(s2.excess)}</td>
+                              <td>{cents(s2.foRealized)}</td><td>{cents(s2.foUnrealized)}</td>
+                              <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got?.toFixed?.(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
+                              <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>{!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}</td>
+                            </>}
+                          <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
               </tbody>
             </table>
           </div>
