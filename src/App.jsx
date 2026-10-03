@@ -296,7 +296,7 @@ function portfolio(fills, settings, now = new Date(), feeds = {}) {
       TNE = feed.anchor.equity + (pNow - pClose) + transitNet;
       accIM = Math.max(0, feed.anchor.im + imChange);
       fund = { ...fund, base: feed.anchor.equity, fromLedger: true };
-      fromStatement = { date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, onStatement, imPer: feed.imPer, days: feed.days };
+      fromStatement = { date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, sums: feed.sums, onStatement, imPer: feed.imPer, days: feed.days };
     }
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
     return {
@@ -4463,7 +4463,9 @@ export function StatementsPanel({ fills = [], onChanged }) {
 
   // Deleting is for good, so it asks. The zip on the trader's computer is untouched.
   const removeStatement = async (st) => {
-    if (!window.confirm(`Delete the ${fmtDate(st.date)} statement (${st.zipName}) from RAMP?\n\nYour own copy of the zip is not affected; you can open it again any time.`)) return;
+    const typed = window.prompt(`Delete the ${fmtDate(st.date)} statement (${st.zipName}) from RAMP?\n\nThe book's figures come from these statements, so this changes them. Your own copy of the zip is not affected.\n\nType DELETE to confirm.`);
+    if (typed === null) return;
+    if (typed.trim() !== "DELETE") { setKeep(["warn", "Not deleted — type DELETE to confirm."]); return; }
     try { await db.deleteStatement(st.checksum); }
     catch (e) { if (e.code !== "NO_TABLE") { setKeep(["bad", `Couldn't delete it: ${e.message}`]); return; } }
     listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum);
@@ -4752,7 +4754,7 @@ export function StatementsPanel({ fills = [], onChanged }) {
                               <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got?.toFixed?.(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
                               <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>{!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}</td>
                             </>}
-                          <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
+                          <td><button className="btn ghost faint" style={{ padding: "0 6px", fontSize: 11 }} onClick={() => removeStatement(st)} title="Asks you to type DELETE first">Delete…</button></td>
                         </tr>
                       );
                     })}
@@ -4803,11 +4805,11 @@ export function StatementsPanel({ fills = [], onChanged }) {
           <>
             <div className="tw">
               <table>
-                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th title="Net equity as a share of initial margin — the ratio margin calls are set on">TNE / IM</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
+                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th title="Net equity as a share of initial margin — the ratio margin calls are set on">TNE / IM</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th></tr></thead>
                 <tbody>
                   {dailyRows.map((row) => row.kind === "nogroup" ? (
                     <tr key={`nogroup|${row.date}`} className="dayhead">
-                      <td className="txt" colSpan={10}>
+                      <td className="txt" colSpan={9}>
                         <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>
                         <b>{fmtDate(row.date || null)}</b> <span className="faint">· group statement not open · {row.subs} sub-account statement{row.subs === 1 ? "" : "s"}</span>
                       </td>
@@ -4949,9 +4951,9 @@ export function StatementsPanel({ fills = [], onChanged }) {
                               ? <button key={f.name} className="btn ghost" style={{ margin: "2px 4px 2px 0" }} onClick={() => openPdf(f.blob)} title="Opens in a new tab. If the PDF has its own password, your PDF viewer will ask for it.">{f.name} ↗</button>
                               : <span key={f.name} className="faint" style={{ marginRight: 8 }}>{f.name}</span>;
                         })}
+                        <div style={{ marginTop: 6 }}><button className="btn ghost bad" style={{ padding: "0 8px", fontSize: 11 }} onClick={() => removeStatement(st)} title="Asks you to type DELETE first">Delete this statement…</button></div>
                         </div>}
                       </td>
-                      <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
                     </tr>
                   ))(row.st))}
                 </tbody>
@@ -5096,17 +5098,20 @@ function FundsTab({ pf, settings, setSettings, view, fills = [], onStatements })
                     const fs = a.fromStatement;
                     const dep = sum(fs.cash.filter((x) => x.amount > 0), (x) => x.amount), wd = sum(fs.cash.filter((x) => x.amount < 0), (x) => -x.amount);
                     const transit = sum(fs.transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+                    const stDate = new Date(`${fs.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
                     return (
                       <tr key={a.id}>
                         <td className="txt"><b>{a.name}</b><div className="faint" style={{ fontSize: 11 }}>From Orient's statements ({fs.days} days)</div></td>
                         <td className="ok">{dep ? money(dep) : "—"}</td>
                         <td className="bad">{wd ? money(-wd) : "—"}</td>
-                        <td><b>{money(dep - wd)}</b></td>
-                        <td colSpan={3} className="txt" style={{ fontSize: 12 }}>
-                          Orient's equity at the close of {new Date(`${fs.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}: <b>{money(fs.equity)}</b> · since then: <span className={pc(fs.sinceClose)}>{signed(fs.sinceClose)}</span>{transit ? <> · in transit: {signed(transit)}</> : null}
+                        <td><b>{money(fs.sums.opening + dep - wd)}</b>{fs.sums.opening ? <div className="faint" style={{ fontSize: 10 }}>incl. {money(fs.sums.opening)} opening balance</div> : null}</td>
+                        <td className={pc(fs.sums.pl)}>{signed(fs.sums.pl)}<div className="faint" style={{ fontSize: 10 }}>Orient's Profit/Loss</div></td>
+                        <td className={fs.sums.charges ? "bad" : "faint"} title={`Commission ${fs.sums.commission.toFixed(2)} · fees ${fs.sums.fee.toFixed(2)} · GST ${fs.sums.gst.toFixed(2)} · interest ${fs.sums.interest.toFixed(2)}`}>{fs.sums.charges ? money(fs.sums.charges) : "—"}<div className="faint" style={{ fontSize: 10 }}>commission, fees, GST, interest</div></td>
+                        <td className={pc(fs.sums.upl)}>{signed(fs.sums.upl)}<div className="faint" style={{ fontSize: 10 }}>at the close of {stDate}</div></td>
+                        <td><b>{money(a.TNE)}</b><div className="faint" style={{ fontSize: 10 }}>{money(fs.equity)} at the close · <span className={pc(fs.sinceClose)}>{signed(fs.sinceClose)}</span> since{transit ? <> · {signed(transit)} in transit</> : null}</div></td>
+                        <td className={`txt ${Math.abs(fs.sums.unexplained) < 0.01 ? "ok" : "warn"}`} colSpan={2} style={{ fontSize: 12 }}>
+                          {Math.abs(fs.sums.unexplained) < 0.01 ? "✓ Adds up to Orient's equity, to the cent" : <>{signed(fs.sums.unexplained)} not explained by the statements loaded — a day's statement may be missing</>}
                         </td>
-                        <td><b>{money(a.TNE)}</b></td>
-                        <td className="txt faint" colSpan={2}>Orient's figure is the starting point — nothing to enter</td>
                       </tr>
                     );
                   }
@@ -5128,7 +5133,7 @@ function FundsTab({ pf, settings, setSettings, view, fills = [], onStatements })
               </tbody>
             </table>
           </div>
-          <div className="pb faint" style={{ fontSize: 11 }}>Nexus equity = deposits − withdrawals + realized P&amp;L (after commission and swap) − charges + open P&amp;L at the current prices you've entered. A difference usually means a missing deposit or withdrawal, fees the broker charged outside the fills, or a current price that isn't up to date.</div>
+          <div className="pb faint" style={{ fontSize: 11 }}>Nexus equity = deposits − withdrawals + realized P&amp;L (after commission and swap) − charges + open P&amp;L at the current prices you've entered. A difference usually means a missing deposit or withdrawal, fees the broker charged outside the fills, or a current price that isn't up to date. For an account on Orient's statements every column is Orient's own sum over the statements loaded, and equity is Orient's at the last close plus what has changed since.</div>
         </section>
 
         {(() => {

@@ -89,7 +89,7 @@ export function buildFeed(days, group) {
       else if (a.no.startsWith(group) && !subs.has(a.no)) subs.set(a.no, a);
     }
     const add = (k) => [...subs.values()].reduce((t, a) => t + (a[k] || 0), 0);
-    const fig = groupRow || (subs.size ? { ending: add("ending"), equity: add("equity"), tne: add("tne"), im: add("im"), excess: add("excess"), upl: add("upl") } : null);
+    const fig = groupRow || (subs.size ? Object.fromEntries(FIGS.map((k) => [k, add(k)])) : null);
     // Lots once: a sub-account's own file, else the group's (which lists every sub-account's).
     const lotFiles = today.filter((d) => d.lots);
     const seen = new Set(), lots = [];
@@ -113,6 +113,18 @@ export function buildFeed(days, group) {
   }
 
   const last = perDay[perDay.length - 1];
+
+  // Orient's own sums from the first statement to the last: how the money got from the first
+  // beginning balance to the last close. A day missing from the chain shows up as "unexplained".
+  const tot = (k) => +perDay.reduce((t, d) => t + (d.fig[k] || 0), 0).toFixed(2);
+  const charges = +(tot("commission") + tot("fee") + tot("gst") + tot("interest") + tot("optPremium")).toFixed(2);
+  const opening = perDay[0].fig.beginning || 0;
+  const sums = {
+    opening, cash: tot("cashAdj"), pl: tot("pl"), charges,
+    commission: tot("commission"), fee: tot("fee"), gst: tot("gst"), interest: tot("interest"),
+    upl: +((last.fig.equity || 0) - (last.fig.ending || 0)).toFixed(2),
+  };
+  sums.unexplained = +((last.fig.ending || 0) - (opening + sums.cash + sums.pl + charges)).toFixed(2);
   const settles = new Map();
   for (const l of last.lots) settles.set(`${l.code}|${l.month}`, l.settle);
 
@@ -123,11 +135,13 @@ export function buildFeed(days, group) {
     settles,
     lots: last.lots,
     cash,
+    sums,
     imPer: learnMargin(perDay.filter((d) => d.hasLots)),
     days: perDay.length,
   };
 }
 
+const FIGS = ["beginning", "cashAdj", "commission", "fee", "gst", "pl", "optPremium", "interest", "ending", "upl", "equity", "tne", "im", "excess"];
 const KINDS = ["Inter-Product", "Crack", "Calendar", "Outright"];
 
 // A day's positions counted by kind of spread (lots, unsigned), from Orient's legs paired by order id.

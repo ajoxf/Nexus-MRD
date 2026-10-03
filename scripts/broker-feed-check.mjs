@@ -52,5 +52,17 @@ is('margin per spread learned from the statements', learnMargin([day(2, 1, '911'
 is('two kinds always held together: each falls back to IM per lot', learnMargin([day(1, 1, '941'), day(2, 2, '942')]), { 'Inter-Product': 2500, Crack: 2500, days: 2 });
 is('nothing open on any day: nothing to learn', learnMargin([{ fig: { im: 0 }, lots: [] }]), null);
 
+// ---------- Orient's sums: how the money got from the first statement to the last close ----------
+const g = (date, o) => ({ date, accounts: [a('200100', o)], lots: null });
+const chain = [
+  g('2026-09-01', { beginning: 0, cashAdj: 70050, ending: 70050, equity: 70050 }),
+  g('2026-09-02', { beginning: 70050, commission: -32, fee: -4.58, pl: 170, ending: 70183.42, equity: 70213.42 }),
+  g('2026-09-03', { beginning: 70183.42, cashAdj: -8000, gst: -1.2, interest: -0.54, pl: -14880, ending: 47301.68, equity: 47301.68 }),
+];
+const sums = buildFeed(chain, '200100').sums;
+is('deposits, P/L and charges add up to the last ending balance', [sums.cash, sums.pl, sums.charges, sums.upl, sums.unexplained], [62050, -14710, -38.32, 0, 0]);
+is('…and open P/L is the last equity less the last ending balance', buildFeed(chain.slice(0, 2), '200100').sums.upl, 30);
+is('a day missing from the chain shows as unexplained', buildFeed([chain[0], chain[2]], '200100').sums.unexplained, 133.42);
+
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
