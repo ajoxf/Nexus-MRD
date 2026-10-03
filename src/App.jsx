@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
-import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored } from "./lib/statements.js";
+import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
+import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines } from "./lib/monthly.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
@@ -4627,11 +4628,13 @@ function StatementsPanel() {
   const openAll = async (files, password) => {
     setBusy(true);
     const opened = [], locked = [], problems = [];
+    let notMonthly = 0;
     let wrong = false;
     for (const f of files) {
-      try { opened.push(await openStatementZip(f, password)); }
+      try { opened.push(/\.pdf$/i.test(f.name) ? await openMonthlyPdf(f, password) : await openStatementZip(f, password)); }
       catch (e) {
         if (e.code === "NEEDS_PASSWORD" || e.code === "BAD_PASSWORD") { locked.push(f); wrong = wrong || e.code === "BAD_PASSWORD"; }
+        else if (e.code === "NOT_MONTHLY") notMonthly++;
         else problems.push(e.message);
       }
     }
@@ -4646,6 +4649,7 @@ function StatementsPanel() {
     const parts = [];
     if (added.length) parts.push(`Opened ${plural(added.length, "statement")}`);
     if (repeated.length) parts.push(`${plural(repeated.length, "statement")} already open — skipped`);
+    if (notMonthly) parts.push(`${plural(notMonthly, "PDF")} that aren't monthly statements passed over`);
     if (problems.length) parts.push(problems.join(" · "));
     setMsg(parts.length ? [problems.length ? "bad" : "ok", parts.join(" · ")] : null);
     setBusy(false);
@@ -4655,10 +4659,11 @@ function StatementsPanel() {
   // Zips only; anything else in a folder (the broker's other attachments, say) is passed over quietly.
   const load = (fileList) => {
     const files = [...(fileList || [])];
-    const zips = files.filter((f) => /\.zip$/i.test(f.name));
+    // Daily zips, and monthly statement PDFs (a PDF that isn't one says so when opened).
+    const zips = files.filter((f) => /\.(zip|pdf)$/i.test(f.name));
     if (fileRef.current) fileRef.current.value = "";
     if (folderRef.current) folderRef.current.value = "";
-    if (!zips.length) { setBusy(false); setMsg(["bad", files.length ? "No statement .zip files found in what you chose." : "Choose the statement .zip files your broker sends."]); return; }
+    if (!zips.length) { setBusy(false); setMsg(["bad", files.length ? "No statement .zip or monthly .pdf files found in what you chose." : "Choose the statement .zip files your broker sends, or a monthly statement .pdf."]); return; }
     openAll(zips, pw.current);
   };
   // A drop can hold folders. Walk them; fall back to plain files where the browser can't.
@@ -4722,6 +4727,19 @@ function StatementsPanel() {
     const plTo = (date) => { const o = {}; for (const v of pl.values()) if (v.date <= date) o[v.no] = (o[v.no] || 0) + v.pl; return o; };
     return { trades, plTo, first: trades[0]?.date || null };
   }, [list, summaries]);
+  /*
+   * Monthly statements: read from the text kept when the PDF was opened (src/lib/monthly.js),
+   * Orient's own sums checked, and the month tied to the daily statements for the same account.
+   */
+  const monthlies = useMemo(() => {
+    const dailies = list.filter((st) => !isMonthly(st)).map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [], lots: summaries.get(st.checksum)?.lots || null }));
+    return list.filter(isMonthly).map((st) => {
+      let m;
+      try { m = readMonthlyStatement(restoreLines(JSON.parse(st.files.find((f) => f.name === MONTHLY_FILE).text))); }
+      catch (e) { return { st, m: null, problems: [`Couldn't read it: ${e.message}`] }; }
+      return { st, m, problems: m.problems, failed: m.problems.length ? [] : checkMonthly(m), tie: m.problems.length ? null : tieToDaily(m, dailies) };
+    }).sort((a, b) => String(b.st.date || "").localeCompare(String(a.st.date || "")));
+  }, [list, summaries]);
   const historyFor = (st, sm) => {
     if (!sm?.lots?.length || !st.date) return null;
     const accts = new Set(sm.lots.map((l) => l.account));
@@ -4744,15 +4762,15 @@ function StatementsPanel() {
     <section className="panel" style={{ marginTop: 16 }}>
       <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>{isRemote ? "Saved to your RAMP account" : "Kept in this browser only"} · CSV files only, PDFs aren't kept</span></div>
       <div className="pb fg">
-        <input ref={fileRef} type="file" accept=".zip" multiple hidden onChange={(e) => load(e.target.files)} />
+        <input ref={fileRef} type="file" accept=".zip,.pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
         <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => load(e.target.files)} />
         <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
           onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
           onDrop={(e) => { e.preventDefault(); setOver(false); drop(e.dataTransfer); }}>
-          <b>{busy ? "Opening…" : "Drop statement zips or folders here"}</b>{!busy && " or click to choose zips"}<br />
-          <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips are fine · the same zip twice is skipped</span>
+          <b>{busy ? "Opening…" : "Drop statement zips, monthly PDFs or folders here"}</b>{!busy && " or click to choose them"}<br />
+          <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips and PDFs are fine · the same file twice is skipped</span>
         </div>
         <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of statements</button>
 
@@ -4771,13 +4789,43 @@ function StatementsPanel() {
         {msg && <div className={msg[0]}>{msg[1]}</div>}
         {keep && keep[1] && <div className={keep[0]} style={{ fontSize: 12 }}>{keep[1]}</div>}
 
-        {list.length > 0 && (
+        {monthlies.length > 0 && (
+          <div className="tw" style={{ marginBottom: 12 }}>
+            <table>
+              <thead><tr><th className="txt">Monthly statement</th><th className="txt">Account</th><th>Closing balance</th><th>Total equity</th><th>Margin excess</th><th>Realised P&L</th><th>Unrealised</th><th className="txt">Orient's sums</th><th className="txt">Against the daily statements</th><th></th></tr></thead>
+              <tbody>
+                {monthlies.map(({ st, m, problems: pr, failed, tie }) => {
+                  const s2 = m?.summary || {};
+                  const tieBad = tie ? tie.lines.filter((l) => !l.ok) : [];
+                  const tieTitle = tie ? [...tie.lines.map((l) => `${l.ok ? "✓" : "✗"} ${l.label}${l.ok || l.got === null ? "" : `: monthly ${l.got.toFixed(2)}, daily ${l.want.toFixed(2)}`}${l.note ? ` — ${l.note}` : ""}`), ...(tie.missing ? [tie.missing] : [])].join("\n") : undefined;
+                  return (
+                    <tr key={st.checksum}>
+                      <td className="txt">{m?.month ? new Date(`${m.month}-15T12:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" }) : "—"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                      <td className="txt">{st.account || "—"}</td>
+                      {pr.length ? <td colSpan={7} className="txt bad">{pr.join(" · ")}</td> : <>
+                        <td>{cents(s2.ending)}</td><td>{cents(s2.totalEquity)}</td><td className={s2.excess < 0 ? "bad" : ""}>{cents(s2.excess)}</td>
+                        <td>{cents(s2.foRealized)}</td><td>{cents(s2.foUnrealized)}</td>
+                        <td className={`txt ${failed.length ? "warn" : "ok"}`} title={failed.map((c) => `${c.label}: shows ${c.got?.toFixed?.(2)}, adds up to ${c.want.toFixed(2)}`).join("\n") || undefined}>{failed.length ? `${failed.length} don't add up` : "Add up"}</td>
+                        <td className={`txt ${!tie?.lines.length ? "faint" : tieBad.length ? "warn" : "ok"}`} title={tieTitle}>
+                          {!tie?.lines.length ? tie?.missing : tieBad.length ? `${tieBad.length} of ${tie.lines.length} don't tie` : `All ${tie.lines.length} tie`}{tie?.lines.length && tie.missing ? <span className="faint"> · some days missing</span> : null}
+                        </td>
+                      </>}
+                      <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {list.some((st) => !isMonthly(st)) && (
           <>
             <div className="tw">
               <table>
                 <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
                 <tbody>
-                  {list.map((st) => (
+                  {list.filter((st) => !isMonthly(st)).map((st) => (
                     <tr key={st.checksum}>
                       <td className="txt">{fmtDate(st.date)}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
                       <td className="txt">{st.account || "—"}</td>

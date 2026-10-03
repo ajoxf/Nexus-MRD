@@ -159,3 +159,49 @@ export const fromStored = (row) => ({
   files: (row.files || []).map((f) => ({ name: f.name, kind: "csv", text: f.text })),
   stored: true,
 });
+
+/*
+ * A monthly statement PDF, opened in the browser. Its text is pulled out with pdf.js — the
+ * password, when it has one, is used here and nowhere else — and kept as positioned lines
+ * (src/lib/monthly.js reads them). Shaped like an opened zip, so it is listed, kept and
+ * de-duplicated the same way.
+ */
+export const MONTHLY_FILE = "Monthly statement (text).json";
+export const isMonthly = (st) => !!st?.files?.some((f) => f.name === MONTHLY_FILE);
+
+export async function openMonthlyPdf(file, password = "") {
+  const pdfjs = await import("pdfjs-dist");
+  const { default: workerSrc } = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+  const { linesFromItems, readMonthlyStatement } = await import("./monthly.js");
+
+  const buf = await file.arrayBuffer();
+  const sum = await checksum(buf);
+  let doc;
+  try {
+    // A copy: pdf.js may take the buffer over.
+    doc = await pdfjs.getDocument({ data: new Uint8Array(buf.slice(0)), password: password || undefined, isEvalSupported: false }).promise;
+  } catch (e) {
+    if (e?.name === "PasswordException") {
+      if (e.code === 2 || password) throw fail("BAD_PASSWORD", "That password didn't open it.");
+      throw fail("NEEDS_PASSWORD", "This statement is password protected.");
+    }
+    throw fail("UNREADABLE", `${file.name} could not be read as a PDF: ${e?.message || "unknown error"}.`);
+  }
+  const pages = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const content = await (await doc.getPage(i)).getTextContent();
+    pages.push(content.items.filter((it) => typeof it.str === "string").map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5] })));
+  }
+  await doc.destroy().catch(() => {});
+  const lines = linesFromItems(pages);
+  const m = readMonthlyStatement(lines);
+  if (!lines.some((l) => /MONTHLY STATEMENT/i.test(l.text))) throw fail("NOT_MONTHLY", `${file.name} isn't an Orient monthly statement.`);
+  return {
+    zipName: file.name,
+    date: m.date,
+    account: m.short,
+    checksum: sum,
+    files: [{ name: MONTHLY_FILE, kind: "csv", text: JSON.stringify(lines.map((l) => ({ page: l.page, y: +l.y.toFixed(1), cells: l.cells.map((c) => ({ str: c.str, x: +c.x.toFixed(1) })) }))) }],
+  };
+}
