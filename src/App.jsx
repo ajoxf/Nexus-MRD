@@ -4,6 +4,7 @@ import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored } from "./lib/statements.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
+import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -4702,8 +4703,39 @@ function StatementsPanel() {
     const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
     if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
     const positions = pos && !pos.problems.length ? positionsOf(pos.lots) : null;
-    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions, spreads: positions ? spreadsFromLots(pos.lots) : null }];
+    // The day's trades, for rebuilding spreads from the trade history (src/lib/spreadHistory.js).
+    const tf = st.files.find((x) => x.kind === "csv" && isTradeConfirmation(x.name));
+    const tc = tf ? readTradeConfirmations(Papa.parse(tf.text, { skipEmptyLines: true }).data) : null;
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || []), ...(tc?.problems || [])], main, failed, positions, lots: positions ? pos.lots : null, trades: tc?.trades || [], spreads: positions ? spreadsFromLots(pos.lots) : null }];
   })), [list]);
+
+  /*
+   * Spreads as the trader traded them, rebuilt from every Trade Confirmation opened or kept, each
+   * trade once. A statement shows them only when the rebuilt legs are exactly the lots Orient
+   * shows open that day — otherwise the history is incomplete and the leg view stays.
+   */
+  const history = useMemo(() => {
+    const trades = uniqueTrades(list.map((st) => summaries.get(st.checksum)?.trades || []));
+    // Orient's realised P/L per account per day, each day once (the sub-account's and the group's zips repeat it).
+    const pl = new Map();
+    for (const st of list) for (const a of summaries.get(st.checksum)?.accounts || []) if (st.date && !pl.has(`${a.no}|${st.date}`)) pl.set(`${a.no}|${st.date}`, { no: a.no, date: st.date, pl: a.pl });
+    const plTo = (date) => { const o = {}; for (const v of pl.values()) if (v.date <= date) o[v.no] = (o[v.no] || 0) + v.pl; return o; };
+    return { trades, plTo, first: trades[0]?.date || null };
+  }, [list, summaries]);
+  const historyFor = (st, sm) => {
+    if (!sm?.lots?.length || !st.date) return null;
+    const accts = new Set(sm.lots.map((l) => l.account));
+    const trades = history.trades.filter((t) => accts.has(t.account));
+    if (!trades.length) return { ok: false, why: "No Trade Confirmations opened for this account yet." };
+    const chk = checkHistory(spreadBook(trades, st.date.replaceAll("-", "")), sm.lots, history.plTo(st.date));
+    const mine = (o) => Object.entries(o).filter(([k]) => accts.has(k)).reduce((t, [, v]) => t + v, 0);
+    return {
+      ok: chk.legsMatch, chk, since: trades[0].date,
+      positions: chk.positions.filter((p) => accts.has(p.account)),
+      bookUpl: mine(chk.bookUpl), orientUpl: mine(chk.orientUpl), gap: +mine(chk.pnlGap).toFixed(2),
+      why: chk.legsMatch ? null : `The trades opened so far don't add up to Orient's open lots (${chk.mismatches.map((m) => `${m.contract.split("|").slice(1).join(" ")}: trades ${m.book}, Orient ${m.orient}`).join("; ")}). Open the statements from before ${trades[0].date.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1")}, back to a day the account was flat.`,
+    };
+  };
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
   const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
   const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
@@ -4783,10 +4815,50 @@ function StatementsPanel() {
                                   const MIXED = "Orient closes each contract first-in-first-out on its own, so the legs left open can come from different spread trades. The lots and settlement price are right; an entry price or P/L for this pair would be one you never traded.";
                                   const ruled = sm.spreads.spreads.filter((sp) => sp.by === "rule");
                                   const mixedUpl = ruled.length ? ruled.reduce((t, sp) => t + sp.upl, 0) : null;
+                                  const h = historyFor(st, sm);
+                                  const legRows = (
+                                    <>
+                                      <tr className="legs-head"><td className="txt" colSpan={5}>Legs, as Orient lists them</td></tr>
+                                      {sm.positions.map((ps) => (
+                                        <tr key={`leg|${ps.account}|${ps.label}`} className="leg">
+                                          <td className="txt">{ps.label}</td><td>{ps.lots > 0 ? "+" : ""}{ps.lots}</td><td>{px(ps.avg)}</td><td>{px(ps.settle)}</td><td>{cents(ps.upl, cur)}</td>
+                                        </tr>
+                                      ))}
+                                    </>
+                                  );
+                                  if (h?.ok) return (
+                                    /*
+                                     * Spreads as traded: entry is the price each spread was actually done at, closed
+                                     * first in first out spread against spread. Orient's open legs underneath. The two
+                                     * totals differ by P/L Orient has already booked as realised by closing each leg on
+                                     * its own; the last line checks the two agree in total, to the cent.
+                                     */
+                                    <table className="postable">
+                                      <thead><tr><th className="txt">Spread, as traded</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
+                                      <tbody>
+                                        {h.positions.map((p, i) => (
+                                          <tr key={`h|${i}`}>
+                                            <td className="txt">{p.label}{p.kind === "Outright" && <span className="faint"> outright</span>}</td>
+                                            <td>{sign(p.lots)}</td><td>{px(p.entry)}</td><td>{px(p.settle)}</td><td className={p.upl < 0 ? "bad" : ""}>{p.upl === null ? "—" : cents(p.upl, cur)}</td>
+                                          </tr>
+                                        ))}
+                                        <tr className="total"><td className="txt" colSpan={4}>Spreads' P/L</td><td className={h.bookUpl < 0 ? "bad" : ""}>{cents(h.bookUpl, cur)}</td></tr>
+                                        {legRows}
+                                        <tr className="total"><td className="txt" colSpan={4}>Orient's open legs</td><td className={total < 0 ? "bad" : ""}>{cents(total, cur)}</td></tr>
+                                        <tr><td className="txt faint" colSpan={5} style={{ whiteSpace: "normal" }}>
+                                          The {cents(h.bookUpl - total, cur)} between the two is P/L Orient has already booked as realised, by closing each contract first in first out on its own. From your trade confirmations since {h.since.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1")}.{" "}
+                                          {Math.abs(h.gap) < 0.01
+                                            ? <span className="ok">Realised + unrealised ties to Orient's to the cent.</span>
+                                            : <span className="warn">Realised + unrealised differs from Orient's by {cents(h.gap, cur)} — a day's statement may be missing.</span>}
+                                        </td></tr>
+                                      </tbody>
+                                    </table>
+                                  );
                                   return (
                                     <table className="postable">
                                       <thead><tr><th className="txt">Position</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
                                       <tbody>
+                                        {h && !h.ok && <tr><td className="txt warn" colSpan={5} style={{ whiteSpace: "normal" }}>Spreads as traded not shown: {h.why}</td></tr>}
                                         {sm.spreads.spreads.map((sp, i) => (
                                           <tr key={`sp|${i}`}>
                                             <td className="txt">{sp.label}{sp.by === "rule" && <span className="faint" title={MIXED}> · legs from different trades</span>}</td>
@@ -4805,12 +4877,7 @@ function StatementsPanel() {
                                             <td>{sign(o.lots)}</td><td>{px(o.avg)}</td><td>{px(o.settle)}</td><td className={o.upl < 0 ? "bad" : ""}>{cents(o.upl, cur)}</td>
                                           </tr>
                                         ))}
-                                        <tr className="legs-head"><td className="txt" colSpan={5}>Legs, as Orient lists them</td></tr>
-                                        {sm.positions.map((ps) => (
-                                          <tr key={`leg|${ps.account}|${ps.label}`} className="leg">
-                                            <td className="txt">{ps.label}</td><td>{ps.lots > 0 ? "+" : ""}{ps.lots}</td><td>{px(ps.avg)}</td><td>{px(ps.settle)}</td><td>{cents(ps.upl, cur)}</td>
-                                          </tr>
-                                        ))}
+                                        {legRows}
                                         <tr className="total"><td className="txt" colSpan={4}>Total</td><td className={total < 0 ? "bad" : ""}>{cents(total, cur)}</td></tr>
                                       </tbody>
                                     </table>

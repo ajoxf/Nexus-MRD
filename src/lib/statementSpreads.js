@@ -26,7 +26,7 @@ import { positionsOf } from "./orient.js";
  * Reading only. Nothing here touches the book.
  */
 
-const RULES = [
+export const RULES = [
   {
     kind: "Inter-Product",
     pair: (a, b) => a.code === "CL" && b.code === "BZ" && a.month === b.month,
