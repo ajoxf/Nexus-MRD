@@ -6,6 +6,7 @@ import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStor
 import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
+import { matchFills } from "./lib/fillMatch.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -2432,7 +2433,7 @@ function Tracker({ user }) {
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
+        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
@@ -4570,7 +4571,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
  * Reconciling these figures against the book is the next step, and when it comes it will
  * propose, never post.
  */
-function StatementsPanel() {
+function StatementsPanel({ fills = [] }) {
   const [list, setList] = useState([]);
   const listRef = useRef([]);
   const [pending, setPending] = useState([]);       // zips waiting on a password
@@ -4762,6 +4763,20 @@ function StatementsPanel() {
       return { month, rows: mine, family: fam, have: mine.length, expected };
     });
   }, [list, summaries]);
+  /*
+   * The trader's TT fills (RAMP's book) against Orient's Trade Confirmations, lot by lot
+   * (src/lib/fillMatch.js). Days count as covered on Orient's side when a daily statement for the
+   * account is open, trades or not.
+   */
+  const fillCheck = useMemo(() => {
+    if (!history.trades.length || !fills.length) return null;
+    const days = {};
+    for (const st of list) {
+      if (isMonthly(st) || !st.date) continue;
+      for (const a of summaries.get(st.checksum)?.accounts || []) (days[a.no] ||= new Set()).add(st.date.replaceAll("-", ""));
+    }
+    return matchFills(fills, history.trades, days);
+  }, [fills, history, list, summaries]);
   const historyFor = (st, sm) => {
     if (!sm?.lots?.length || !st.date) return null;
     const accts = new Set(sm.lots.map((l) => l.account));
@@ -4870,6 +4885,41 @@ function StatementsPanel() {
             </table>
           </div>
         )}
+
+        {fillCheck && (() => {
+          const fd = (d) => d.replace(/(\d{4})(\d{2})(\d{2})/, "$3/$2/$1");
+          const issues = fillCheck.missing.length + fillCheck.extra.length;
+          return (
+            <div style={{ marginBottom: 12 }}>
+              <div className={issues ? "warn" : "ok"} style={{ fontSize: 12, marginBottom: 4 }}>
+                <b>Your TT fills against Orient's trade confirmations:</b> {fillCheck.matched} lot{fillCheck.matched === 1 ? "" : "s"} matched
+                {fillCheck.missing.length > 0 && ` · ${fillCheck.missing.length} Orient booked that RAMP doesn't have`}
+                {fillCheck.extra.length > 0 && ` · ${fillCheck.extra.length} in RAMP that Orient didn't book`}
+                {!issues && fillCheck.days.length > 0 && " · every lot ties, both ways"}
+                {!fillCheck.days.length && <span className="faint"> · no days yet where both TT fills and Orient statements are open</span>}
+                {fillCheck.offsetHours !== null && <span className="faint" title="Read from the fills themselves: the hours between TT's time and Orient's for lots that could only be each other."> · Orient's clock is TT's {fillCheck.offsetHours >= 0 ? "+" : ""}{fillCheck.offsetHours}h</span>}
+              </div>
+              {fillCheck.days.length > 0 && (
+                <div className="tw">
+                  <table className="postable">
+                    <thead><tr><th className="txt">Orient trade date</th><th className="txt">Account</th><th>Orient lots</th><th>Matched</th><th>Missing from RAMP</th><th>Not at Orient</th></tr></thead>
+                    <tbody>
+                      {fillCheck.days.map((d) => (
+                        <tr key={`${d.account}|${d.date}`}>
+                          <td className="txt">{fd(d.date)}</td><td className="txt">{d.account.slice(-4)}</td><td>{d.orient}</td><td>{d.matched}</td>
+                          <td className={d.missing ? "bad" : "faint"}>{d.missing || "—"}</td><td className={d.extra ? "bad" : "faint"}>{d.extra || "—"}</td>
+                        </tr>
+                      ))}
+                      {[...fillCheck.missing.map((x) => ({ k: `m|${x.tradeId}`, t: `Missing from RAMP: ${fd(x.date)} ${x.time ? `(${x.time.split(" ")[1] || x.time} Orient) ` : ""}${x.contract.replace(/ (\d{4})(\d{2})$/, " $2/$1")} ${x.side === "B" ? "bought" : "sold"} at ${x.price} — Orient trade ${x.tradeId}` })),
+                         ...fillCheck.extra.map((x) => ({ k: `e|${x.ref}`, t: `Not at Orient: ${new Date(x.ts).toLocaleString()} ${x.product} ${x.side === "B" ? "bought" : "sold"} at ${x.price} — RAMP fill ${String(x.ref).split("|")[0]} (stored twice, or on the wrong account?)` }))]
+                        .slice(0, 25).map((x) => <tr key={x.k}><td className="txt bad" colSpan={6} style={{ whiteSpace: "normal" }}>{x.t}</td></tr>)}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {list.some((st) => !isMonthly(st)) && (
           <>
@@ -5043,7 +5093,7 @@ function StatementsPanel() {
 }
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
-function FundsTab({ pf, settings, setSettings, view }) {
+function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -5193,7 +5243,7 @@ function FundsTab({ pf, settings, setSettings, view }) {
         </section>
       </div>
     </div>
-    <StatementsPanel />
+    <StatementsPanel fills={fills} />
     </>
   );
 }
