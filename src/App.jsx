@@ -394,6 +394,7 @@ const ICONS = {
   fills: <Icon d={<><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="3.5" cy="6" r="1" /><circle cx="3.5" cy="12" r="1" /><circle cx="3.5" cy="18" r="1" /></>} />,
   closed: <Icon d={<><path d="M3 7h18v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" /><path d="M2 3h20v4H2zM10 12h4" /></>} />,
   analysis: <Icon d={<><path d="M3 3v18h18" /><path d="M7 15l4-5 3 3 5-7" /><circle cx="11" cy="10" r="1.2" /><circle cx="14" cy="13" r="1.2" /></>} />,
+  statements: <Icon d={<><path d="M6 2h9l5 5v15H6z" /><path d="M14 2v6h6M9 13h8M9 17h8" /></>} />,
   funds: <Icon d={<><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /><path d="M16 3l3 3-3 3" /></>} />,
   settings: <Icon d={<><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></>} />,
 };
@@ -2386,7 +2387,7 @@ function Tracker({ user }) {
   const scaleMax = Math.max(pf.minR * 2, 3, isFinite(ratio) ? Math.min(ratio, pf.minR * 4) : 0);
   const pos = (r) => Math.min(100, Math.max(0, (r / scaleMax) * 100));
   const save = { saved: [isRemote ? "Saved" : "Saved locally", "var(--ok)"], saving: ["Saving…", "var(--warn)"], error: ["Save failed", "var(--bad)"] }[saveState];
-  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
+  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["statements", "Statements"], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
 
   return (
     <DirtyCtx.Provider value={dirtyApi}>
@@ -2477,9 +2478,10 @@ function Tracker({ user }) {
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
+        {tab === "statements" && <StatementsPanel fills={fills} onChanged={reloadStatements} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} onStatements={reloadStatements} />}
+        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
@@ -4688,8 +4690,8 @@ export function StatementsPanel({ fills = [], onChanged }) {
   const fmtDate = (d) => (d ? new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Date not in the file name");
 
   return (
-    <section className="panel" style={{ marginTop: 16 }}>
-      <div className="ph"><h2>Daily statements</h2><span className="faint" style={{ fontSize: 11 }}>{isRemote ? "Saved to your RAMP account" : "Kept in this browser only"} · CSV files only, PDFs aren't kept</span></div>
+    <section className="panel">
+      <div className="ph"><h2>Orient statements<span className="dim">Upload each morning's daily zips, and the month-end PDFs. The book's cash, prices and margin come from these.</span></h2><span className="faint" style={{ fontSize: 11 }}>{isRemote ? "Saved to your RAMP account" : "Kept in this browser only"} · CSV files only, PDFs aren't kept</span></div>
       <div className="pb fg">
         <input ref={fileRef} type="file" accept=".zip,.pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
@@ -4988,14 +4990,14 @@ export function StatementsPanel({ fills = [], onChanged }) {
             })()}
           </>
         )}
-        <div className="faint" style={{ fontSize: 11 }}>Figures match within ${TOL.toFixed(2)} (a cent either way, for rounding). For reading only for now: RAMP doesn't use these figures yet. Checking them against your book comes next, and will propose changes for you to confirm, never post them.</div>
+        <div className="faint" style={{ fontSize: 11 }}>Figures match within ${TOL.toFixed(2)} (a cent either way, for rounding). The book takes the latest statement's equity, settlement prices, margin and deposits from here.</div>
       </div>
     </section>
   );
 }
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
-function FundsTab({ pf, settings, setSettings, view, fills = [], onStatements }) {
+function FundsTab({ pf, settings, setSettings, view }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -5184,7 +5186,6 @@ function FundsTab({ pf, settings, setSettings, view, fills = [], onStatements })
         </section>
       </div>
     </div>
-    <StatementsPanel fills={fills} onChanged={onStatements} />
     </>
   );
 }
