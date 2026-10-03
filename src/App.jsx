@@ -4773,16 +4773,32 @@ function StatementsPanel() {
                                   const sign = (n) => <b className={n > 0 ? "ok" : "bad"}>{n > 0 ? "+" : ""}{n}</b>;
                                   const px = (v) => (v === null || v === undefined ? "—" : +(+v).toFixed(4));
                                   const total = sm.positions.reduce((t, ps) => t + ps.upl, 0);
+                                  /*
+                                   * Spreads paired by rule are built from legs Orient left open after closing each
+                                   * contract first-in-first-out on its own — so their legs can come from different
+                                   * trades, and an entry price or P/L for the pair would be one the trader never
+                                   * had. Their lots and settlement are right; their entry and P/L are not shown,
+                                   * and their P/L is kept together on one line so the table still adds up.
+                                   */
+                                  const MIXED = "Orient closes each contract first-in-first-out on its own, so the legs left open can come from different spread trades. The lots and settlement price are right; an entry price or P/L for this pair would be one you never traded.";
+                                  const ruled = sm.spreads.spreads.filter((sp) => sp.by === "rule");
+                                  const mixedUpl = ruled.length ? ruled.reduce((t, sp) => t + sp.upl, 0) : null;
                                   return (
                                     <table className="postable">
                                       <thead><tr><th className="txt">Position</th><th>Lots</th><th>Entry</th><th>Settle</th><th>P/L</th></tr></thead>
                                       <tbody>
                                         {sm.spreads.spreads.map((sp, i) => (
                                           <tr key={`sp|${i}`}>
-                                            <td className="txt">{sp.label}{sp.by === "rule" && <span className="faint" title="Orient's file didn't link these legs by exchange order id, so they were paired by rule: CL–BZ same month, then HO–CL same month, then calendars."> · by rule</span>}</td>
-                                            <td>{sign(sp.lots)}</td><td>{px(sp.entry)}</td><td>{px(sp.settle)}</td><td className={sp.upl < 0 ? "bad" : ""}>{cents(sp.upl, cur)}</td>
+                                            <td className="txt">{sp.label}{sp.by === "rule" && <span className="faint" title={MIXED}> · legs from different trades</span>}</td>
+                                            <td>{sign(sp.lots)}</td>
+                                            {sp.by === "rule"
+                                              ? <><td className="faint" title={MIXED}>mixed</td><td>{px(sp.settle)}</td><td className="faint" title={MIXED}>not split</td></>
+                                              : <><td>{px(sp.entry)}</td><td>{px(sp.settle)}</td><td className={sp.upl < 0 ? "bad" : ""}>{cents(sp.upl, cur)}</td></>}
                                           </tr>
                                         ))}
+                                        {mixedUpl !== null && (
+                                          <tr><td className="txt faint" colSpan={4} title={MIXED}>Not split by spread (legs from different trades)</td><td className={mixedUpl < 0 ? "bad" : ""}>{cents(mixedUpl, cur)}</td></tr>
+                                        )}
                                         {sm.spreads.outrights.map((o, i) => (
                                           <tr key={`out|${i}`}>
                                             <td className="txt">{o.label} <span className="faint">outright</span></td>
