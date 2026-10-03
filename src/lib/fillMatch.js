@@ -128,6 +128,8 @@ export function matchFills(fills, trades, statementDays = {}) {
     missing: missing.map((o) => ({ account: o.account, date: o.date, time: o.trade.time, contract: `${o.code} ${o.month}`, side: o.side, price: +o.price, tradeId: o.trade.tradeId })),
     extra: extra.map((r) => ({ account: r.account, date: r.date, ts: r.fill.ts, contract: `${r.code} ${r.month}`, side: r.side, price: +r.price, product: r.fill.product, ref: r.fill.ref })),
     days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    // Each matched RAMP fill with the Orient trade date it was booked on — where a statement ends.
+    pairs: orient.filter((o) => o.match).map((o) => ({ ts: o.match.fill.ts, ref: o.match.fill.ref, account: o.account, date: o.date })),
   };
 }
 

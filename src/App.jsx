@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
+import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
+import { feedsFor, pnlAt } from "./lib/statementBook.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
 import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
@@ -216,7 +218,7 @@ function funding(settings, brokerId, now = new Date()) {
   return { list, dep, wd, charges, net: dep - wd, fromLedger: moneyMoves, base: moneyMoves ? dep - wd : n(b?.capital) };
 }
 
-function portfolio(fills, settings, now = new Date()) {
+function portfolio(fills, settings, now = new Date(), feeds = {}) {
   const { limits: L, brokers: B, marks: M } = settings;
   const byId = Object.fromEntries(B.map((b) => [b.id, b]));
   const book = computeBook(withCommission(fills, byId), (b, p) => sizeOf(byId[b]?.products?.[p], p), (b) => matchOf(byId[b]));
@@ -227,11 +229,24 @@ function portfolio(fills, settings, now = new Date()) {
     const spec = br.products?.[p.product] || {};
     const key = `${p.broker}|${p.product}`;
     const dir = p.side === "Long" ? 1 : -1;
-    const mark = has(M[key]?.price) ? n(M[key].price) : p.avg;
+    /*
+     * The price. With the broker's statements behind the account, a contract (or spread, from
+     * its legs) is at the latest settlement; a typed price wins only if it was typed after that
+     * statement — the next statement clears it. Without statements, as before: typed, else entry.
+     */
+    const feed = feeds[p.broker];
+    const typed = has(M[key]?.price);
+    const settle = feed ? settleOf(p.product, feed.settles) : null;
+    const typedFresh = typed && (settle === null || (M[key].priceTs && M[key].priceTs > feed.closeTs));
+    const mark = typedFresh ? n(M[key].price) : settle !== null ? settle : p.avg;
+    const markSource = typedFresh ? "typed" : settle !== null ? "settle" : "entry";
     const stop = M[key]?.stop, hasStop = has(stop);
     const size = sizeOf(spec, p.product);
     const lev = n(spec.lev) || n(br.leverage) || 1;
-    const im = br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
+    // Margin per lot: learned from the broker's statements for the kind of spread, else as typed.
+    const kind = feed?.imPer ? instrumentOf(p.product)?.kind : null;
+    const learned = kind && feed.imPer[kind] !== undefined ? feed.imPer[kind] : null;
+    const im = learned !== null ? learned * p.lots : br.method === "leverage" ? (Math.abs(p.avg) * size * p.lots) / lev : n(spec.margin) * p.lots;
     const upnl = dir * (mark - p.avg) * size * p.lots;
     const risk = hasStop ? Math.max(0, dir * (mark - n(stop))) * size * p.lots : null;
     /*
@@ -246,9 +261,9 @@ function portfolio(fills, settings, now = new Date()) {
      * Flagged, never corrected. A price is the trader's to state, and silently flipping a
      * sign on somebody's mark would be a worse bug than the one it fixes.
      */
-    const markGiven = has(M[key]?.price);
+    const markGiven = markSource === "typed";
     const signFlip = markGiven && mark !== 0 && p.avg !== 0 && Math.sign(mark) !== Math.sign(p.avg);
-    return { ...p, key, brokerName: br.name, spec, dir, mark, markGiven, signFlip, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: br.method === "fixed" && !n(spec.margin), method: br.method };
+    return { ...p, key, brokerName: br.name, spec, dir, mark, markGiven, markSource, imLearned: learned !== null, signFlip, stop, hasStop, size, lev, im, upnl, risk, notional: Math.abs(mark) * size * p.lots, noMargin: learned === null && br.method === "fixed" && !n(spec.margin), method: br.method };
   });
 
   const accounts = B.map((b) => {
@@ -256,14 +271,39 @@ function portfolio(fills, settings, now = new Date()) {
     const real = book.realized.filter((r) => r.broker === b.id);
     const IM = sum(rs, (r) => r.im), upnl = sum(rs, (r) => r.upnl);
     const realizedAll = sum(real, (r) => r.pnl), realizedToday = sum(real.filter((r) => isToday(r.ts)), (r) => r.pnl);
-    const fund = funding(settings, b.id, now);
-    const TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
+    let fund = funding(settings, b.id, now);
+    let TNE = fund.base + upnl + (L.includeRealized || fund.fromLedger ? realizedAll : 0) - fund.charges;
+    let accIM = IM, fromStatement = null;
+    /*
+     * An account the broker's statements cover runs on them. Equity is Orient's at the last close
+     * plus what has changed since: the move from settlement on what was open, and the P/L (with
+     * fees) on fills pasted since. With no new fills and prices at settlement that is exactly
+     * Orient's figure — however Orient and RAMP each split realised from unrealised. Margin is
+     * Orient's IM, plus the learned margin of whatever has been opened or closed since.
+     * Money typed in as a fallback counts only until a statement shows it.
+     */
+    const feed = feeds[b.id];
+    if (feed) {
+      const sizeFn = (bk, prod) => sizeOf(byId[bk]?.products?.[prod], prod);
+      const atClose = computeBook(withCommission(fills.filter((f) => f.broker === b.id && f.ts <= feed.cutoff), byId), sizeFn, (bk) => matchOf(byId[bk]));
+      const pClose = pnlAt(atClose, (p) => settleOf(p.product, feed.settles) ?? p.avg, sizeFn);
+      const pNow = realizedAll + upnl;
+      const imOf = (p) => { const k = feed.imPer ? instrumentOf(p.product)?.kind : null; return k && feed.imPer[k] !== undefined ? feed.imPer[k] * p.lots : n(byId[b.id]?.products?.[p.product]?.margin) * p.lots; };
+      const imChange = sum(rs, (r) => r.im) - sum(atClose.open, imOf);
+      const onStatement = (c) => feed.cash.some((x) => Math.abs(x.amount - (c.type === "withdrawal" ? -n(c.amount) : n(c.amount))) < 0.01 && Math.abs(new Date(x.date) - new Date(c.ts)) <= 7 * 864e5);
+      const transit = (settings.cash || []).filter((c) => c.broker === b.id && c.type !== "charge" && c.ts.slice(0, 10) > feed.date && !onStatement(c));
+      const transitNet = sum(transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+      TNE = feed.anchor.equity + (pNow - pClose) + transitNet;
+      accIM = Math.max(0, feed.anchor.im + imChange);
+      fund = { ...fund, base: feed.anchor.equity, fromLedger: true };
+      fromStatement = { date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, onStatement, imPer: feed.imPer, days: feed.days };
+    }
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
     return {
-      ...b, capital: fund.base, fund, rows: rs, IM, upnl, realizedAll, realizedToday, TNE, callR, stopR,
-      ratio: IM > 0 ? TNE / IM : Infinity,
-      lossToCall: IM > 0 ? TNE - IM * callR : TNE,
-      freeIM: (minR > 0 ? TNE / minR : TNE) - IM,
+      ...b, capital: fund.base, fund, rows: rs, IM: accIM, upnl, realizedAll, realizedToday, TNE, callR, stopR, fromStatement,
+      ratio: accIM > 0 ? TNE / accIM : Infinity,
+      lossToCall: accIM > 0 ? TNE - accIM * callR : TNE,
+      freeIM: (minR > 0 ? TNE / minR : TNE) - accIM,
       riskCap: fund.base * n(L.maxRiskPct) / 100,
       // This account's own share, in its own currency. Used when there is no honest
       // combined figure to fall back on.
@@ -2272,7 +2312,12 @@ function Tracker({ user }) {
     });
   }, [fills, settings]);
 
-  const pf = useMemo(() => (settings ? portfolio(fills, settings) : null), [fills, settings]);
+  // The broker's saved statements, which the book runs on for the accounts they cover.
+  const [stmtRows, setStmtRows] = useState([]);
+  const reloadStatements = useCallback(() => { db.loadStatements?.().then(setStmtRows).catch(() => setStmtRows([])); }, []);
+  useEffect(() => { reloadStatements(); }, [reloadStatements]);
+  const feeds = useMemo(() => (settings ? feedsFor(stmtRows, fills, settings.brokers) : {}), [stmtRows, fills, settings?.brokers]);
+  const pf = useMemo(() => (settings ? portfolio(fills, settings, undefined, feeds) : null), [fills, settings, feeds]);
 
   /*
    * Writes today's equity, margin and lots for each account into settings, so
@@ -2308,7 +2353,8 @@ function Tracker({ user }) {
   const view = mixed && stored === "all" ? (settings.brokers[0]?.id ?? "all") : stored;
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
-  const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v } } }));
+  // A typed price carries when it was typed, so the next statement's settlement can replace it.
+  const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v, ...(k === "price" ? { priceTs: new Date().toISOString() } : {}) } } }));
   const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
   /*
@@ -2433,7 +2479,7 @@ function Tracker({ user }) {
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
+        {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} onStatements={reloadStatements} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
     </div>
@@ -2737,14 +2783,17 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                       <td><b>{px(r.avg)}</b></td>
                       {/* Flagged at the input as well as in Warnings: this is the box the
                           correction gets typed into, so it is where the red belongs. */}
+                      {/* At settlement from the broker's latest statement unless a price was typed since;
+                          typing one overrides it until the next statement. */}
                       <td><input className={`cell ${r.signFlip ? "need" : ""}`} type="number" step="0.01"
-                        placeholder={px(r.avg)} value={settings.marks[r.key]?.price ?? ""}
-                        title={r.signFlip ? `Opened at ${px(r.avg)} — check the sign` : undefined}
+                        placeholder={r.markSource === "settle" ? px(r.mark) : px(r.avg)} value={r.markSource === "typed" ? settings.marks[r.key]?.price ?? "" : ""}
+                        title={r.signFlip ? `Opened at ${px(r.avg)} — check the sign` : r.markSource === "settle" ? "Settlement from the broker's latest statement. Type a price to override it until the next statement." : undefined}
                         onChange={(e) => setMark(r.key, "price", e.target.value)}
-                        aria-label={`Current price ${r.product} ${r.brokerName}`} /></td>
+                        aria-label={`Current price ${r.product} ${r.brokerName}`} />
+                        {r.markSource === "settle" && <div className="faint" style={{ fontSize: 10 }}>settle {pf.acct(r.broker)?.fromStatement ? new Date(`${pf.acct(r.broker).fromStatement.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : ""}</div>}</td>
                       <td><input className={`cell ${r.hasStop ? "" : "need"}`} type="number" step="0.01" placeholder="Set" value={settings.marks[r.key]?.stop ?? ""} onChange={(e) => setMark(r.key, "stop", e.target.value)} aria-label={`Stop ${r.product} ${r.brokerName}`} /></td>
                       <td className={pc(r.upnl)}><b>{signed(r.upnl)}</b></td>
-                      <td className={r.noMargin ? "warn" : ""} title={r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
+                      <td className={r.noMargin ? "warn" : ""} title={r.imLearned ? `${qty(r.lots)} × ${money(r.im / r.lots)} — what one of these has cost in initial margin, learned from the broker's statements` : r.method === "leverage" ? `${qty(r.lots)} × ${r.size} × ${px(r.avg)} ÷ ${r.lev}` : `${qty(r.lots)} × ${money(n(r.spec.margin))}`}>{r.noMargin ? "Not set" : money(r.im)}</td>
                       <td className={!r.hasStop || r.risk > (pf.acct(r.broker)?.riskCap ?? Infinity) ? "bad" : ""}>{r.hasStop ? money(r.risk) : "—"}</td>
                       <td className="dim">{dt(r.openTs)}</td>
                       {anyExpiry && (
@@ -2804,8 +2853,8 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                     const s = statusOf(a.ratio, a, pf.minR);
                     return (
                       <tr key={a.id} className="clickable" onClick={() => setView(a.id)} title={`Show ${a.name} only`}>
-                        <td className="txt"><b>{a.name}</b></td>
-                        <td className="txt dim">{basis(a)}</td>
+                        <td className="txt"><b>{a.name}</b>{a.fromStatement && <div className="faint" style={{ fontSize: 11 }}>From Orient's statement of {new Date(`${a.fromStatement.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })} · {signed(a.fromStatement.sinceClose)} since</div>}</td>
+                        <td className="txt dim">{a.fromStatement ? "Broker's statements" : basis(a)}</td>
                         <td>{money(n(a.capital))}</td><td>{money(a.TNE)}</td><td>{money(a.IM)}</td>
                         <td><b className={s.cls === "dim" ? "faint" : s.cls}>{ratioTxt(a.ratio)}</b>{isFinite(a.ratio) && <span className={`pill ${s.cls}`} style={{ marginLeft: 6 }}><span className={s.cls}>{s.t}</span></span>}</td>
                         <td className={a.IM > 0 && a.lossToCall <= 0 ? "bad" : ""}>{a.IM > 0 ? money(a.lossToCall) : "—"}</td>
@@ -4366,7 +4415,7 @@ function ResetPanel({ settings, setSettings, fills, reloadFills }) {
  * Reconciling these figures against the book is the next step, and when it comes it will
  * propose, never post.
  */
-export function StatementsPanel({ fills = [] }) {
+export function StatementsPanel({ fills = [], onChanged }) {
   const [list, setList] = useState([]);
   const listRef = useRef([]);
   const [pending, setPending] = useState([]);       // zips waiting on a password
@@ -4406,6 +4455,7 @@ export function StatementsPanel({ fills = [] }) {
     try {
       await db.saveStatements(added.map(toStored));
       setKeep(["ok", `${plural(added.length, "statement")} saved`]);
+      onChanged?.();
     } catch (e) {
       setKeep(e.code === "NO_TABLE" ? ["warn", NO_TABLE] : ["bad", `Opened, but not saved: ${e.message}`]);
     }
@@ -4419,6 +4469,7 @@ export function StatementsPanel({ fills = [] }) {
     listRef.current = listRef.current.filter((x) => x.checksum !== st.checksum);
     setList(listRef.current);
     if (shown?.startsWith(st.checksum)) setShown(null);
+    onChanged?.();
   };
 
   const openAll = async (files, password) => {
@@ -4942,7 +4993,7 @@ export function StatementsPanel({ fills = [] }) {
 }
 
 // ---------- funds: deposits, withdrawals and equity tally ----------
-function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
+function FundsTab({ pf, settings, setSettings, view, fills = [], onStatements }) {
   const ask = useConfirm();
   const brokers = settings.brokers;
   const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -4980,12 +5031,29 @@ function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
   };
   const setStmt = (id, v) => setSettings((s) => ({ ...s, statement: { ...(s.statement || {}), [id]: v } }));
   const accts = pf.accounts.filter((a) => view === "all" || a.id === view);
+  /*
+   * The ledger: for an account the broker's statements cover, its deposits and withdrawals come
+   * from them (read-only). Anything typed for that account is a fallback, and says whether it is
+   * counted: only while no statement shows it yet.
+   */
+  const fed = accts.filter((a) => a.fromStatement);
+  const ledger = [
+    ...fed.flatMap((a) => a.fromStatement.cash.map((x) => ({ id: `st|${a.id}|${x.account}|${x.date}`, ts: `${x.date}T12:00:00`, broker: a.id, type: x.amount > 0 ? "deposit" : "withdrawal", amount: Math.abs(x.amount), note: `Sub-account ${x.account.slice(-4)} · Cash Adjustments`, source: "statement" }))),
+    ...cash.map((c) => {
+      const a = fed.find((x) => x.id === c.broker);
+      if (!a || c.type === "charge") return c;
+      const onIt = a.fromStatement.onStatement(c);
+      const after = c.ts.slice(0, 10) > a.fromStatement.date;
+      return { ...c, status: onIt ? { counted: false, text: "On Orient's statement — not counted again" } : after ? { counted: true, text: "Not yet on a statement — counted for now" } : { counted: false, text: "Not on Orient's statements — not counted" } };
+    }),
+  ].sort((x, y) => new Date(y.ts) - new Date(x.ts));
 
   return (
     <>
     <div className="grid-fills">
       <section className="panel">
         <div className="ph"><h2>Record money in, out or charged</h2></div>
+        {fed.length > 0 && <div className="faint" style={{ fontSize: 12, padding: "0 16px" }}>For {fed.map((a) => a.name).join(", ")}, Orient's statements fill the ledger. Type an entry only for money in transit — it counts until a statement shows it.</div>}
         <div className="pb fg">
           <div className="seg seg3" role="group" aria-label="Type">
             <button className={f.type === "deposit" ? "on-buy" : ""} aria-pressed={f.type === "deposit"} onClick={() => set("type", "deposit")}>Deposit</button>
@@ -5023,6 +5091,25 @@ function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
                   const st = settings.statement?.[a.id];
                   const diff = has(st) ? n(st) - a.TNE : null;
                   const ok = diff !== null && Math.abs(diff) < 1;
+                  if (a.fromStatement) {
+                    // Run on the broker's statements: Orient's equity at the close, plus what has changed since.
+                    const fs = a.fromStatement;
+                    const dep = sum(fs.cash.filter((x) => x.amount > 0), (x) => x.amount), wd = sum(fs.cash.filter((x) => x.amount < 0), (x) => -x.amount);
+                    const transit = sum(fs.transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
+                    return (
+                      <tr key={a.id}>
+                        <td className="txt"><b>{a.name}</b><div className="faint" style={{ fontSize: 11 }}>From Orient's statements ({fs.days} days)</div></td>
+                        <td className="ok">{dep ? money(dep) : "—"}</td>
+                        <td className="bad">{wd ? money(-wd) : "—"}</td>
+                        <td><b>{money(dep - wd)}</b></td>
+                        <td colSpan={3} className="txt" style={{ fontSize: 12 }}>
+                          Orient's equity at the close of {new Date(`${fs.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}: <b>{money(fs.equity)}</b> · since then: <span className={pc(fs.sinceClose)}>{signed(fs.sinceClose)}</span>{transit ? <> · in transit: {signed(transit)}</> : null}
+                        </td>
+                        <td><b>{money(a.TNE)}</b></td>
+                        <td className="txt faint" colSpan={2}>Orient's figure is the starting point — nothing to enter</td>
+                      </tr>
+                    );
+                  }
                   return (
                     <tr key={a.id}>
                       <td className="txt"><b>{a.name}</b>{!a.fund.fromLedger && <div className="faint" style={{ fontSize: 11 }}>No ledger yet: using Capital {money(n(settings.brokers.find((b) => b.id === a.id)?.capital))}</div>}</td>
@@ -5068,21 +5155,21 @@ function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
         })()}
 
         <section className="panel">
-          <div className="ph"><h2>Ledger<span className="dim">{cash.length}</span></h2></div>
-          {cash.length === 0 ? <div className="empty">No deposits, withdrawals or charges recorded yet.</div> : (
+          <div className="ph"><h2>Ledger<span className="dim">{ledger.length}</span></h2></div>
+          {ledger.length === 0 ? <div className="empty">No deposits, withdrawals or charges recorded yet.</div> : (
             <div className="tw tall">
               <table>
                 <thead><tr><th className="txt">Date</th><th className="txt">Account</th><th className="txt">Type</th><th>Amount</th><th className="txt">Note</th><th className="txt">Source</th><th></th></tr></thead>
                 <tbody>
-                  {cash.map((c) => (
-                    <tr key={c.id}>
+                  {ledger.map((c) => (
+                    <tr key={c.id} className={c.source === "statement" ? "" : undefined}>
                       <td className="txt dim">{new Date(c.ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</td>
                       <td className="txt">{bname(c.broker)}</td>
                       <td className="txt"><span className={`side ${c.type === "deposit" ? "long" : c.type === "charge" ? "chg" : "short"}`}>{c.type === "deposit" ? "Deposit" : c.type === "charge" ? "Charge" : "Withdrawal"}</span></td>
                       <td className={c.type === "deposit" ? "ok" : "bad"}><b>{c.type === "deposit" ? "+" : "−"}{money(n(c.amount))}</b>{c.recurring === "monthly" && <div className="faint" style={{ fontSize: 10 }}>a month · {monthsCharged(c)}× = {money(chargeTotal(c))}</div>}</td>
                       <td className="txt dim">{c.type === "charge" && <b style={{ color: "var(--text)", fontWeight: 500 }}>{c.category}{c.recurring === "monthly" ? (c.endTs ? ` (monthly, stopped ${new Date(c.endTs).toLocaleDateString(undefined, { day: "numeric", month: "short" })})` : " (monthly)") : ""}{c.note ? " · " : ""}</b>}{c.note || (c.type === "charge" ? "" : "—")}</td>
-                      <td className="txt faint">{c.source === "csv" ? "Upload" : "Manual"}</td>
-                      <td style={{ whiteSpace: "nowrap" }}>{c.recurring === "monthly" && !c.endTs && <button className="btn ghost" style={{ marginRight: 4 }} onClick={() => stopMonthly(c.id)}>Stop</button>}<button className="btn ghost" onClick={() => remove(c.id)} aria-label="Delete entry">✕</button></td>
+                      <td className="txt faint">{c.source === "statement" ? <span className="ok">Orient's statement</span> : c.source === "csv" ? "Upload" : "Manual"}{c.status && <div className={c.status.counted ? "warn" : "faint"} style={{ fontSize: 10 }}>{c.status.text}</div>}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>{c.source !== "statement" && <>{c.recurring === "monthly" && !c.endTs && <button className="btn ghost" style={{ marginRight: 4 }} onClick={() => stopMonthly(c.id)}>Stop</button>}<button className="btn ghost" onClick={() => remove(c.id)} aria-label="Delete entry">✕</button></>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -5092,7 +5179,7 @@ function FundsTab({ pf, settings, setSettings, view, fills = [] }) {
         </section>
       </div>
     </div>
-    <StatementsPanel fills={fills} />
+    <StatementsPanel fills={fills} onChanged={onStatements} />
     </>
   );
 }
