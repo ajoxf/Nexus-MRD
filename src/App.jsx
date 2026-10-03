@@ -4752,11 +4752,11 @@ export function StatementsPanel({ fills = [] }) {
           <>
             <div className="tw">
               <table>
-                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
+                <thead><tr><th className="txt">Statement date</th><th className="txt">Account</th><th>Net equity</th><th>Total IM</th><th>Margin excess</th><th title="Net equity as a share of initial margin — the ratio margin calls are set on">TNE / IM</th><th className="txt">Open positions</th><th className="txt">Orient's sums</th><th className="txt">Inside</th><th></th></tr></thead>
                 <tbody>
                   {dailyRows.map((row) => row.kind === "nogroup" ? (
                     <tr key={`nogroup|${row.date}`} className="dayhead">
-                      <td className="txt" colSpan={9}>
+                      <td className="txt" colSpan={10}>
                         <button className="btn ghost" style={{ padding: "0 6px", marginRight: 6 }} onClick={() => toggleDay(row.date)} aria-expanded={row.open} aria-label={row.open ? "Fold this day" : "Open this day"}>{row.open ? "▾" : "▸"}</button>
                         <b>{fmtDate(row.date || null)}</b> <span className="faint">· group statement not open · {row.subs} sub-account statement{row.subs === 1 ? "" : "s"}</span>
                       </td>
@@ -4774,8 +4774,8 @@ export function StatementsPanel({ fills = [] }) {
                       <td className="txt">{st.account || "—"}</td>
                       {(() => {
                         const sm = summaries.get(st.checksum);
-                        if (!sm) return <td colSpan={5} className="txt faint">No Financial Summary in this zip</td>;
-                        if (sm.problems.length) return <td colSpan={5} className="txt bad">Couldn't read the Financial Summary: {sm.problems[0]}{sm.problems.length > 1 ? ` (+${sm.problems.length - 1} more)` : ""}</td>;
+                        if (!sm) return <td colSpan={6} className="txt faint">No Financial Summary in this zip</td>;
+                        if (sm.problems.length) return <td colSpan={6} className="txt bad">Couldn't read the Financial Summary: {sm.problems[0]}{sm.problems.length > 1 ? ` (+${sm.problems.length - 1} more)` : ""}</td>;
                         const m = sm.main;
                         const cur = m?.ccy || "USD";
                         return (
@@ -4783,6 +4783,7 @@ export function StatementsPanel({ fills = [] }) {
                             <td>{m ? cents(m.tne, cur) : "—"}</td>
                             <td>{m ? cents(m.im, cur) : "—"}</td>
                             <td className={m && m.excess < 0 ? "bad" : ""}>{m ? cents(m.excess, cur) : "—"}</td>
+                            <td className={m && m.im > 0 && m.tne / m.im < 1 ? "bad" : ""}>{m && m.im > 0 ? ratioTxt(m.tne / m.im) : "—"}</td>
                             <td className="txt" style={{ fontSize: 12 }}>
                               {row.posElsewhere ? <span className="faint">Held in {row.posElsewhere} — {row.open ? "below" : "open the day to see them"}</span>
                                 : !sm.positions ? <span className="faint">No Open Position file</span>
