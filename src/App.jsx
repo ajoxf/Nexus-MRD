@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries } from "./lib/statements.js";
-import { spreadsOf } from "./lib/statementSpreads.js";
+import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readFinancialSummary, checkAccount, checkFamily, mainAccount, checkCarryOver, isFinancialSummary, TOL, readOpenPositions, positionsOf, checkPositionsAgainstSummary, isOpenPosition } from "./lib/orient.js";
 import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
@@ -4661,7 +4661,7 @@ function StatementsPanel() {
     const pos = op ? readOpenPositions(Papa.parse(op.text, { skipEmptyLines: true }).data) : null;
     if (pos && !pos.problems.length && accounts.length) failed.push(...checkPositionsAgainstSummary(pos.lots, accounts));
     const positions = pos && !pos.problems.length ? positionsOf(pos.lots) : null;
-    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions, spreads: positions ? spreadsOf(positions) : null }];
+    return [st.checksum, { accounts, problems: [...problems, ...(pos?.problems || [])], main, failed, positions, spreads: positions ? spreadsFromLots(pos.lots) : null }];
   })), [list]);
   const carry = useMemo(() => checkCarryOver(list.map((st) => ({ date: st.date, accounts: summaries.get(st.checksum)?.accounts || [] }))), [list, summaries]);
   const read = list.filter((st) => summaries.get(st.checksum)?.accounts.length);
@@ -4722,9 +4722,9 @@ function StatementsPanel() {
                               {!sm.positions ? <span className="faint">No Open Position file</span>
                                 : !sm.positions.length ? <span className="faint">None</span>
                                 : <>
-                                  {/* Spreads first, paired from Orient's legs (src/lib/statementSpreads.js); the legs as Orient lists them underneath. */}
+                                  {/* Spreads first — paired by Orient's exchange order id, else by rule (src/lib/statementSpreads.js); the legs as Orient lists them underneath. */}
                                   {sm.spreads.spreads.map((sp, i) => (
-                                    <div key={`sp|${i}`}>{sp.label} <b className={sp.lots > 0 ? "ok" : "bad"}>{sp.lots > 0 ? "+" : ""}{sp.lots}</b> @ {+sp.entry.toFixed(4)} · settle {sp.settle === null ? "—" : +sp.settle.toFixed(4)} · {cents(sp.upl, cur)}</div>
+                                    <div key={`sp|${i}`}>{sp.label} <b className={sp.lots > 0 ? "ok" : "bad"}>{sp.lots > 0 ? "+" : ""}{sp.lots}</b> @ {+sp.entry.toFixed(4)} · settle {sp.settle === null ? "—" : +sp.settle.toFixed(4)} · {cents(sp.upl, cur)}{sp.by === "rule" && <span className="faint" title="Orient's file didn't link these legs by exchange order id, so they were paired by rule: CL–BZ same month, then HO–CL same month, then calendars."> · paired by rule</span>}</div>
                                   ))}
                                   {sm.spreads.outrights.map((o, i) => (
                                     <div key={`out|${i}`}>{o.label} <b className={o.lots > 0 ? "ok" : "bad"}>{o.lots > 0 ? "+" : ""}{o.lots}</b> outright @ {o.avg} · settle {o.settle ?? "—"} · {cents(o.upl, cur)}</div>

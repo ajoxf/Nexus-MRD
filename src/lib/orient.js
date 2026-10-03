@@ -243,6 +243,9 @@ export function readOpenPositions(rows) {
     if (i < 0) missing.push(label); else at[k] = i;
   }
   if (missing.length) return { lots: [], problems: [`The Open Position file has no ${missing.map((m) => `"${m}"`).join(", ")} column${missing.length === 1 ? "" : "s"}. Orient may have changed the layout.`] };
+  // The exchange's order id, which the legs of one spread trade share. Optional: without it the
+  // legs are paired by rule instead (src/lib/statementSpreads.js).
+  const orderAt = header.indexOf(norm("ExchangeOrderID"));
 
   const problems = [], lots = [];
   data.slice(1).forEach((r, idx) => {
@@ -258,6 +261,7 @@ export function readOpenPositions(rows) {
     if (side !== "B" && side !== "S") problems.push(`Open Position row ${row}, "BuySell": "${cell("side")}" is neither B nor S.`);
     const lot = {
       tradeId: cell("tradeId"), account: subAccount(cell("sub"), cell("group")), group: plainAccount(cell("group")),
+      orderId: orderAt < 0 ? "" : String(r[orderAt] ?? "").trim(),
       code: cell("code"), month: cell("month"), expiry: cell("expiry"), kind: cell("kind").toUpperCase(), exchange: cell("exchange"),
       tradeDate: cell("tradeDate"), ccy: cell("ccy"),
       side, strike: num("strike", true), price: num("price"), qty: num("qty"), settle: num("settle"), upl: num("upl"),
