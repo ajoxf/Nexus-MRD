@@ -1,4 +1,4 @@
-import { linesFromItems, readMonthlyStatement, checkMonthly, tieToDaily, money, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from '../src/lib/monthly.js';
+import { dealsAgainstFills, linesFromItems, readMonthlyStatement, checkMonthly, tieToDaily, money, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from '../src/lib/monthly.js';
 
 /*
  * Orient's monthly statement, as the PDF's text comes out: positioned fragments. The layout —
@@ -23,7 +23,9 @@ const furniture = (n) => [
 const PS_HEAD = [830, [['Trade Date', 52], ['Exchange', 136], ['Buy', 282], ['Sell', 363], ['Description', 391], ['C/P', 519], ['Strike', 650], ['Price', 752], ['Trading CCY', 787], ['Profit and Loss', 894], ['P&L CCY', 994], ['Remarks', 1046]]];
 const OP_HEAD = [324, [['Trade Date', 52], ['Exchange', 135], ['Buy', 270], ['Sell', 346], ['Description', 374], ['C/P', 492], ['Strike', 636], ['Trade Price', 710], ['Trading CCY', 778], ['Unrealised P&L', 895], ['P&L CCY', 1000], ['Remarks', 1052]]];
 const realisedBlock = (y, name, day, buy, sell, ex, pl) => [
-  [y, [['17/08/26', 52], ['NYMEX', 136], ['1', 377], [name, 391], ['90.10', 752], ['USD', 787]]],
+  [y + 13, [['17/08/26', 52], ['NYMEX', 136], [String(sell), 377], [name, 391], ['90.10', 752], ['USD', 787]]],
+  [y + 6, [[day, 391]]],
+  [y, [['18/08/26', 52], ['NYMEX', 136], [String(buy), 290], [name, 391], ['90.99', 752], ['USD', 787]]],
   [y - 13, [[day, 391]]],
   [y - 30, [['Total', 52], [String(buy), 290], [String(sell), 370], [ex, 391], [pl, 913], ['USD', 1015]]],
 ];
@@ -82,6 +84,19 @@ const pages = [
 ];
 
 const m = readMonthlyStatement(linesFromItems(pages));
+
+const brief = (d) => [d.status, d.date, d.code, d.month, d.buy, d.sell, d.price];
+is('every trade line read, with its contract from the Total line below it', [m.deals.length, brief(m.deals[0]), brief(m.deals[1])],
+  [12, ['closed', '2026-08-17', 'BZ', '202610', 0, 16, 90.1], ['closed', '2026-08-18', 'BZ', '202610', 16, 0, 90.99]]);
+is('open positions too, long or short from their column, with their unrealised P&L', m.deals.filter((d) => d.status === 'open').map((d) => [d.code, d.buy, d.sell, d.price, d.upl]),
+  [['CL', 6, 0, 82.76, 17990], ['HO', 0, 6, 4.171, -60375]]);
+is('a trade line that goes missing is named', checkMonthly({ ...m, deals: m.deals.slice(1) }).map((c) => c.label), ['BZ 202610 sold: the trade lines add up to the Total']);
+
+// The month's trades against the TT fills: TT books the BZ Oct sale on 17 Aug, and one fill Orient never had.
+const tt = (d, product, side, qty, price) => ({ ts: new Date(2026, 7, d, 10, 0).toISOString(), product, side, qty, price, account: '2001000011-GHF', is_leg: true, ref: `${d}${product}${side}${price}` });
+const vs = dealsAgainstFills(m, [tt(17, 'BZ Oct26', 'Sell', 16, 90.10), tt(18, 'BZ Oct26', 'Buy', 16, 90.99), tt(19, 'CL Oct26', 'Buy', 1, 80)]);
+is('monthly trades against TT fills: matched lot by lot, every lot on a day the fills cover is compared', [vs.lines[0].matched, vs.lines[1].matched, vs.lots, vs.matched], [16, 16, 228, 32]);
+is('…a TT fill the month\'s statement does not list is extra', vs.extra.map((x) => [x.contract, x.side, x.price]), [['CL 202610', 'B', 80]]);
 is('reads cleanly', m.problems, []);
 is('account, month and date', [m.account, m.short, m.month, m.date], ['2001000011', '0011', '2026-08', '2026-08-31']);
 is('the Financial Summary, as Orient states it', [m.summary.beginning, m.summary.ending, m.summary.foRealized, m.summary.foUnrealized, m.summary.totalEquity, m.summary.im, m.summary.excess],

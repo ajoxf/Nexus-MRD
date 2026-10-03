@@ -61,3 +61,20 @@ export function feedsFor(rows, fills, brokers) {
 export const pnlAt = (book, priceOf, sizeFn) =>
   book.realized.reduce((t, r) => t + r.pnl, 0) +
   book.open.reduce((t, p) => t + (p.side === "Long" ? 1 : -1) * (priceOf(p) - p.avg) * sizeFn(p.broker, p.product) * p.lots, 0);
+
+/*
+ * Your fills' own P/L at Orient's close, to set against Orient's: realised, and open at the
+ * statement's settlement prices. Before commission and fees (those are Orient's figures, shown on
+ * their own), so the two should agree to the cent when every fill is in RAMP and matched the way
+ * Orient matches (first in, first out). unpriced: open positions with no settlement to price them.
+ */
+export function fillsPlAt(book, priceOf, sizeFn) {
+  const realised = book.realized.reduce((t, r) => t + r.pnl, 0);
+  let open = 0, unpriced = 0;
+  for (const p of book.open) {
+    const px = priceOf(p);
+    if (px === null || px === undefined) { unpriced++; continue; }
+    open += (p.side === "Long" ? 1 : -1) * (px - p.avg) * sizeFn(p.broker, p.product) * p.lots;
+  }
+  return { realised: +realised.toFixed(2), open: +open.toFixed(2), unpriced };
+}

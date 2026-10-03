@@ -1,4 +1,4 @@
-import { feedsFor, pnlAt } from '../src/lib/statementBook.js';
+import { feedsFor, pnlAt, fillsPlAt } from '../src/lib/statementBook.js';
 import { computeBook } from '../src/lib/positions.js';
 import { settleOf } from '../src/lib/brokerFeed.js';
 
@@ -62,6 +62,12 @@ const more = [...fillsToClose, ...spreadTrade(at(11, 9, 0), 'Buy', 93, 101)];
 is('a second spread bought since, at -8.00, marked at -7.50: +$500 more', equity(more, atSettle), 11000);
 const closed = [...fillsToClose, ...spreadTrade(at(11, 9, 0), 'Sell', 93, 100.6)];
 is('the spread sold since at -7.60: -$100 against settlement, realised', equity(closed, atSettle), 10400);
+
+// Your fills' P/L at the close, to tally against Orient's Profit/Loss: realised, open at settlement.
+const plOf = (fills) => fillsPlAt(computeBook(fills, size, () => 'fifo'), atSettle, size);
+is('your fills at the close: one spread open, +$500 at settlement', plOf(fillsToClose), { realised: 0, open: 500, unpriced: 0 });
+is('closed since at -7.60: $400 realised, nothing open', plOf(closed), { realised: 400, open: 0, unpriced: 0 });
+is('a position with no settlement is counted, not guessed', fillsPlAt(computeBook([ttFill(at(11, 9, 0), 'USOILX6', 'Buy', 70)], size, () => 'fifo'), atSettle, size), { realised: 0, open: 0, unpriced: 1 });
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

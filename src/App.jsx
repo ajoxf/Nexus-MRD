@@ -2,10 +2,10 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
-import { feedsFor, pnlAt } from "./lib/statementBook.js";
+import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
-import { readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
+import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
 import { matchFills } from "./lib/fillMatch.js";
@@ -296,7 +296,10 @@ function portfolio(fills, settings, now = new Date(), feeds = {}) {
       TNE = feed.anchor.equity + (pNow - pClose) + transitNet;
       accIM = Math.max(0, feed.anchor.im + imChange);
       fund = { ...fund, base: feed.anchor.equity, fromLedger: true };
-      fromStatement = { date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, sums: feed.sums, onStatement, imPer: feed.imPer, days: feed.days };
+      // Your fills' own P/L at the close, before commission — to tally against Orient's Profit/Loss.
+      const gross = computeBook(fills.filter((f) => f.broker === b.id && f.ts <= feed.cutoff).map((f) => ({ ...f, fee: 0 })), sizeFn, (bk) => matchOf(byId[bk]));
+      const fillsPl = fillsPlAt(gross, (p) => settleOf(p.product, feed.settles), sizeFn);
+      fromStatement = { fillsPl, method: matchOf(byId[b.id]), date: feed.date, equity: feed.anchor.equity, im: feed.anchor.im, sinceClose: pNow - pClose, imChange, transit, cash: feed.cash, sums: feed.sums, onStatement, imPer: feed.imPer, days: feed.days };
     }
     const callR = n(b.callRatio) / 100, stopR = n(b.stopRatio) / 100;
     return {
@@ -4430,6 +4433,7 @@ export function StatementsPanel({ fills = [], onChanged }) {
   const [shown, setShown] = useState(null);          // "<checksum>|<file name>" of the CSV on screen
   const fileRef = useRef(null);
   const folderRef = useRef(null);
+  const monthlyRef = useRef(null);
   const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
   // Whether statements are being kept: null while loading, then ["ok" | "warn" | "bad", text].
   const [keep, setKeep] = useState(null);
@@ -4696,6 +4700,7 @@ export function StatementsPanel({ fills = [], onChanged }) {
         <input ref={fileRef} type="file" accept=".zip,.pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         {/* A whole folder, sub-folders included: one folder per day is how statements tend to be saved. */}
         <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => load(e.target.files)} />
+        <input ref={monthlyRef} type="file" accept=".pdf,application/pdf" multiple hidden onChange={(e) => load(e.target.files)} />
         <div className={`drop ${over ? "over" : ""}`} role="button" tabIndex={0}
           onClick={() => fileRef.current?.click()} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
@@ -4703,7 +4708,11 @@ export function StatementsPanel({ fills = [], onChanged }) {
           <b>{busy ? "Opening…" : "Drop statement zips, monthly PDFs or folders here"}</b>{!busy && " or click to choose them"}<br />
           <span className="faint" style={{ fontSize: 11 }}>A folder per day is fine — drop the folder that holds them all · password-protected zips and PDFs are fine · the same file twice is skipped</span>
         </div>
-        <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of statements</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn ghost" disabled={busy} onClick={() => fileRef.current?.click()}>Upload daily statements (zips)</button>
+          <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of daily statements</button>
+          <button className="btn ghost" disabled={busy} onClick={() => monthlyRef.current?.click()} title="Orient's month-end PDFs: each sub-account, the group, and the GST invoice. Password-protected is fine.">Upload monthly statements (PDFs)</button>
+        </div>
 
         {askPw && (
           <form onSubmit={submitPw}>
@@ -4741,9 +4750,19 @@ export function StatementsPanel({ fills = [], onChanged }) {
                       const tieBad = tie ? tie.lines.filter((l) => !l.ok) : [];
                       const tieTitle = tie ? [...tie.lines.map((l) => `${l.ok ? "✓" : "✗"} ${l.label}${l.ok || l.got === null ? "" : `: ${l.got.toFixed(2)} vs ${l.want?.toFixed?.(2)}`}${l.note ? ` — ${l.note}` : ""}`), ...(tie.missing ? [tie.missing] : [])].join("\n") : undefined;
                       const feeTot = (re) => (gst ? gst.fees.filter((f) => re.test(f.type)).reduce((t, f) => t + f.amount, 0) : 0);
+                      const tKey = `trades|${st.checksum}`, tOpen = openFiles.has(tKey);
+                      const vs = tOpen && m?.deals?.length ? dealsAgainstFills(m, fills) : null;
                       return (
-                        <tr key={st.checksum}>
-                          <td className="txt">{gst ? "GST invoice" : "Statement"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div></td>
+                        <React.Fragment key={st.checksum}>
+                        <tr>
+                          <td className="txt">{gst ? "GST invoice" : "Statement"}<div className="faint" style={{ fontSize: 10 }}>{st.zipName}</div>
+                            {m?.deals?.length > 0 && (
+                              <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11, marginTop: 2 }} aria-expanded={tOpen}
+                                onClick={() => setOpenFiles((o) => { const n2 = new Set(o); if (n2.has(tKey)) n2.delete(tKey); else n2.add(tKey); return n2; })}>
+                                {m.deals.length} trade lines {tOpen ? "▾" : "▸"}
+                              </button>
+                            )}
+                          </td>
                           <td className="txt">{st.account || "—"}</td>
                           {pr.length ? <td colSpan={7} className="txt bad">{pr.join(" · ")}</td>
                             : gst ? <>
@@ -4758,6 +4777,39 @@ export function StatementsPanel({ fills = [], onChanged }) {
                             </>}
                           <td><button className="btn ghost faint" style={{ padding: "0 6px", fontSize: 11 }} onClick={() => removeStatement(st)} title="Asks you to type DELETE first">Delete…</button></td>
                         </tr>
+                        {vs && (
+                          <tr>
+                            <td colSpan={10} className="txt">
+                              <div style={{ fontSize: 12, margin: "4px 0 6px" }}>
+                                <b>Every trade on this statement</b>
+                                {vs.lots ? <span className={vs.matched === vs.lots ? "ok" : "warn"}> · {vs.matched} of {vs.lots} lots match your TT fills</span> : <span className="faint"> · no TT fills in RAMP for these days to compare with</span>}
+                                {vs.extra.length > 0 && <span className="warn"> · {plural(vs.extra.length, "TT fill lot")} this month not on the statement</span>}
+                                <span className="faint"> · open at month end = still open on {fmtDate(m.date)}</span>
+                              </div>
+                              <table className="postable">
+                                <thead><tr><th className="txt">Trade date</th><th className="txt">Sub-account</th><th className="txt">Contract</th><th>Bought</th><th>Sold</th><th>Price</th><th className="txt">At month end</th><th>Unrealised</th><th className="txt">Your TT fills</th></tr></thead>
+                                <tbody>
+                                  {vs.lines.map((d, i) => (
+                                    <tr key={i}>
+                                      <td className="txt">{new Date(`${d.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</td>
+                                      <td className="txt">{d.account ? d.account.slice(-4) : "—"}</td>
+                                      <td className="txt">{d.code} {d.month ? new Date(`${d.month.slice(0, 4)}-${d.month.slice(4)}-15T12:00:00`).toLocaleDateString("en-US", { month: "short" }) + d.month.slice(2, 4) : ""}</td>
+                                      <td>{d.buy || ""}</td><td>{d.sell || ""}</td>
+                                      <td>{d.price}</td>
+                                      <td className="txt">{d.status === "open" ? "Open" : "Closed"}</td>
+                                      <td className={d.upl === null ? "faint" : d.upl < 0 ? "bad" : "ok"}>{d.upl === null ? "" : cents(d.upl)}</td>
+                                      <td className={`txt ${!d.compared ? "faint" : d.matched === d.lots ? "ok" : "warn"}`}>{!d.compared ? "not in RAMP's dates" : d.matched === d.lots ? "✓ matched" : d.matched === 0 ? "not in your fills" : `${d.lots - d.matched} of ${d.lots} not in your fills`}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              {vs.extra.length > 0 && (
+                                <div className="warn" style={{ fontSize: 11, marginTop: 4 }}>In your TT fills but not on this statement: {vs.extra.slice(0, 8).map((x) => `${x.contract} ${x.side === "B" ? "bought" : "sold"} at ${x.price} (${new Date(x.ts).toLocaleDateString(undefined, { day: "numeric", month: "short" })})`).join(" · ")}{vs.extra.length > 8 ? ` · +${vs.extra.length - 8} more` : ""}</div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
                       );
                     })}
                   </React.Fragment>
@@ -5101,8 +5153,10 @@ function FundsTab({ pf, settings, setSettings, view }) {
                     const dep = sum(fs.cash.filter((x) => x.amount > 0), (x) => x.amount), wd = sum(fs.cash.filter((x) => x.amount < 0), (x) => -x.amount);
                     const transit = sum(fs.transit, (c) => (c.type === "withdrawal" ? -n(c.amount) : n(c.amount)));
                     const stDate = new Date(`${fs.date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+                    const fp = fs.fillsPl, orientPl = +(fs.sums.pl + fs.sums.upl).toFixed(2), mine = +(fp.realised + fp.open).toFixed(2), gap = +(mine - orientPl).toFixed(2);
                     return (
-                      <tr key={a.id}>
+                      <React.Fragment key={a.id}>
+                      <tr>
                         <td className="txt"><b>{a.name}</b><div className="faint" style={{ fontSize: 11 }}>From Orient's statements ({fs.days} days)</div></td>
                         <td className="ok">{dep ? money(dep) : "—"}</td>
                         <td className="bad">{wd ? money(-wd) : "—"}</td>
@@ -5115,6 +5169,18 @@ function FundsTab({ pf, settings, setSettings, view }) {
                           {Math.abs(fs.sums.unexplained) < 0.01 ? "✓ Adds up to Orient's equity, to the cent" : <>{signed(fs.sums.unexplained)} not explained by the statements loaded — a day's statement may be missing</>}
                         </td>
                       </tr>
+                      <tr>
+                        <td className="txt">Your TT fills<div className="faint" style={{ fontSize: 11 }}>Up to Orient's close of {stDate} · {fs.method === "fifo" ? "first in, first out" : <span className="warn">matched {fs.method} — Orient uses first in, first out</span>}</div></td>
+                        <td colSpan={3} className="txt faint" style={{ fontSize: 12 }}>Your P/L, worked out from your fills, against Orient's</td>
+                        <td className={pc(fp.realised)}>{signed(fp.realised)}<div className="faint" style={{ fontSize: 10 }}>Orient: {signed(fs.sums.pl)}</div></td>
+                        <td className="faint" style={{ fontSize: 11 }}>before charges</td>
+                        <td className={pc(fp.open)}>{signed(fp.open)}<div className="faint" style={{ fontSize: 10 }}>Orient: {signed(fs.sums.upl)}{fp.unpriced ? <span className="warn"> · {fp.unpriced} not priced</span> : null}</div></td>
+                        <td><b className={pc(mine)}>{signed(mine)}</b><div className="faint" style={{ fontSize: 10 }}>Orient: {signed(orientPl)}</div></td>
+                        <td className={`txt ${Math.abs(gap) < 0.01 ? "ok" : "warn"}`} colSpan={2} style={{ fontSize: 12 }} title="Realised and open can split differently if trades are matched differently; the total should agree.">
+                          {Math.abs(gap) < 0.01 ? "✓ Your fills tie to Orient's P/L, to the cent" : <>{signed(gap)} between your fills and Orient — open Statements to see which trades don't match</>}
+                        </td>
+                      </tr>
+                      </React.Fragment>
                     );
                   }
                   return (

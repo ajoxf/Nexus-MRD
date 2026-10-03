@@ -1,4 +1,5 @@
 import { plainAccount } from "./orient.js";
+import { matchFills } from "./fillMatch.js";
 
 /*
  * Orient's monthly statement — a password-protected PDF, read in the browser.
@@ -80,15 +81,17 @@ export function readMonthlyStatement(lines) {
     account, short: account ? (account.length > 6 ? account.slice(-4) : account) : null,
     month: per ? `${per[2]}-${String(MONTHS[per[1].slice(0, 3).toLowerCase()] || 0).padStart(2, "0")}` : null,
     date: dt ? `${dt[3]}-${dt[2]}-${dt[1]}` : null,
-    summary: {}, journal: [], trades: [], realised: [], open: [], openNet: null, problems,
+    summary: {}, journal: [], trades: [], realised: [], open: [], openNet: null, deals: [], problems,
   };
   if (!account) problems.push("No account number found — is this an Orient monthly statement?");
   if (!out.date) problems.push("No statement date found.");
 
-  let section = null, block = [], header = null;
+  let section = null, block = [], header = null, pending = [];
+  // Each contract's trade lines come before its "Total" line, which names the contract.
+  const settle = (status, code, month) => { for (const d of pending) out.deals.push({ ...d, status, code, month }); pending = []; };
   for (const l of lines) {
     const sec = SECTIONS.find((s) => l.text.startsWith(s));
-    if (sec) { section = sec; block = []; continue; }
+    if (sec) { section = sec; block = []; pending = []; continue; }
     if (PAGE_FURNITURE.test(l.text)) continue;
     const c = l.cells.map((x) => x.str);
     if (/^(Date|Exchange|Trade Date)$/.test(c[0])) { header = l; continue; }
@@ -109,8 +112,13 @@ export function readMonthlyStatement(lines) {
         const text = block.join(" ");
         const v = c.map(money).filter((x, i) => x !== null && i >= 3);
         out.realised.push({ code: productOf(text), month: monthOf(text), buy: money(c[1]), sell: money(c[2]), pl: v.length ? v[v.length - 1] : null });
+        settle("closed", productOf(text), monthOf(text));
         block = [];
-      } else block.push(desc);
+      } else {
+        const d = dealOf(l, header, "Price");
+        if (d) pending.push(d);
+        block.push(desc);
+      }
     } else if (section === "F&O OPEN POSITIONS") {
       if (c[0] === "Total" && /Settlement Price/.test(l.text)) {
         const text = block.join(" ");
@@ -120,12 +128,17 @@ export function readMonthlyStatement(lines) {
         const short = bx !== undefined && sx !== undefined ? Math.abs(q.x - sx) < Math.abs(q.x - bx) : false;
         const i = c.indexOf("Settlement Price:");
         out.open.push({ code: productOf(text), month: monthOf(text), lots: (short ? -1 : 1) * money(q.str), settle: money(c[i + 1]), upl: money(c[i + 2]), avg: null });
+        settle("open", productOf(text), monthOf(text));
         block = [];
       } else if (/^Average (Long|Short):/.test(c[0]) && out.open.length && out.open[out.open.length - 1].avg === null) {
         out.open[out.open.length - 1].avg = money(c[1]);
       } else if (c[0] === "Net") {
         out.openNet = c.map(money).filter((x) => x !== null).pop() ?? null;
-      } else block.push(desc);
+      } else {
+        const d = dealOf(l, header, "Trade Price");
+        if (d) pending.push(d);
+        block.push(desc);
+      }
     } else if (section === "FINANCIAL SUMMARY") {
       // The terms and abbreviations box below the summary repeats words like "GST": first one only.
       if (/^This statement is subject to/.test(l.text)) { section = null; continue; }
@@ -135,6 +148,37 @@ export function readMonthlyStatement(lines) {
   }
   for (const [k, label] of Object.entries(SUMMARY_LINES)) if (out.summary[k] === undefined && !["lmeForward", "fxSwap"].includes(k)) problems.push(`The Financial Summary has no "${label}" line.`);
   return out;
+}
+
+/*
+ * One trade line of F&O PURCHASE & SALES or F&O OPEN POSITIONS: "17/08/26 NYMEX 1 Brent Crude Oil -
+ * Last 89.23 0011 USD". Bought or sold from which column the lots sit under (the numbers are right-
+ * aligned, so nearest header wins); the price from under its own header. The contract comes later,
+ * from the block's Total line. Null for anything else.
+ */
+function dealOf(l, header, priceLabel) {
+  const c = l.cells;
+  const dm = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(c[0]?.str || "");
+  if (!dm || !header) return null;
+  const at = (label) => header.cells.find((x) => x.str === label)?.x;
+  const bx = at("Buy"), sx = at("Sell"), dx = at("Description"), px = at(priceLabel), ax = at("Sub Ac"), ux = at("Unrealised P&L");
+  if (bx === undefined || sx === undefined || px === undefined) return null;
+  let buy = 0, sell = 0;
+  for (const x of c.slice(1)) {
+    if (dx !== undefined && x.x >= dx - 2) break;
+    const q = money(x.str);
+    if (q === null || !/^\d[\d,]*$/.test(x.str)) continue;
+    if (Math.abs(x.x - bx) <= Math.abs(x.x - sx)) buy += q; else sell += q;
+  }
+  const nearest = (x0, test) => c.filter((x) => test(x)).sort((a, b) => Math.abs(a.x - x0) - Math.abs(b.x - x0))[0];
+  const priceCell = nearest(px, (x) => x.x > (dx ?? 0) && /^\(?[\d,]*\.\d+\)?$/.test(x.str) && (ax === undefined || x.x < ax - 2));
+  const sub = ax !== undefined ? nearest(ax, (x) => /^\d{4}$/.test(x.str) && Math.abs(x.x - ax) < 30) : null;
+  const uplCell = ux !== undefined ? nearest(ux, (x) => x.x > (ax ?? px) + 2 && money(x.str) !== null && /\./.test(x.str)) : null;
+  if (!priceCell || (!buy && !sell)) return null;
+  return {
+    date: `20${dm[3]}-${dm[2]}-${dm[1]}`, exchange: c[1]?.str || "", buy, sell, price: money(priceCell.str),
+    sub: sub ? sub.str : null, upl: uplCell ? money(uplCell.str) : null,
+  };
 }
 
 const near = (a, b) => Math.abs(a - b) <= 0.01 + 1e-9;
@@ -161,6 +205,14 @@ export function checkMonthly(m) {
     ["Commission = the month's trades' commission + commission adjustments in the journal",
       s.commission, sum([...m.trades.map((t) => t.comm), ...m.journal.filter((j) => /commission/i.test(j.type)).map((j) => j.amount)])],
     ["Cash movement = deposits and withdrawals in the journal", s.cashMovement, sum(m.journal.filter((j) => /funds|deposit|withdraw/i.test(`${j.type} ${j.description}`)).map((j) => j.amount))],
+    // Every trade line read: each contract's lines add up to its Total line.
+    ...(m.realised || []).flatMap((r) => {
+      const ds = (m.deals || []).filter((d) => d.status === "closed" && d.code === r.code && d.month === r.month);
+      return [[`${r.code} ${r.month} bought: the trade lines add up to the Total`, r.buy, sum(ds.map((d) => d.buy))],
+        [`${r.code} ${r.month} sold: the trade lines add up to the Total`, r.sell, sum(ds.map((d) => d.sell))]];
+    }),
+    ...(m.open || []).map((o) => [`${o.code} ${o.month} open: the trade lines add up to the Total`, o.lots,
+      sum((m.deals || []).filter((d) => d.status === "open" && d.code === o.code && d.month === o.month).map((d) => d.buy - d.sell))]),
   ];
   return checks.filter(([, got, want]) => got === undefined || !near(got, want)).map(([label, got, want]) => ({ label, got, want }));
 }
@@ -324,4 +376,38 @@ export function checkMonthlyFamily(statements) {
     out.push({ month: g.month, group: g.account, subs: subs.map((x) => x.account), failed });
   }
   return out;
+}
+
+/*
+ * The month's trade lines against the trader's TT fills, lot by lot, the same way the daily Trade
+ * Confirmations are matched (account, contract, side, price, day). Only trades dated in the month:
+ * a position still open at month end may have been opened earlier. The whole month counts as
+ * covered by the statement, so a TT fill in it that Orient doesn't list is "extra".
+ * Returns { lines: [deal + { lots, matched }], lots, matched, extra: [...] }.
+ */
+export function dealsAgainstFills(m, fills) {
+  const inMonth = (m.deals || []).filter((d) => m.month && d.date.startsWith(m.month));
+  const accountOf = (d) => (m.account && m.account.length > 6 ? m.account : d.sub && m.account ? `${m.account}${d.sub}` : null);
+  const trades = [];
+  inMonth.forEach((d, i) => {
+    const base = { orderId: "", account: accountOf(d), date: d.date.replaceAll("-", ""), time: "", code: d.code, month: d.month, kind: "F", price: d.price };
+    if (d.buy) trades.push({ ...base, tradeId: `${i}|B`, side: "B", qty: d.buy });
+    if (d.sell) trades.push({ ...base, tradeId: `${i}|S`, side: "S", qty: d.sell });
+  });
+  const accounts = [...new Set(trades.map((t) => t.account).filter(Boolean))];
+  const [y, mo] = (m.month || "0-0").split("-").map(Number);
+  const dates = new Set([...Array(new Date(Date.UTC(y, mo, 0)).getUTCDate())].map((_, i) => `${y}${String(mo).padStart(2, "0")}${String(i + 1).padStart(2, "0")}`));
+  const r = matchFills(fills || [], trades.filter((t) => t.account), Object.fromEntries(accounts.map((a) => [a, dates])));
+  const missingBy = new Map();
+  for (const x of r.missing) missingBy.set(x.tradeId, (missingBy.get(x.tradeId) || 0) + 1);
+  // Lots before the first TT fill aren't called missing: nothing to compare them with.
+  const covered = new Set(r.days.map((x) => `${x.account}|${x.date}`));
+  const lines = inMonth.map((d, i) => {
+    const lots = d.buy + d.sell;
+    const compared = covered.has(`${accountOf(d)}|${d.date.replaceAll("-", "")}`);
+    const miss = (missingBy.get(`${i}|B`) || 0) + (missingBy.get(`${i}|S`) || 0);
+    return { ...d, account: accountOf(d), lots, compared, matched: compared ? lots - miss : null };
+  });
+  const compared = lines.filter((l) => l.compared);
+  return { lines, lots: compared.reduce((t, l) => t + l.lots, 0), matched: compared.reduce((t, l) => t + l.matched, 0), extra: r.extra };
 }
