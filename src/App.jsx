@@ -4783,6 +4783,8 @@ export function StatementsPanel({ fills = [] }) {
    * repeated on the group. The newest day is open; older days fold to their head row.
    */
   const [openDays, setOpenDays] = useState(null); // null: only the newest day open
+  const [openFiles, setOpenFiles] = useState(() => new Set()); // statements whose files are listed
+  const [showFillCheck, setShowFillCheck] = useState(false);
   const isGroupSt = (st) => String(st.account || "").length > 4;
   const dailyRows = useMemo(() => {
     const daily = list.filter((st) => !isMonthly(st));
@@ -4928,7 +4930,8 @@ export function StatementsPanel({ fills = [] }) {
                 {!fillCheck.days.length && <span className="faint"> · no days yet where both TT fills and Orient statements are open</span>}
                 {fillCheck.offsetHours !== null && <span className="faint" title="Read from the fills themselves: the hours between TT's time and Orient's for lots that could only be each other."> · Orient's clock is TT's {fillCheck.offsetHours >= 0 ? "+" : ""}{fillCheck.offsetHours}h</span>}
               </div>
-              {fillCheck.days.length > 0 && (
+              {fillCheck.days.length > 0 && <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11, marginBottom: 4 }} aria-expanded={showFillCheck} onClick={() => setShowFillCheck((v) => !v)}>{showFillCheck ? "Hide the comparison ▾" : "Show the comparison, day by day ▸"}</button>}
+              {showFillCheck && fillCheck.days.length > 0 && (
                 <div className="tw">
                   <table className="postable">
                     <thead><tr><th className="txt">Orient trade date</th><th className="txt">Account</th><th>Orient lots</th><th>Matched</th><th>Missing from RAMP</th><th>Not at Orient</th></tr></thead>
@@ -5085,6 +5088,11 @@ export function StatementsPanel({ fills = [] }) {
                         );
                       })()}
                       <td className="txt">
+                        {/* Folded to a count; the files are there when wanted. */}
+                        <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11 }} aria-expanded={openFiles.has(st.checksum)} onClick={() => setOpenFiles((o) => { const n2 = new Set(o); if (n2.has(st.checksum)) n2.delete(st.checksum); else n2.add(st.checksum); return n2; })}>
+                          {st.files.length} file{st.files.length === 1 ? "" : "s"} {openFiles.has(st.checksum) ? "▾" : "▸"}
+                        </button>
+                        {openFiles.has(st.checksum) && <div style={{ marginTop: 4 }}>
                         {st.stored && <span className="faint" style={{ marginRight: 8, fontSize: 11 }} title="Saved statements keep their CSV files only. Open the zip again to see its PDF.">Saved · PDF not kept</span>}
                         {st.files.map((f) => {
                           const id = `${st.checksum}|${f.name}`;
@@ -5094,6 +5102,7 @@ export function StatementsPanel({ fills = [] }) {
                               ? <button key={f.name} className="btn ghost" style={{ margin: "2px 4px 2px 0" }} onClick={() => openPdf(f.blob)} title="Opens in a new tab. If the PDF has its own password, your PDF viewer will ask for it.">{f.name} ↗</button>
                               : <span key={f.name} className="faint" style={{ marginRight: 8 }}>{f.name}</span>;
                         })}
+                        </div>}
                       </td>
                       <td><button className="btn ghost" onClick={() => removeStatement(st)} aria-label="Delete statement" title="Delete this statement from RAMP">✕</button></td>
                     </tr>
