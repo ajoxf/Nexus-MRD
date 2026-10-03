@@ -66,6 +66,45 @@ eq('header but no Base rows says so', read(HEADER).problems, ['The Financial Sum
      [{ date: '2026-10-02', prevDate: '2026-10-01', no: '2001000000', beginning: 50500, prevEnding: 50000 }]);
 }
 
+/*
+ * Several zips for one day. Orient sends a statement per sub-account AND one for the group, all
+ * dated the same day and holding the same sub-account. Opening them together must not compare a
+ * day with itself: the group statement's opening balance is not the 0011 statement's closing one.
+ * Shaped on a real Aug 14 / Aug 17 pair, where it did exactly that and cried "missing day".
+ */
+{
+  const a = (no, beginning, ending) => ({ no, beginning, ending });
+  const zero14 = { date: '2026-08-14', accounts: [a('1003050000', 70050, 70050)] };
+  const one14 = { date: '2026-08-14', accounts: [a('1003050011', 0, 0)] };
+  const grp14 = { date: '2026-08-14', accounts: [a('100305', 70050, 70050), a('1003050000', 70050, 70050), a('1003050011', 0, 0)] };
+  const zero17 = { date: '2026-08-17', accounts: [a('1003050000', 70050, 70050)] };
+  const one17 = { date: '2026-08-17', accounts: [a('1003050011', 0, -36.58)] };
+  const grp17 = { date: '2026-08-17', accounts: [a('100305', 70050, 70013.42), a('1003050000', 70050, 70050), a('1003050011', 0, -36.58)] };
+  const all = [zero17, one17, grp17, zero14, one14, grp14];
+
+  eq('same-day statements are not compared with each other', checkCarryOver(all), []);
+  eq('…in whatever order the zips were opened', checkCarryOver([...all].reverse()), []);
+  eq('…or with only the group statement each day', checkCarryOver([grp14, grp17]), []);
+
+  // A real break across the two days is still caught, and named against the earlier DAY.
+  const late17 = { date: '2026-08-17', accounts: [a('1003050011', 25, -11.58)] };
+  eq('a real break across days is still caught, once',
+     checkCarryOver([zero14, one14, grp14, zero17, late17]),
+     [{ date: '2026-08-17', prevDate: '2026-08-14', no: '1003050011', beginning: 25, prevEnding: 0 }]);
+
+  // Two statements for the same day and account that disagree are a problem of their own.
+  const odd17 = { date: '2026-08-17', accounts: [a('1003050011', 0, -40)] };
+  eq('two statements for one day that disagree are flagged as such',
+     checkCarryOver([grp14, one17, odd17]),
+     [{ date: '2026-08-17', no: '1003050011', sameDay: true, beginning: 0, ending: -40, otherBeginning: 0, otherEnding: -36.58 }]);
+
+  // The same zip opened twice is one statement, not a disagreement.
+  eq('one statement opened twice is not a disagreement', checkCarryOver([grp14, one17, one17]), []);
+
+  // A day with a gap: Aug 14 not opened, so Aug 17 is compared with nothing earlier.
+  eq('a first day has nothing to carry from', checkCarryOver([one17, grp17]), []);
+}
+
 // ---------- Open Position.csv ----------
 // Orient's header, exactly as the file has it; made-up lots. One row per lot, account numbers
 // with dashes, and an order id that Excel would turn into 8.0674E+12 if it ever got the chance.

@@ -4748,10 +4748,12 @@ function StatementsPanel() {
             {read.length > 1 && (
               <div className={carry.length ? "warn" : "ok"} style={{ fontSize: 12 }}>
                 {carry.length
-                  ? <>Day to day: {carry.length} opening balance{carry.length === 1 ? " doesn't" : "s don't"} match the previous statement's closing balance — usually a missing day in between.
-                      <ul style={{ margin: "4px 0 0 16px" }}>{carry.slice(0, 10).map((b) => <li key={`${b.date}|${b.no}`}>{fmtDate(b.date)}, account {b.no}: opens at {cents(b.beginning)}, previous statement ({fmtDate(b.prevDate)}) closed at {cents(b.prevEnding)}</li>)}</ul>
+                  ? <>Day to day: {carry.length} balance{carry.length === 1 ? " doesn't" : "s don't"} carry over — usually a missing day in between, or two statements for one day that disagree.
+                      <ul style={{ margin: "4px 0 0 16px" }}>{carry.slice(0, 10).map((b, i) => <li key={`${b.date}|${b.no}|${i}`}>{b.sameDay
+                        ? <>{fmtDate(b.date)}, account {b.no}: two statements for this day disagree — one opens at {cents(b.otherBeginning)} and closes at {cents(b.otherEnding)}, the other opens at {cents(b.beginning)} and closes at {cents(b.ending)}</>
+                        : <>{fmtDate(b.date)}, account {b.no}: opens at {cents(b.beginning)}, previous day ({fmtDate(b.prevDate)}) closed at {cents(b.prevEnding)}</>}</li>)}</ul>
                       {carry.length > 10 && <span className="faint"> …and {carry.length - 10} more</span>}</>
-                  : `Day to day: every opening balance matches the previous statement's closing balance, across ${read.length} statements.`}
+                  : `Day to day: every opening balance matches the previous day's closing balance, across ${read.length} statements.`}
               </div>
             )}
             {shown && (() => {

@@ -135,18 +135,42 @@ export function checkFamily(accounts) {
 }
 
 /*
- * Day to day: each statement's beginning balance should be the previous statement's ending
- * balance, account by account. days: [{ date: "YYYY-MM-DD", accounts }]. A break means a
- * missing statement in between, or something moved that the statement didn't show.
+ * Day to day: each day's beginning balance should be the previous day's ending balance, account
+ * by account. days: [{ date: "YYYY-MM-DD", accounts }]. A break means a missing statement in
+ * between, or something moved that the statement didn't show.
+ *
+ * Compared DAY to day, not statement to statement. Orient sends a zip per sub-account and one
+ * for the group, all dated the same day and holding the same sub-account, so "the statement
+ * before this one" was often the same day — whose closing balance is not this one's opening, and
+ * the check cried "missing day" over two statements that agreed. Worse, when the statement just
+ * before didn't hold the account at all, a real break across days went unchecked.
+ *
+ * So each day is first reduced to one balance per account, then each account is compared with
+ * the latest earlier day that has it. Two statements for one day and account that disagree are
+ * reported as that ({ sameDay: true }) — they should be the same figures from two files.
  */
 export function checkCarryOver(days) {
-  const sorted = [...days].filter((d) => d.date && d.accounts?.length).sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map();
   const breaks = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = new Map(sorted[i - 1].accounts.map((a) => [a.no, a]));
-    for (const a of sorted[i].accounts) {
-      const p = prev.get(a.no);
-      if (p && !near(a.beginning, p.ending)) breaks.push({ date: sorted[i].date, prevDate: sorted[i - 1].date, no: a.no, beginning: a.beginning, prevEnding: p.ending });
+  for (const d of days) {
+    if (!d.date || !d.accounts?.length) continue;
+    if (!byDate.has(d.date)) byDate.set(d.date, new Map());
+    const day = byDate.get(d.date);
+    for (const a of d.accounts) {
+      const seen = day.get(a.no);
+      if (!seen) { day.set(a.no, a); continue; }
+      if (!near(seen.beginning, a.beginning) || !near(seen.ending, a.ending)) {
+        breaks.push({ date: d.date, no: a.no, sameDay: true, beginning: a.beginning, ending: a.ending, otherBeginning: seen.beginning, otherEnding: seen.ending });
+      }
+    }
+  }
+  const dates = [...byDate.keys()].sort();
+  for (let i = 1; i < dates.length; i++) {
+    for (const [no, a] of byDate.get(dates[i])) {
+      const j = dates.slice(0, i).findLastIndex((dt) => byDate.get(dt).has(no));
+      if (j < 0) continue;
+      const p = byDate.get(dates[j]).get(no);
+      if (!near(a.beginning, p.ending)) breaks.push({ date: dates[i], prevDate: dates[j], no, beginning: a.beginning, prevEnding: p.ending });
     }
   }
   return breaks;
