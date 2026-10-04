@@ -48,7 +48,7 @@ is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day, 5% 
 is('7 Aug: everything, and go flat', ids('2026-08-07'), ['margin', 'bookloss', 'day', 'ddflat', 'call']);
 const d6 = r.days[3].checks;
 is('each replay day carries every rule\'s figure and its limit', [d6.bankroll, d6.day.value, d6.day.limit, d6.open.value, d6.open.limit, d6.adds.count, d6.adds.limit], [100000, -5500, -4000, -9000, -6000, 2, 500]);
-is('…and one line of what to do', [r.days[3].todo, r.days[4].todo], ['Stop adding to losers · No new trades today · Halve the book · Cut $28,650 of margin (or add $95,500)', 'Go flat — 16.4% below the peak']);
+is('…and one line of what to do', [r.days[3].todo, r.days[4].todo], ['Stop adding to losers · No new trades today · Halve the book · Cut $28,619 of margin (or add $95,300)', 'Go flat — 16.4% below the peak']);
 is('the replay as CSV, one row per close', [replayCsv(r).split('\n').length, replayCsv(r).split('\n')[0].split(',')[5]], [7, 'Day limit']);
 is('10 Aug: a deposit after the call is flagged', r.days[5].flags.map((x) => x.id).includes('call'), true);
 is('the first day each rule would have fired', r.first, { margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddwarn: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
@@ -58,10 +58,10 @@ is('going flat on 7 Aug would have kept 7k of what followed', r.flat, { date: '2
 const acc = (o) => ({ closes: closes.slice(0, 3), equityNow: 110000, tne: 110000, im: 22000, todayPnl: 0, rows: [], allFills: [], fillsToday: [], expiries: new Map(), today: '2026-08-05', imPer: { 'Inter-Product': 2000, Crack: 5000, days: 9 }, ...o });
 const st = (res, id) => res.rules.find((x) => x.id === id).status;
 let res = checkRules(acc({}));
-is('margin 20%: fine, with room to add worth 11k of margin', [st(res, 'margin'), res.room], ['ok', 11000]);
+is('TNE / IM 500%: fine, with room to add about 11k of margin before 333%', [st(res, 'margin'), Math.round(res.room)], ['ok', 11033]);
 is('…shown as lots of each kind of spread', res.roomLots, { 'Inter-Product': 5, Crack: 2 });
-is('margin 40%: no new positions', st(checkRules(acc({ im: 44000 })), 'margin'), 'watch');
-is('margin 50%: cut back to 30%', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much (or $73,333 more equity to hold this size)');
+is('TNE / IM 250% (under 333%): no new positions', st(checkRules(acc({ im: 44000 })), 'margin'), 'watch');
+is('TNE / IM 200% (under 222%): cut back to 333%', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to TNE / IM 333% — $21,967 of margin too much (or $73,150 more equity to hold this size)');
 const live = checkRules(acc({ allFills: crack.slice(0, 4), fillsToday: crack.slice(2, 4), today: '2026-08-06' }));
 is('adding to a loser today: cut', st(live, 'adds'), 'cut');
 is('one position down over 3% of bankroll: close it', st(checkRules(acc({ rows: [{ product: 'Oct26 HO-CL Crack', lots: -3, upnl: -3500 }] })), 'posloss'), 'cut');
@@ -75,16 +75,16 @@ is('an outright in a leg of a held spread: cut; one on its own: watch', [
   st(checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 5, upnl: 0 }, { product: 'CL Nov26', lots: -1, upnl: 0 }] })), 'legged'),
   st(checkRules(acc({ rows: [{ product: 'CL Dec26', lots: 2, upnl: 0 }] })), 'legged')], ['cut', 'watch']);
 is('a leg expiring within 5 trading days: roll or close', st(checkRules(acc({ rows: [{ product: 'CL Dec26 - BZ Dec26 Inter-Product', lots: 2, upnl: 0 }], expiries: new Map([['BZ|202612', '2026-08-10']]) })), 'expiry'), 'cut');
-is('an empty limit box falls back to the default', checkRules(acc({ im: 44000 }), { marginPct: '' }).rules.find((x) => x.id === 'margin').threshold, '≤ 30% of equity');
+is('an empty limit box falls back to the default', checkRules(acc({ im: 44000 }), { ratioPct: '' }).rules.find((x) => x.id === 'margin').threshold, '≥ 333% to add · ≥ 222% to hold');
 // ---------- what it would take to hold the size ----------
 // 48,135 of margin on 45,420 of equity (31 Aug): at a 30% cap it needs 160,450 of equity.
 is('funding: equity to hold this size at the cap, and to cover the margin', fundingFor(48135, 45420, 30), { needAtCap: 160450, toCap: 115030, toCall: 2715 });
 is('…and to reach a 200% TNE / IM minimum: margin × 2 less equity', fundingFor(48135, 45420, 30, 200).toMin, 50850);
 is('within the cap: nothing to add', fundingFor(10000, 50000, 30), { needAtCap: 33333.33, toCap: 0, toCall: 0 });
-is('margin 50%: cut, or add the equity — both in dollars', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much (or $73,333 more equity to hold this size)');
-is('the replay carries it per day', [r.days[4].checks.margin.over, r.days[4].checks.margin.toCap, r.days[4].checks.margin.toCall], [67400, 224666.67, 3000]);
+is('margin 50%: cut, or add the equity — both in dollars', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to TNE / IM 333% — $21,967 of margin too much (or $73,150 more equity to hold this size)');
+is('the replay carries it per day', [r.days[4].checks.margin.over, r.days[4].checks.margin.toCap, r.days[4].checks.margin.toCall], [67372.37, 224350, 3000]);
 is('trading days skip weekends', [tradingDaysBetween('2026-10-06', '2026-10-09'), tradingDaysBetween('2026-10-09', '2026-10-12')], [3, 1]);
-is('the defaults', [RISK_DEFAULTS.marginPct, RISK_DEFAULTS.posLossPct, RISK_DEFAULTS.bookLossPct, RISK_DEFAULTS.dayLossPct, RISK_DEFAULTS.ddHalfPct, RISK_DEFAULTS.ddFlatPct], [30, 3, 6, 4, 10, 15]);
+is('the defaults', [RISK_DEFAULTS.ratioPct, RISK_DEFAULTS.posLossPct, RISK_DEFAULTS.bookLossPct, RISK_DEFAULTS.dayLossPct, RISK_DEFAULTS.ddHalfPct, RISK_DEFAULTS.ddFlatPct], [333, 3, 6, 4, 10, 15]);
 
 // ---------- VaR, the level, and each position's exit ----------
 const pos = checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 2, size: 1000, avg: -8, upnl: -1000 }, { product: 'Oct26 HO-CL Crack', lots: -1, size: 1000, avg: 90, upnl: -2600 }] })).positions;
@@ -99,6 +99,8 @@ const bud = checkRules(acc({ closes: closes.slice(0, 4), equityNow: 104500, toda
 is('5% below the peak is caution', [bud.rules.find((x) => x.id === 'dd').status, +bud.budget.ddPct.toFixed(1)], ['watch', 5]);
 is('how much more can go before half size and before flat, and today\'s room', [bud.budget.toHalf, bud.budget.toFlat, bud.budget.today], [5500, 11000, 2500]);
 is('the replay warns at 5% too', replay(closes.slice(0, 4), []).days[3].flags.map((x) => x.id).includes('ddwarn'), true);
+
+is('spread names shortened, as TT and as paired from Orient\'s legs', [shortName('CL Nov26 - BZ Nov26 Inter-Product'), shortName('CL–BZ Nov26 Inter-Product'), shortName('Oct26 HO-CL Crack')], ['CL–BZ Nov26', 'CL–BZ Nov26', 'Oct26 HO-CL Crack']);
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
