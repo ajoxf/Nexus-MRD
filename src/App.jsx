@@ -5689,7 +5689,9 @@ function analyse(closed) {
     topLosses: [...t].filter((x) => x.pnl < 0).sort((a, b) => a.pnl - b.pnl).slice(0, 5),
     curve, peak, maxDD, ddAt, winStreak, lossStreak,
     byProduct: group((x) => x.product),
-    byMonth: group((x) => new Date(x.closeTs).toISOString().slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
+    // The local month, the same calendar as Daily P&L and the Closed filter: a trade closed late on
+    // the 31st in UTC is the 1st where the trader sits, and the month must agree with the day.
+    byMonth: group((x) => dayKey(x.closeTs).slice(0, 7)).sort((a, b) => a.key.localeCompare(b.key)),
     lots: sum(t, (x) => x.qty),
     medianHours: median(held),
   };
