@@ -144,7 +144,7 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
    * cap, and — the bare minimum — to cover the margin itself (a call clears at excess ≥ 0).
    * Shown next to the cut so both ways back are in dollars; the rules still say cut, not fund.
    */
-  const funding = fundingFor(acc.im, acc.tne, L.marginPct);
+  const funding = fundingFor(acc.im, acc.tne, L.marginPct, acc.minRatio);
   add("margin", "Size: margin ÷ equity", `≤ ${L.marginPct}% of equity`, isFinite(marginPct) ? `${pct(marginPct)} (${usd(acc.im)} of ${usd(acc.tne)})` : "margin with no equity",
     marginPct > L.marginPct * 1.5 ? "cut" : marginPct > L.marginPct ? "watch" : "ok",
     marginPct > L.marginPct * 1.5 ? `Cut back to ${L.marginPct}% — ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin too much (or ${usd(funding.toCap)} more equity to hold this size)`
@@ -299,7 +299,7 @@ function levelOnly(rules) {
  * Returns { days: [{ date, equity, perf, day, marginPct, upl, excess, ddPct, flags: [{ id, level, text }] }],
  *           first: { id → date }, flat: { date, perf, endPerf, saved } | null }.
  */
-export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 1000) {
+export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 1000, minRatio = null) {
   const L = { ...RISK_DEFAULTS, ...cleanLimits(limits) };
   const dds = drawdowns(closes);
   const bankAt = (date) => bankrollFor(closes, date)?.amount || 0;
@@ -333,7 +333,7 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     const checks = {
       bankroll: B,
       margin: { value: marginPct, limit: L.marginPct, cutAt: L.marginPct * 1.5, status: st(marginPct > L.marginPct * 1.5, marginPct > L.marginPct),
-        over: +Math.max(0, c.im - c.equity * L.marginPct / 100).toFixed(2), ...fundingFor(c.im, c.equity, L.marginPct) },
+        over: +Math.max(0, c.im - c.equity * L.marginPct / 100).toFixed(2), ...fundingFor(c.im, c.equity, L.marginPct, minRatio) },
       day: { value: +day.toFixed(2), limit: +(-dayLimit).toFixed(2), status: st(B > 0 && day < -dayLimit, B > 0 && day < -dayLimit * 0.75) },
       open: { value: c.upl, limit: +(-openLimit).toFixed(2), status: st(B > 0 && c.upl < -openLimit, B > 0 && c.upl < -openLimit * 0.75) },
       dd: { value: d.ddPct, amount: d.dd, warn: L.ddWarnPct, half: L.ddHalfPct, flat: L.ddFlatPct,
@@ -385,14 +385,14 @@ export function tradingDaysBetween(from, to) {
 
 // The replay as CSV: one row per close, every rule's figure next to its limit.
 export function replayCsv(rp) {
-  const head = ["Close", "Equity", "Bankroll", "Trading P/L to date", "Day", "Day limit", "Margin % of equity", "Margin cap %", "Margin over the cap", "Add to hold size at cap", "Add to cover margin", "Open P/L", "Open loss limit",
+  const head = ["Close", "Equity", "Bankroll", "Trading P/L to date", "Day", "Day limit", "Margin % of equity", "Margin cap %", "Margin over the cap", "Add to hold size at cap", "Add to reach minimum TNE/IM", "Add to cover margin", "Open P/L", "Open loss limit",
     "Below peak %", "Below peak $", "Caution %", "Half size %", "Go flat %", "Adds to losers", "Biggest add loss", "Add threshold",
     "Margin excess", "Deposit", "Level", "What to do"];
   const r2 = (x) => (x === null || x === undefined || !isFinite(x) ? "" : (+x).toFixed(2));
   const q = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
   const rows = rp.days.map((d) => {
     const k = d.checks;
-    return [d.date, r2(d.equity), r2(k.bankroll), r2(d.perf), r2(d.day), r2(k.day.limit), r2(k.margin.value), r2(k.margin.limit), r2(k.margin.over), r2(k.margin.toCap), r2(k.margin.toCall), r2(d.upl), r2(k.open.limit),
+    return [d.date, r2(d.equity), r2(k.bankroll), r2(d.perf), r2(d.day), r2(k.day.limit), r2(k.margin.value), r2(k.margin.limit), r2(k.margin.over), r2(k.margin.toCap), r2(k.margin.toMin), r2(k.margin.toCall), r2(d.upl), r2(k.open.limit),
       r2(k.dd.value), r2(k.dd.amount), k.dd.warn, k.dd.half, k.dd.flat, k.adds.count, r2(k.adds.maxLoss), r2(k.adds.limit),
       r2(k.excess.value), r2(k.excess.deposit), d.level, q(d.todo)].join(",");
   });
@@ -403,7 +403,10 @@ export function replayCsv(rp) {
  * Equity needed to carry `im` of margin: at the cap (margin = cap% of equity) and at the bare
  * minimum (equity = margin, excess 0). Returns what would have to be added to `equity`.
  */
-export function fundingFor(im, equity, capPct) {
+export function fundingFor(im, equity, capPct, minRatio = null) {
   const atCap = capPct > 0 ? im / (capPct / 100) : Infinity;
-  return { needAtCap: +atCap.toFixed(2), toCap: +Math.max(0, atCap - equity).toFixed(2), toCall: +Math.max(0, im - equity).toFixed(2) };
+  const out = { needAtCap: +atCap.toFixed(2), toCap: +Math.max(0, atCap - equity).toFixed(2), toCall: +Math.max(0, im - equity).toFixed(2) };
+  // The trader's own minimum TNE / IM (e.g. 200%): equity = margin × ratio.
+  if (minRatio > 0) out.toMin = +Math.max(0, im * minRatio / 100 - equity).toFixed(2);
+  return out;
 }

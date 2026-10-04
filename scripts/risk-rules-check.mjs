@@ -79,6 +79,7 @@ is('an empty limit box falls back to the default', checkRules(acc({ im: 44000 })
 // ---------- what it would take to hold the size ----------
 // 48,135 of margin on 45,420 of equity (31 Aug): at a 30% cap it needs 160,450 of equity.
 is('funding: equity to hold this size at the cap, and to cover the margin', fundingFor(48135, 45420, 30), { needAtCap: 160450, toCap: 115030, toCall: 2715 });
+is('…and to reach a 200% TNE / IM minimum: margin × 2 less equity', fundingFor(48135, 45420, 30, 200).toMin, 50850);
 is('within the cap: nothing to add', fundingFor(10000, 50000, 30), { needAtCap: 33333.33, toCap: 0, toCall: 0 });
 is('margin 50%: cut, or add the equity — both in dollars', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much (or $73,333 more equity to hold this size)');
 is('the replay carries it per day', [r.days[4].checks.margin.over, r.days[4].checks.margin.toCap, r.days[4].checks.margin.toCall], [67400, 224666.67, 3000]);
