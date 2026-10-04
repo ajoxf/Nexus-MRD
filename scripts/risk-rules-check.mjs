@@ -1,4 +1,4 @@
-import { bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
+import { fundingFor, replayCsv, shortName, bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
 
 /*
  * The risk guardrails, worked by hand on a made-up account shaped like a real run: a good start,
@@ -46,6 +46,10 @@ const ids = (date) => r.days.find((d) => d.date === date).flags.map((x) => x.id)
 is('5 Aug: margin 45% of equity — no new positions', ids('2026-08-05'), ['margin']);
 is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day, 5% off the peak', ids('2026-08-06'), ['margin', 'adds', 'bookloss', 'day', 'ddwarn']);
 is('7 Aug: everything, and go flat', ids('2026-08-07'), ['margin', 'bookloss', 'day', 'ddflat', 'call']);
+const d6 = r.days[3].checks;
+is('each replay day carries every rule\'s figure and its limit', [d6.bankroll, d6.day.value, d6.day.limit, d6.open.value, d6.open.limit, d6.adds.count, d6.adds.limit], [100000, -5500, -4000, -9000, -6000, 2, 500]);
+is('…and one line of what to do', [r.days[3].todo, r.days[4].todo], ['Stop adding to losers · No new trades today · Halve the book · Cut $28,650 of margin (or add $95,500)', 'Go flat — 16.4% below the peak']);
+is('the replay as CSV, one row per close', [replayCsv(r).split('\n').length, replayCsv(r).split('\n')[0].split(',')[5]], [7, 'Day limit']);
 is('10 Aug: a deposit after the call is flagged', r.days[5].flags.map((x) => x.id).includes('call'), true);
 is('the first day each rule would have fired', r.first, { margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddwarn: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
 is('going flat on 7 Aug would have kept 7k of what followed', r.flat, { date: '2026-08-07', perf: -8000, endPerf: -15000, saved: 7000 });
@@ -57,7 +61,7 @@ let res = checkRules(acc({}));
 is('margin 20%: fine, with room to add worth 11k of margin', [st(res, 'margin'), res.room], ['ok', 11000]);
 is('…shown as lots of each kind of spread', res.roomLots, { 'Inter-Product': 5, Crack: 2 });
 is('margin 40%: no new positions', st(checkRules(acc({ im: 44000 })), 'margin'), 'watch');
-is('margin 50%: cut back to 30%', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much');
+is('margin 50%: cut back to 30%', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much (or $73,333 more equity to hold this size)');
 const live = checkRules(acc({ allFills: crack.slice(0, 4), fillsToday: crack.slice(2, 4), today: '2026-08-06' }));
 is('adding to a loser today: cut', st(live, 'adds'), 'cut');
 is('one position down over 3% of bankroll: close it', st(checkRules(acc({ rows: [{ product: 'Oct26 HO-CL Crack', lots: -3, upnl: -3500 }] })), 'posloss'), 'cut');
@@ -72,20 +76,17 @@ is('an outright in a leg of a held spread: cut; one on its own: watch', [
   st(checkRules(acc({ rows: [{ product: 'CL Dec26', lots: 2, upnl: 0 }] })), 'legged')], ['cut', 'watch']);
 is('a leg expiring within 5 trading days: roll or close', st(checkRules(acc({ rows: [{ product: 'CL Dec26 - BZ Dec26 Inter-Product', lots: 2, upnl: 0 }], expiries: new Map([['BZ|202612', '2026-08-10']]) })), 'expiry'), 'cut');
 is('an empty limit box falls back to the default', checkRules(acc({ im: 44000 }), { marginPct: '' }).rules.find((x) => x.id === 'margin').threshold, '≤ 30% of equity');
+// ---------- what it would take to hold the size ----------
+// 48,135 of margin on 45,420 of equity (31 Aug): at a 30% cap it needs 160,450 of equity.
+is('funding: equity to hold this size at the cap, and to cover the margin', fundingFor(48135, 45420, 30), { needAtCap: 160450, toCap: 115030, toCall: 2715 });
+is('…and to reach a 200% TNE / IM minimum: margin × 2 less equity', fundingFor(48135, 45420, 30, 200).toMin, 50850);
+is('within the cap: nothing to add', fundingFor(10000, 50000, 30), { needAtCap: 33333.33, toCap: 0, toCall: 0 });
+is('margin 50%: cut, or add the equity — both in dollars', checkRules(acc({ im: 55000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to 30% — $22,000 of margin too much (or $73,333 more equity to hold this size)');
+is('the replay carries it per day', [r.days[4].checks.margin.over, r.days[4].checks.margin.toCap, r.days[4].checks.margin.toCall], [67400, 224666.67, 3000]);
 is('trading days skip weekends', [tradingDaysBetween('2026-10-06', '2026-10-09'), tradingDaysBetween('2026-10-09', '2026-10-12')], [3, 1]);
 is('the defaults', [RISK_DEFAULTS.marginPct, RISK_DEFAULTS.posLossPct, RISK_DEFAULTS.bookLossPct, RISK_DEFAULTS.dayLossPct, RISK_DEFAULTS.ddHalfPct, RISK_DEFAULTS.ddFlatPct], [30, 3, 6, 4, 10, 15]);
 
 // ---------- VaR, the level, and each position's exit ----------
-const withVar = (v99) => acc({ var: { method: 'margin', var99: v99, var95: v99 * 0.7, byPosition: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', var99: v99 }] } });
-is('VaR limit 4% of a 100k bankroll; 3k is 75%: fine', [checkRules(withVar(3000)).rules[0].status, Math.round(checkRules(withVar(3000)).varUsed)], ['ok', 75]);
-is('VaR at 80% of the limit: no new risk, and the level says caution', [checkRules(withVar(3520)).rules[0].status, checkRules(withVar(3520)).level.title], ['watch', 'Caution — no new positions']);
-is('VaR past the limit: cut the excess', checkRules(withVar(5000)).rules[0].action, 'Cut $1,000 of VaR today, largest position first');
-is('VaR past 125% of the limit: go flat', checkRules(withVar(6000)).level.level, 'flat');
-const cards = checkRules(acc({ im: 44000, todayPnl: -4500, var: { method: 'margin', var99: 6000, var95: 4000, byPosition: [] } })).rules;
-const cd = (id) => { const c = cards.find((x) => x.id === id).card; return [Math.round(c.value), Math.round(c.limit), Math.round(c.used)]; };
-is('every rule carries its numbers for a card: now, limit, % used', [cd('var'), cd('margin'), cd('day')], [[6000, 4000, 150], [40, 30, 133], [4500, 4000, 113]]);
-is('every warning is listed, worst first, not only the worst level', checkRules(acc({ im: 44000, todayPnl: -4500, var: { method: 'margin', var99: 6000, var95: 4000, byPosition: [] } })).level.all.map((x) => x.status), ['flat', 'cut', 'watch']);
-is('the method is said', checkRules(withVar(3000)).rules[0].now, "$3,000 · 75% of the limit (estimated from Orient's margin)");
 const pos = checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 2, size: 1000, avg: -8, upnl: -1000 }, { product: 'Oct26 HO-CL Crack', lots: -1, size: 1000, avg: 90, upnl: -2600 }] })).positions;
 // bankroll 100k: 3% = 3,000. Long 2 at -8: exit 3,000 / 2,000 = 1.50 lower; short 1 at 90: 3.00 higher.
 is('each position\'s exit: where its loss reaches 3% of bankroll', pos.map((p) => [p.exit, p.status]), [[-9.5, 'ok'], [93, 'watch']]);
