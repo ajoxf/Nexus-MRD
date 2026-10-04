@@ -137,7 +137,7 @@ export function buildFeed(days, group) {
     cash,
     sums,
     // Each day's close, for the month's bankroll and drawdown; each day's settlements, for VaR.
-    closes: perDay.map((d) => ({ date: d.date, equity: d.fig.equity || 0, tne: d.fig.tne || 0, cash: d.fig.cashAdj || 0 })),
+    closes: perDay.map((d) => ({ date: d.date, equity: d.fig.equity || 0, tne: d.fig.tne || 0, cash: d.fig.cashAdj || 0, im: d.fig.im || 0, upl: d.fig.upl || 0, excess: d.fig.excess || 0 })),
     settleDays: perDay.filter((d) => d.hasLots).map((d) => ({ date: d.date, lots: d.lots })),
     imPer: learnMargin(perDay.filter((d) => d.hasLots)),
     days: perDay.length,

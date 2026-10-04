@@ -3,8 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
-import { historicalVar, addSettles } from "./lib/var.js";
-import { bankrollFor, checkRules, RISK_DEFAULTS } from "./lib/riskRules.js";
+import { checkRules, replay, RISK_DEFAULTS } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
 import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
@@ -2903,81 +2902,59 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 }
 
 
-// ---------- Value at Risk and the cut rules (accounts on the broker's statements) ----------
+// ---------- Risk guardrails (accounts on the broker's statements) ----------
 const RISK_FIELDS = [
-  ["varPct", "VaR limit, % of bankroll"], ["watchPct", "Watch above, % of limit used"], ["hardPct", "Cut now above, % of limit used"],
-  ["dailyLossX", "Daily loss limit, × VaR limit"], ["monthDdPct", "Drawdown: half size, %"], ["hardStopPct", "Drawdown: go flat, %"],
-  ["noNewRatio", "TNE / IM: no new below, %"], ["cutRatio", "TNE / IM: cut below, %"], ["concentrationPct", "One position max, % of limit"],
-  ["expiryDays", "Out before expiry, trading days"],
+  ["marginPct", "Margin cap, % of equity"], ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
+  ["dayLossPct", "Day's loss, % of bankroll"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
+  ["addLossPct", "Adding to a loser: counts when it's down over, % of bankroll"], ["expiryDays", "Out before expiry, trading days"],
 ];
 const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut: ["pill bad", "CUT"], na: ["pill dim", "—"] };
+const RULE_NAMES = { margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
 
-function VarPanel({ pf, settings, setSettings, view }) {
+function GuardPanel({ pf, settings, setSettings, view, fills }) {
   const [showLimits, setShowLimits] = useState(false);
-  const [showPos, setShowPos] = useState(false);
+  const [showReplay, setShowReplay] = useState(false);
   const limits = { ...RISK_DEFAULTS, ...(settings.risk || {}) };
   const setLimit = (k, v) => setSettings((s) => ({ ...s, risk: { ...(s.risk || {}), [k]: v === "" ? "" : +v } }));
   const today = new Date().toISOString().slice(0, 10);
   const accts = pf.accounts.filter((a) => a.fromStatement && (view === "all" || a.id === view));
   const others = pf.accounts.filter((a) => !a.fromStatement && (view === "all" || a.id === view));
-  const day = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  const day = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
   return (
     <section className="panel">
-      <div className="ph"><h2>Value at Risk &amp; cut rules<span className="dim">What an ordinary bad day costs today's book, and when it must be cut</span></h2>
+      <div className="ph"><h2>Risk guardrails<span className="dim">Size, losers and losses — checked on your fills and Orient's statements</span></h2>
         <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setShowLimits((x) => !x)}>Your limits {showLimits ? "▾" : "▸"}</button></div>
       <div className="pb">
         {showLimits && (
-          <div className="fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", alignItems: "end", marginBottom: 12 }}>
+          <div className="fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", alignItems: "end", marginBottom: 12 }}>
             {RISK_FIELDS.map(([k, label]) => (
               <F key={k} label={label}><input className="in" type="number" step="any" value={limits[k]} onChange={(e) => setLimit(k, e.target.value)} placeholder={String(RISK_DEFAULTS[k])} /></F>
             ))}
           </div>
         )}
-        {!accts.length && <div className="faint">Value at Risk runs on an account's daily statements. Upload them in the Statements tab.</div>}
+        {!accts.length && <div className="faint">The guardrails run on an account's daily statements. Upload them in the Statements tab.</div>}
         {accts.map((a) => {
           const fs = a.fromStatement;
-          const history = addSettles(new Map(), fs.settleDays || []);
-          const positions = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, size: r.size }));
-          const v = historicalVar(positions, history);
+          const br = settings.brokers.find((b) => b.id === a.id) || { products: {} };
+          const mine = fills.filter((f) => f.broker === a.id);
+          const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
+          const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl }));
           const expiries = new Map();
           for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
-          const bankroll = bankrollFor(fs.closes || [], today, fs.equity + fs.sinceClose);
-          const res = checkRules({ bankroll, varResult: v, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, positions, expiries, today }, limits);
+          const res = checkRules({
+            closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
+            allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer,
+          }, limits);
           const cuts = res.rules.filter((r) => r.status === "cut");
-          const after = (loss) => (a.IM > 0 && loss !== null ? `${((a.TNE - loss) / a.IM * 100).toFixed(0)}%` : "—");
+          const rp = replay(fs.closes || [], mine, limits, sizeOfFill);
+          const flagged = rp.days.filter((d) => d.flags.length);
           return (
             <div key={a.id} style={{ marginBottom: 16 }}>
-              <div style={{ marginBottom: 6 }}><b>{a.name}</b>{" "}
+              <div style={{ marginBottom: 6 }}><b>{a.name}</b>
                 {cuts.length ? <span className="bad"> · {cuts.length} rule{cuts.length === 1 ? "" : "s"} say cut</span> : res.rules.some((r) => r.status === "watch") ? <span className="warn"> · watch</span> : <span className="ok"> · within every rule</span>}
+                {res.bankroll && <span className="faint" style={{ fontSize: 11 }}> · bankroll {money(res.bankroll.amount)} ({res.bankroll.from === "previous month" ? `Orient's equity on ${day(res.bankroll.baseDate)}` : `first statement, ${day(res.bankroll.baseDate)}`}{res.bankroll.cash ? `, ${signed(res.bankroll.cash)} moved in/out since` : ""})</span>}
               </div>
-              <div className="tw">
-                <table>
-                  <thead><tr><th className="txt">Bankroll (start of month)</th><th>VaR limit</th><th>1-day 95% VaR</th><th>1-day 99% VaR</th><th>Worst day in the history</th><th>Limit used</th></tr></thead>
-                  <tbody><tr>
-                    <td className="txt"><b>{bankroll ? money(bankroll.amount) : "—"}</b>{bankroll && <div className="faint" style={{ fontSize: 10 }}>{bankroll.from === "previous month" ? `Orient's equity on ${day(bankroll.baseDate)}` : `first statement this month, ${day(bankroll.baseDate)}`}{bankroll.cash ? ` · ${signed(bankroll.cash)} moved in/out` : ""}</div>}</td>
-                    <td>{res.limit !== null ? money(res.limit) : "—"}<div className="faint" style={{ fontSize: 10 }}>{limits.varPct}% of bankroll</div></td>
-                    <td>{v.var95 !== null ? money(v.var95) : "—"}<div className="faint" style={{ fontSize: 10 }}>TNE / IM after: {after(v.var95)}</div></td>
-                    <td><b>{v.var99 !== null ? money(v.var99) : "—"}</b><div className="faint" style={{ fontSize: 10 }}>TNE / IM after: {after(v.var99)}</div></td>
-                    <td>{v.worst ? <span className={pc(v.worst.pnl)}>{signed(v.worst.pnl)}</span> : "—"}<div className="faint" style={{ fontSize: 10 }}>{v.worst ? day(v.worst.date) : ""}</div></td>
-                    <td><span className={STATUS_PILL[res.band][0]}>{res.utilisation !== null ? `${res.utilisation.toFixed(0)}%` : STATUS_PILL[res.band][1]}</span></td>
-                  </tr></tbody>
-                </table>
-              </div>
-              <div className="faint" style={{ fontSize: 11, margin: "4px 0 8px" }}>
-                {v.days ? `From ${v.days} days of settlement prices, ${day(v.from)} – ${day(v.to)}, every day replayed on today's positions.` : "No settlement prices yet for what is held."}
-                {v.tooShort && v.days > 0 && <span className="warn"> Too few days to rely on — about 250 are needed; Orient's statements add one each day.</span>}
-                {v.missing.length > 0 && <span className="warn"> No price history for {v.missing.join(", ")} — not counted.</span>}
-                {positions.length > 0 && v.byPosition.length > 0 && <> <button className="btn ghost" style={{ padding: "0 6px", fontSize: 11 }} onClick={() => setShowPos((x) => !x)}>By position {showPos ? "▾" : "▸"}</button></>}
-              </div>
-              {showPos && v.byPosition.length > 0 && (
-                <div className="tw" style={{ marginBottom: 8 }}>
-                  <table className="postable">
-                    <thead><tr><th className="txt">Position</th><th>Lots</th><th>Own 99% VaR</th><th>Its worst day</th></tr></thead>
-                    <tbody>{v.byPosition.map((p) => <tr key={p.product}><td className="txt">{p.product}</td><td>{p.lots > 0 ? `+${p.lots}` : p.lots}</td><td>{money(p.var99)}</td><td className={pc(p.worstDay)}>{signed(p.worstDay)}</td></tr>)}</tbody>
-                  </table>
-                </div>
-              )}
               <div className="tw">
                 <table>
                   <thead><tr><th className="txt">Rule</th><th className="txt">Limit</th><th className="txt">Now</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
@@ -2994,10 +2971,48 @@ function VarPanel({ pf, settings, setSettings, view }) {
                   </tbody>
                 </table>
               </div>
+              {res.roomLots && Object.keys(res.roomLots).length > 0 && (
+                <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                  Room under the {limits.marginPct}% margin cap: {money(res.room)} — about {Object.entries(res.roomLots).map(([k, n]) => `${n} ${k}`).join(" · ")} at the margin Orient has charged per spread.
+                </div>
+              )}
+
+              <div style={{ marginTop: 10 }}>
+                <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setShowReplay((x) => !x)}>
+                  Replay: these rules on your statements, {fs.closes?.length ? `${day(fs.closes[0].date)} – ${day(fs.closes[fs.closes.length - 1].date)}` : ""} {showReplay ? "▾" : "▸"}
+                </button>
+                {Object.keys(rp.first).length > 0 && (
+                  <span className="faint" style={{ fontSize: 11 }}> First warnings: {Object.entries(rp.first).sort((x, y) => x[1].localeCompare(y[1])).map(([id, d]) => `${RULE_NAMES[id] || id} ${day(d)}`).join(" · ")}
+                    {rp.flat && rp.flat.saved > 0 && <span className="warn"> · going flat on {day(rp.flat.date)} would have avoided {money(rp.flat.saved)} of losses that followed</span>}
+                  </span>
+                )}
+              </div>
+              {showReplay && (
+                <div className="tw" style={{ marginTop: 6 }}>
+                  <table className="postable">
+                    <thead><tr><th className="txt">Close</th><th>Equity</th><th>Trading P/L to date</th><th>Day</th><th>Margin ÷ equity</th><th>Open P/L</th><th>Below peak</th><th className="txt">What the rules would have said</th></tr></thead>
+                    <tbody>
+                      {rp.days.map((d) => (
+                        <tr key={d.date}>
+                          <td className="txt">{day(d.date)}</td>
+                          <td>{money(d.equity)}</td>
+                          <td className={pc(d.perf)}>{signed(d.perf)}</td>
+                          <td className={pc(d.day)}>{d.day ? signed(d.day) : ""}</td>
+                          <td className={d.marginPct > limits.marginPct ? "bad" : ""}>{isFinite(d.marginPct) ? `${d.marginPct.toFixed(0)}%` : "—"}</td>
+                          <td className={pc(d.upl)}>{d.upl ? signed(d.upl) : ""}</td>
+                          <td className={d.ddPct > limits.ddHalfPct ? "bad" : ""}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : ""}</td>
+                          <td className="txt" style={{ fontSize: 11 }}>{d.flags.map((f, i) => <div key={i} className={f.level === "cut" ? "bad" : "warn"}>{f.text}</div>)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Change "Your limits" to see when other thresholds would have fired.</div>
+                </div>
+              )}
             </div>
           );
         })}
-        {others.length > 0 && <div className="faint" style={{ fontSize: 11 }}>{others.map((a) => a.name).join(", ")}: no broker statements, so no VaR or cut rules yet.</div>}
+        {others.length > 0 && <div className="faint" style={{ fontSize: 11 }}>{others.map((a) => a.name).join(", ")}: no broker statements, so no guardrails yet.</div>}
       </div>
     </section>
   );
@@ -3059,7 +3074,7 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
 
   return (
     <>
-      <VarPanel pf={pf} settings={settings} setSettings={setSettings} view={view} />
+      <GuardPanel pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />
       <section className="panel">
         <div className="ph"><h2>Scenario settings</h2><span className="faint" style={{ fontSize: 11 }}>Every position is moved against you by its product's move</span></div>
         <div className="pb">
