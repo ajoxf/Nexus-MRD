@@ -20,7 +20,7 @@ import { instrumentOf } from "./brokerFeed.js";
  */
 
 export const RISK_DEFAULTS = {
-  marginPct: 30,      // initial margin ≤ this % of equity; above it no new positions, above 1.5× cut
+  ratioPct: 200,      // TNE / IM floor — the minimum in Settings is used when given; below it, cut back to it
   posLossPct: 3,      // one position's open loss over this % of bankroll: close it
   bookLossPct: 6,     // the book's open loss over this % of bankroll: halve it
   dayLossPct: 4,      // a day's loss over this % of bankroll: no new trades today
@@ -36,7 +36,9 @@ const pct = (x) => `${x.toFixed(0)}%`;
 const usd = (x) => `$${Math.round(Math.abs(x)).toLocaleString("en-US")}`;
 const sgn = (x) => `${x < 0 ? "−" : "+"}${usd(x)}`;
 // "CL Nov26 - BZ Nov26 Inter-Product" → "CL–BZ Nov26", for tiles; anything else as it is.
-export const shortName = (p) => String(p).replace(/^([A-Z]{1,3}) (\w{5}) - ([A-Z]{1,3}) \2 Inter-?Product$/i, "$1–$3 $2");
+export const shortName = (p) => String(p)
+  .replace(/^([A-Z]{1,3}) (\w{5}) - ([A-Z]{1,3}) \2 Inter-?Product$/i, "$1–$3 $2")   // TT's name
+  .replace(/^([A-Z]{1,3}–[A-Z]{1,3}) (\w{5}) Inter-?Product$/i, "$1 $2");          // as paired from Orient's legs
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const dmy = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || "") ? `${+d.slice(8)} ${MON[+d.slice(5, 7) - 1]}` : d);
 
@@ -130,6 +132,9 @@ export function addsToLosers(fills, { sizeOf = () => 1000, minLoss = 0 } = {}) {
  */
 export function checkRules(acc, limits = RISK_DEFAULTS) {
   const L = { ...RISK_DEFAULTS, ...cleanLimits(limits) };
+  // Sizing is set as TNE / IM (as on the top bar); the same limits as margin ÷ equity, for the arithmetic.
+  if (acc.minRatio > 0) L.ratioPct = acc.minRatio;
+  L.marginPct = 10000 / L.ratioPct;
   const br = bankrollFor(acc.closes, acc.today, acc.equityNow);
   const B = br?.amount || 0;
   const rules = [];
@@ -144,17 +149,18 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
    * cap, and — the bare minimum — to cover the margin itself (a call clears at excess ≥ 0).
    * Shown next to the cut so both ways back are in dollars; the rules still say cut, not fund.
    */
-  const funding = fundingFor(acc.im, acc.tne, L.marginPct, acc.minRatio);
-  add("margin", "Size: margin ÷ equity", `≤ ${L.marginPct}% of equity`, isFinite(marginPct) ? `${pct(marginPct)} (${usd(acc.im)} of ${usd(acc.tne)})` : "margin with no equity",
-    marginPct > L.marginPct * 1.5 ? "cut" : marginPct > L.marginPct ? "watch" : "ok",
-    marginPct > L.marginPct * 1.5 ? `Cut back to ${L.marginPct}% — ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin too much (or ${usd(funding.toCap)} more equity to hold this size)`
-      : marginPct > L.marginPct ? "No new positions until margin is back under the limit" : `Room to add ${usd(room)} of margin`);
+  const funding = fundingFor(acc.im, acc.tne, L.marginPct);
+  const ratio = acc.im > 0 ? acc.tne / acc.im * 100 : Infinity;
+  add("margin", "Size: TNE / IM", `≥ ${L.ratioPct}%`, isFinite(ratio) ? `${pct(ratio)} (${usd(acc.im)} margin on ${usd(acc.tne)})` : "no margin used",
+    marginPct > L.marginPct ? "cut" : "ok",
+    marginPct > L.marginPct ? `Cut back to TNE / IM ${L.ratioPct}% — ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin too much (or add ${usd(funding.toCap)})`
+      : `Room to add ${usd(room)} of margin`);
 
   // 2. Adding to a loser, in the fills since the last statement.
   const adds = addsToLosers(acc.allFills || [], { sizeOf: acc.sizeOf, minLoss: B * L.addLossPct / 100 }).filter((x) => (acc.fillsToday || []).some((f) => f.ts === x.ts && f.product === x.product));
-  add("adds", "No adding to a loser", `No fill that adds to a position already losing over ${usd(B * L.addLossPct / 100)}`,
-    adds.length ? adds.map((x) => `${x.side === "Buy" ? "bought" : "sold"} ${x.qty} ${x.product} at ${x.price} — ${x.held > 0 ? "long" : "short"} ${Math.abs(x.held)} from ${+x.avg.toFixed(4)}, ${usd(x.openLoss)} down`).join(" · ") : "none since the last statement",
-    adds.length ? "cut" : "ok", adds.length ? "Stop adding. Hold or cut what you have; don't average a loser" : "—");
+  add("adds", "No adding to a losing position", `Never add to a position that is already over ${usd(B * L.addLossPct / 100)} down`,
+    adds.length ? adds.map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${x.qty} more ${shortName(x.product)} at ${x.price} while it was ${usd(x.openLoss)} down`).join(" · ") : "none since the last statement",
+    adds.length ? "cut" : "ok", adds.length ? "Stop adding to it. Hold or cut what you have — don't average down" : "—");
 
   // 3. Open loss: each position, and the book.
   const posLimit = B * L.posLossPct / 100, bookLimit = B * L.bookLossPct / 100;
@@ -242,8 +248,8 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
    */
   const card = (id, c) => { const r = rules.find((x) => x.id === id); if (r) r.card = { ...c, used: c.used === undefined || c.used === null || !isFinite(c.used) ? null : c.used }; };
   const worstPos = (acc.rows || []).reduce((w, r) => (!w || r.upnl < w.upnl ? r : w), null);
-  card("margin", { value: isFinite(marginPct) ? marginPct : null, limit: L.marginPct, unit: "pct", used: marginPct / L.marginPct * 100, caption: funding.toCap > 0 ? `or add ${usd(funding.toCap)} to hold this size` : `${usd(acc.im)} margin on ${usd(acc.tne)} equity` });
-  card("adds", { value: adds.length, limit: 0, unit: "count", used: adds.length ? 200 : 0, caption: adds.length ? `${adds[adds.length - 1].product} at ${adds[adds.length - 1].price}, ${usd(adds[adds.length - 1].openLoss)} down` : "None since the last statement" });
+  card("margin", { value: isFinite(ratio) ? ratio : null, limit: L.ratioPct, limitText: `floor ${L.ratioPct}%`, unit: "pct", used: marginPct / L.marginPct * 100, caption: funding.toCap > 0 ? `or add ${usd(funding.toCap)} to hold this size` : `${usd(acc.im)} margin on ${usd(acc.tne)} equity` });
+  card("adds", { value: adds.length, limit: 0, unit: "count", used: adds.length ? 200 : 0, caption: adds.length ? `${shortName(adds[adds.length - 1].product)} while ${usd(adds[adds.length - 1].openLoss)} down` : "None since the last statement" });
   card("posloss", { value: worstPos && worstPos.upnl < 0 ? -worstPos.upnl : 0, limit: posLimit, unit: "usd", used: worstPos && posLimit > 0 ? Math.max(0, -worstPos.upnl) / posLimit * 100 : 0, caption: worstPos && worstPos.upnl < 0 ? `Worst: ${shortName(worstPos.product)}` : "No position losing" });
   card("bookloss", { value: Math.max(0, -book), limit: bookLimit, unit: "usd", used: bookLimit > 0 ? Math.max(0, -book) / bookLimit * 100 : 0, caption: `Open P/L ${sgn(book)}` });
   card("day", { value: Math.max(0, -(acc.todayPnl || 0)), limit: dayLimit, unit: "usd", used: dayLimit > 0 ? Math.max(0, -(acc.todayPnl || 0)) / dayLimit * 100 : 0, caption: budget ? (budget.today > 0 ? `${usd(budget.today)} of room left today` : "Today's limit passed") : `Since the last close ${sgn(acc.todayPnl || 0)}` });
@@ -255,8 +261,8 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   // A few words to act on, for the tile (the full sentence stays in `action`).
   const short = (id, text) => { const r = rules.find((x) => x.id === id); if (r && r.card && r.status !== "ok" && r.status !== "na") r.card.short = text; };
   const st = (id) => rules.find((x) => x.id === id)?.status;
-  short("margin", st("margin") === "cut" ? `Cut ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin` : "No new positions");
-  short("adds", "Stop adding");
+  short("margin", `Cut ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin`);
+  short("adds", "Stop adding to it");
   short("posloss", bad.length ? `Close ${bad.map((r) => shortName(r.product)).join(", ")}` : "Watch it");
   short("bookloss", st("bookloss") === "cut" ? "Halve the book" : "Watch it");
   short("day", st("day") === "cut" ? "No new trades today" : "Slow down");
@@ -301,6 +307,9 @@ function levelOnly(rules) {
  */
 export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 1000, minRatio = null) {
   const L = { ...RISK_DEFAULTS, ...cleanLimits(limits) };
+  // Sizing is set as TNE / IM (as on the top bar); the same limits as margin ÷ equity, for the arithmetic.
+  if (minRatio > 0) L.ratioPct = minRatio;
+  L.marginPct = 10000 / L.ratioPct;
   const dds = drawdowns(closes);
   const bankAt = (date) => bankrollFor(closes, date)?.amount || 0;
   const adds = addsToLosers(fills, { sizeOf, minLoss: (f) => bankAt(String(f.ts).slice(0, 10)) * L.addLossPct / 100 });
@@ -316,10 +325,10 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     const marginPct = c.equity > 0 ? c.im / c.equity * 100 : c.im > 0 ? Infinity : 0;
     const flags = [];
     const flag = (id, level, text) => { flags.push({ id, level, text }); if (!first[id]) first[id] = c.date; };
-    if (marginPct > L.marginPct * 1.5) flag("margin", "cut", `Margin ${pct(marginPct)} of equity — cut to ${L.marginPct}%`);
-    else if (marginPct > L.marginPct) flag("margin", "watch", `Margin ${pct(marginPct)} of equity — no new positions`);
+    const ratio = c.im > 0 ? c.equity / c.im * 100 : Infinity;
+    if (marginPct > L.marginPct) flag("margin", "cut", `TNE / IM ${pct(ratio)} — under ${L.ratioPct}%: cut back to it`);
     const todays = adds.filter((x) => String(x.ts).slice(0, 10) === c.date);
-    if (todays.length) flag("adds", "cut", `Added to a loser ${todays.length}×: ${[...new Set(todays.map((x) => x.product))].join(", ")} at ${todays.map((x) => x.price).join(", ")} (up to ${usd(Math.max(...todays.map((x) => x.openLoss)))} down)`);
+    if (todays.length) flag("adds", "cut", `Added to a losing position ${todays.length}×: ${[...new Set(todays.map((x) => x.product))].join(", ")} at ${todays.map((x) => x.price).join(", ")} (up to ${usd(Math.max(...todays.map((x) => x.openLoss)))} down)`);
     if (B > 0 && c.upl < -B * L.bookLossPct / 100) flag("bookloss", "cut", `Open loss ${usd(c.upl)} — over ${L.bookLossPct}% of bankroll: halve`);
     if (B > 0 && day < -B * L.dayLossPct / 100) flag("day", "cut", `Day ${sgn(day)} — over ${L.dayLossPct}% of bankroll: no new trades`);
     if (d.ddPct >= L.ddFlatPct) flag("ddflat", "cut", `${d.ddPct.toFixed(1)}% below the peak — go flat`);
@@ -332,21 +341,21 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     const dayLimit = B * L.dayLossPct / 100, openLimit = B * L.bookLossPct / 100, addLimit = B * L.addLossPct / 100;
     const checks = {
       bankroll: B,
-      margin: { value: marginPct, limit: L.marginPct, cutAt: L.marginPct * 1.5, status: st(marginPct > L.marginPct * 1.5, marginPct > L.marginPct),
-        over: +Math.max(0, c.im - c.equity * L.marginPct / 100).toFixed(2), ...fundingFor(c.im, c.equity, L.marginPct, minRatio) },
+      margin: { value: marginPct, ratio, limit: L.ratioPct, status: st(marginPct > L.marginPct, false),
+        over: +Math.max(0, c.im - c.equity * L.marginPct / 100).toFixed(2), ...fundingFor(c.im, c.equity, L.marginPct) },
       day: { value: +day.toFixed(2), limit: +(-dayLimit).toFixed(2), status: st(B > 0 && day < -dayLimit, B > 0 && day < -dayLimit * 0.75) },
       open: { value: c.upl, limit: +(-openLimit).toFixed(2), status: st(B > 0 && c.upl < -openLimit, B > 0 && c.upl < -openLimit * 0.75) },
       dd: { value: d.ddPct, amount: d.dd, warn: L.ddWarnPct, half: L.ddHalfPct, flat: L.ddFlatPct,
         status: d.ddPct >= L.ddFlatPct ? "flat" : d.ddPct >= L.ddHalfPct ? "cut" : d.ddPct >= L.ddWarnPct - 1e-9 ? "watch" : "ok" },
       adds: { count: todays.length, maxLoss: todays.length ? Math.max(...todays.map((x) => x.openLoss)) : 0, limit: +addLimit.toFixed(2),
-        list: todays.map((x) => ({ product: x.product, side: x.side, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
+        list: todays.map((x) => ({ product: x.product, side: x.side, qty: x.qty, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
       excess: { value: c.excess, deposit: c.cash > 0 ? c.cash : 0, status: c.excess < 0 || (callSeen && c.cash > 0 && c.excess >= 0) ? "cut" : "ok" },
     };
     const rank = { ok: 0, watch: 1, cut: 2, flat: 3 };
     const worst = Object.values(checks).filter((x) => x && x.status).reduce((w, x) => (rank[x.status] > rank[w] ? x.status : w), "ok");
     const flatWhy = checks.dd.status === "flat" ? `${d.ddPct.toFixed(1)}% below the peak` : "";
     const todo = worst === "flat" ? `Go flat — ${flatWhy}` : worst === "ok" ? "" : [
-      checks.adds.count && "Stop adding to losers",
+      checks.adds.count && "Stop adding to losing positions",
       checks.day.status === "cut" && "No new trades today",
       checks.open.status === "cut" && "Halve the book",
       checks.dd.status === "cut" && "Half size",
@@ -354,7 +363,7 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
       checks.excess.status === "cut" && (c.excess < 0 ? "Cut to meet the margin call" : "Don't fund a call — cut size"),
       worst === "watch" && "No new positions",
     ].filter(Boolean).join(" · ");
-    days.push({ date: c.date, equity: c.equity, perf: d.perf, day: +day.toFixed(2), marginPct, upl: c.upl, excess: c.excess, im: c.im, ddPct: d.ddPct, flags, checks, level: worst, todo });
+    days.push({ date: c.date, equity: c.equity, perf: d.perf, day: +day.toFixed(2), marginPct, ratio, upl: c.upl, excess: c.excess, im: c.im, ddPct: d.ddPct, flags, checks, level: worst, todo });
   });
   const flatDay = first.ddflat ? days.find((x) => x.date === first.ddflat) : null;
   const end = days[days.length - 1];
@@ -384,15 +393,15 @@ export function tradingDaysBetween(from, to) {
 }
 
 // The replay as CSV: one row per close, every rule's figure next to its limit.
-export function replayCsv(rp) {
-  const head = ["Close", "Equity", "Bankroll", "Trading P/L to date", "Day", "Day limit", "Margin % of equity", "Margin cap %", "Margin over the cap", "Add to hold size at cap", "Add to reach minimum TNE/IM", "Add to cover margin", "Open P/L", "Open loss limit",
+export function replayCsv(rp, positionsOn = null) {
+  const head = ["Close", ...(positionsOn ? ["Open positions"] : []), "Equity", "Bankroll", "Trading P/L to date", "Day", "Day limit", "TNE/IM %", "TNE/IM floor %", "Margin over the floor", "Add to reach the floor", "Add to cover margin", "Open P/L", "Open loss limit",
     "Below peak %", "Below peak $", "Caution %", "Half size %", "Go flat %", "Adds to losers", "Biggest add loss", "Add threshold",
     "Margin excess", "Deposit", "Level", "What to do"];
   const r2 = (x) => (x === null || x === undefined || !isFinite(x) ? "" : (+x).toFixed(2));
   const q = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
   const rows = rp.days.map((d) => {
     const k = d.checks;
-    return [d.date, r2(d.equity), r2(k.bankroll), r2(d.perf), r2(d.day), r2(k.day.limit), r2(k.margin.value), r2(k.margin.limit), r2(k.margin.over), r2(k.margin.toCap), r2(k.margin.toMin), r2(k.margin.toCall), r2(d.upl), r2(k.open.limit),
+    return [d.date, ...(positionsOn ? [q(positionsOn(d.date))] : []), r2(d.equity), r2(k.bankroll), r2(d.perf), r2(d.day), r2(k.day.limit), r2(k.margin.ratio), r2(k.margin.limit), r2(k.margin.over), r2(k.margin.toCap), r2(k.margin.toCall), r2(d.upl), r2(k.open.limit),
       r2(k.dd.value), r2(k.dd.amount), k.dd.warn, k.dd.half, k.dd.flat, k.adds.count, r2(k.adds.maxLoss), r2(k.adds.limit),
       r2(k.excess.value), r2(k.excess.deposit), d.level, q(d.todo)].join(",");
   });
