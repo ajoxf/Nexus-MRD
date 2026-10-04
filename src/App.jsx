@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
-import { db, isRemote, auth } from "./lib/db.js";
+import { db, isRemote, auth, isDemo, resetDemo } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
@@ -2500,7 +2500,9 @@ function Tracker({ user }) {
       </header>
 
       <main className="main">
-        {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
+        {isDemo
+          ? <div className="banner demo-banner">Demo account — an invented trader, with generated Orient statements and TT fills. Nothing here is real, and nothing you change leaves this browser. <button className="linklike" onClick={resetDemo}>Start the demo again</button></div>
+          : !isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
         {worst && worst.res.level.level !== "ok" && (tab !== "risk" || flashAt > 0) && (
           <div key={flashAt || "steady"} className={`banner${flashAt ? ` flash flash-${worst.res.level.level}` : ""}`} role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
             <b className={worst.res.level.level === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[worst.res.level.level]} {worst.a.name}: {worst.res.level.title}</b>
