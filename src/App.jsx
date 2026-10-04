@@ -395,6 +395,7 @@ const Icon = ({ d }) => (
 );
 const ICONS = {
   dash: <Icon d={<><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>} />,
+  risk: <Icon d={<><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z" /><path d="M12 8v5M12 16v.5" /></>} />,
   scen: <Icon d={<><path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 6-7" /><path d="M20 7v4h-4" /></>} />,
   fills: <Icon d={<><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="3.5" cy="6" r="1" /><circle cx="3.5" cy="12" r="1" /><circle cx="3.5" cy="18" r="1" /></>} />,
   closed: <Icon d={<><path d="M3 7h18v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" /><path d="M2 3h20v4H2zM10 12h4" /></>} />,
@@ -2392,7 +2393,12 @@ function Tracker({ user }) {
   const scaleMax = Math.max(pf.minR * 2, 3, isFinite(ratio) ? Math.min(ratio, pf.minR * 4) : 0);
   const pos = (r) => Math.min(100, Math.max(0, (r / scaleMax) * 100));
   const save = { saved: [isRemote ? "Saved" : "Saved locally", "var(--ok)"], saving: ["Saving…", "var(--warn)"], error: ["Save failed", "var(--bad)"] }[saveState];
-  const nav = [["dash", "Positions"], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["statements", "Statements"], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
+  // The risk level of each account on the statements: the Risk tab's marker and the banner.
+  // Not a hook: this runs after the loading returns above.
+  const risks = pf.accounts.filter((a) => a.fromStatement).map((a) => ({ a, ...riskOf(pf, settings, fills, a) }));
+  const worst = risks.reduce((w, r) => (!w || LEVEL_RANK[r.res.level.level] > LEVEL_RANK[w.res.level.level] ? r : w), null);
+  const riskBadge = worst && worst.res.level.level !== "ok" ? { watch: "!", cut: "!!", flat: "!!!" }[worst.res.level.level] : null;
+  const nav = [["dash", "Positions"], ["risk", "Risk", riskBadge], ["scen", "Scenarios"], ["fills", "Fills", fills.length], ["statements", "Statements"], ["closed", "Closed", pf.book.closed.length], ["analysis", "Analysis"], ["funds", "Funds"], ["settings", "Settings"]];
 
   return (
     <DirtyCtx.Provider value={dirtyApi}>
@@ -2480,7 +2486,15 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
+        {worst && worst.res.level.level !== "ok" && tab !== "risk" && (
+          <div className="banner" role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
+            <b className={worst.res.level.level === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[worst.res.level.level]} {worst.a.name}: {worst.res.level.title}</b>
+            {worst.res.budget && <span> · {worst.res.budget.ddPct.toFixed(1)}% below the peak{worst.res.budget.toFlat > 0 ? ` · ${money(worst.res.budget.toFlat)} more before go flat` : ""}</span>}
+            <span> · {worst.res.level.actions[0]}{worst.res.level.actions.length > 1 ? ` (+${worst.res.level.actions.length - 1} more)` : ""} · <u>Risk tab</u></span>
+          </div>
+        )}
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
+        {tab === "risk" && <GuardPanel pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "scen" && <ScenarioTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} setScen={setScen} setMark={setMark} />}
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "statements" && <StatementsPanel fills={fills} onChanged={reloadStatements} />}
@@ -2907,12 +2921,34 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 const RISK_FIELDS = [
   ["varPct", "VaR limit (1-day 99%), % of bankroll"], ["varWatchPct", "VaR: no new risk above, % of limit"], ["varHardPct", "VaR: go flat above, % of limit"],
   ["marginPct", "Margin cap, % of equity"], ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
-  ["dayLossPct", "Day's loss, % of bankroll"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
+  ["dayLossPct", "Day's loss, % of bankroll"], ["ddWarnPct", "Drawdown: caution, %"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
   ["addLossPct", "Adding to a loser: counts when it's down over, % of bankroll"], ["expiryDays", "Out before expiry, trading days"],
 ];
 const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut: ["pill bad", "CUT"], flat: ["pill bad", "GO FLAT"], na: ["pill dim", "—"] };
 const LEVEL_CLASS = { ok: "ok", watch: "warn", cut: "bad", flat: "bad" };
-const RULE_NAMES = { margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
+const RULE_NAMES = { ddwarn: "Drawdown: caution", margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
+
+/*
+ * The risk read-out for one account on the broker's statements: the rules now, the VaR, and the
+ * replay of past statements. Shared by the Risk tab, the banner and the tab marker so they agree.
+ */
+function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0, 10)) {
+  const fs = a.fromStatement;
+  const limits = { ...RISK_DEFAULTS, ...(settings.risk || {}) };
+  const br = settings.brokers.find((b) => b.id === a.id) || { products: {} };
+  const mine = fills.filter((f) => f.broker === a.id);
+  const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
+  const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl, size: r.size, avg: r.avg, mark: r.mark, im: r.im }));
+  const v = bookVar(rows, addSettles(new Map(), fs.settleDays || []), a.IM);
+  const expiries = new Map();
+  for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
+  const res = checkRules({
+    closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
+    allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer, var: v,
+  }, limits);
+  return { res, v, limits, rp: replay(fs.closes || [], mine, limits, sizeOfFill) };
+}
+const LEVEL_RANK = { ok: 0, watch: 1, cut: 2, flat: 3 };
 
 function GuardPanel({ pf, settings, setSettings, view, fills }) {
   const [showLimits, setShowLimits] = useState(false);
@@ -2926,7 +2962,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
 
   return (
     <section className="panel">
-      <div className="ph"><h2>Risk: VaR and rules<span className="dim">When positions are getting out of hand, and what to do — on your fills and Orient's statements</span></h2>
+      <div className="ph"><h2>Risk<span className="dim">When positions are getting out of hand, and what to do — on your fills and Orient's statements</span></h2>
         <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setShowLimits((x) => !x)}>Your limits {showLimits ? "▾" : "▸"}</button></div>
       <div className="pb">
         {showLimits && (
@@ -2939,18 +2975,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
         {!accts.length && <div className="faint">The guardrails run on an account's daily statements. Upload them in the Statements tab.</div>}
         {accts.map((a) => {
           const fs = a.fromStatement;
-          const br = settings.brokers.find((b) => b.id === a.id) || { products: {} };
-          const mine = fills.filter((f) => f.broker === a.id);
-          const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
-          const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl, size: r.size, avg: r.avg, mark: r.mark, im: r.im }));
-          const v = bookVar(rows, addSettles(new Map(), fs.settleDays || []), a.IM);
-          const expiries = new Map();
-          for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
-          const res = checkRules({
-            closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
-            allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer, var: v,
-          }, limits);
-          const rp = replay(fs.closes || [], mine, limits, sizeOfFill);
+          const { res, v, rp } = riskOf(pf, settings, fills, a);
           const flagged = rp.days.filter((d) => d.flags.length);
           return (
             <div key={a.id} style={{ marginBottom: 16 }}>
@@ -2962,6 +2987,23 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                 <b style={{ fontSize: 15 }}>{res.level.level === "ok" ? "🟢" : res.level.level === "watch" ? "🟠" : res.level.level === "cut" ? "🔴" : "⛔"} {res.level.title}</b>
                 {res.level.actions.length > 0 && <ul style={{ margin: "4px 0 0 18px", padding: 0, fontSize: 12 }}>{res.level.actions.map((x, i) => <li key={i}>{x}</li>)}</ul>}
               </div>
+
+              {res.budget && (
+                <div className="tw" style={{ marginBottom: 8 }}>
+                  <table>
+                    <thead><tr><th className="txt">Drawdown</th><th>Peak trading P/L</th><th>Now</th><th>Below the peak</th><th>More loss before caution ({limits.ddWarnPct}%)</th><th>…before half size ({limits.ddHalfPct}%)</th><th>…before go flat ({limits.ddFlatPct}%)</th><th>Today's loss room</th></tr></thead>
+                    <tbody><tr>
+                      <td className="txt"><b>From the peak</b><div className="faint" style={{ fontSize: 10 }}>{res.budget.peakDate === "now" ? "peak is today" : `peak on ${day(res.budget.peakDate)}`} · deposits taken out</div></td>
+                      <td className={pc(res.budget.peak)}>{signed(res.budget.peak)}</td>
+                      <td className={pc(res.budget.now)}>{signed(res.budget.now)}</td>
+                      <td className={res.budget.ddPct >= limits.ddHalfPct ? "bad" : res.budget.ddPct >= limits.ddWarnPct ? "warn" : ""}><b>{money(res.budget.dd)}</b> · {res.budget.ddPct.toFixed(1)}%</td>
+                      {[res.budget.toWarn, res.budget.toHalf, res.budget.toFlat, res.budget.today].map((x, i) => (
+                        <td key={i} className={x <= 0 ? "bad" : ""}>{x <= 0 ? <b>passed</b> : money(x)}</td>
+                      ))}
+                    </tr></tbody>
+                  </table>
+                </div>
+              )}
 
               <div className="tw">
                 <table>
@@ -3120,7 +3162,6 @@ function ScenarioTab({ pf, settings, setSettings, view, fills, setScen, setMark 
 
   return (
     <>
-      <GuardPanel pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />
       <section className="panel">
         <div className="ph"><h2>Scenario settings</h2><span className="faint" style={{ fontSize: 11 }}>Every position is moved against you by its product's move</span></div>
         <div className="pb">

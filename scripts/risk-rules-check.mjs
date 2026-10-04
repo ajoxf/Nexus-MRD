@@ -44,10 +44,10 @@ is('legs of a spread trade are not trades', addsToLosers([{ ...f('2026-08-05T09:
 const r = replay(closes, crack);
 const ids = (date) => r.days.find((d) => d.date === date).flags.map((x) => x.id);
 is('5 Aug: margin 45% of equity — no new positions', ids('2026-08-05'), ['margin']);
-is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day', ids('2026-08-06'), ['margin', 'adds', 'bookloss', 'day']);
+is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day, 5% off the peak', ids('2026-08-06'), ['margin', 'adds', 'bookloss', 'day', 'ddwarn']);
 is('7 Aug: everything, and go flat', ids('2026-08-07'), ['margin', 'bookloss', 'day', 'ddflat', 'call']);
 is('10 Aug: a deposit after the call is flagged', r.days[5].flags.map((x) => x.id).includes('call'), true);
-is('the first day each rule would have fired', r.first, { margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
+is('the first day each rule would have fired', r.first, { margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddwarn: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
 is('going flat on 7 Aug would have kept 7k of what followed', r.flat, { date: '2026-08-07', perf: -8000, endPerf: -15000, saved: 7000 });
 
 // ---------- the live check ----------
@@ -87,6 +87,13 @@ const pos = checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Produc
 is('each position\'s exit: where its loss reaches 3% of bankroll', pos.map((p) => [p.exit, p.status]), [[-9.5, 'ok'], [93, 'watch']]);
 is('a position on watch makes the headline caution, not normal', checkRules(acc({ rows: [{ product: 'Oct26 HO-CL Crack', lots: -1, size: 1000, avg: 90, upnl: -2600 }] })).level.actions, ["Oct26 HO-CL Crack: Exit at 93 if it gets there — don't add"]);
 is('…and what to do', pos.map((p) => p.action), ['Stop at -9.5', "Exit at 93 if it gets there — don't add"]);
+
+// ---------- the drawdown budget ----------
+// Peak trading P/L +10k on 5 Aug with 100k in: capital at the peak 110k. Now 104.5k equity: 5.5k down.
+const bud = checkRules(acc({ closes: closes.slice(0, 4), equityNow: 104500, today: '2026-08-06', todayPnl: -1500 }));
+is('5% below the peak is caution', [bud.rules.find((x) => x.id === 'dd').status, +bud.budget.ddPct.toFixed(1)], ['watch', 5]);
+is('how much more can go before half size and before flat, and today\'s room', [bud.budget.toHalf, bud.budget.toFlat, bud.budget.today], [5500, 11000, 2500]);
+is('the replay warns at 5% too', replay(closes.slice(0, 4), []).days[3].flags.map((x) => x.id).includes('ddwarn'), true);
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

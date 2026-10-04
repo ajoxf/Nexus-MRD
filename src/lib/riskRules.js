@@ -27,6 +27,7 @@ export const RISK_DEFAULTS = {
   posLossPct: 3,      // one position's open loss over this % of bankroll: close it
   bookLossPct: 6,     // the book's open loss over this % of bankroll: halve it
   dayLossPct: 4,      // a day's loss over this % of bankroll: no new trades today
+  ddWarnPct: 5,       // drawdown from the peak: caution, no new positions
   ddHalfPct: 10,      // drawdown from the peak: trade at half size
   ddFlatPct: 15,      // drawdown from the peak: go flat
   addLossPct: 0.5,    // adding to a position whose open loss is over this % of bankroll counts as averaging a loser
@@ -79,7 +80,7 @@ export function drawdowns(closes, liveEquity = null) {
     if (perf > peak) { peak = perf; peakDate = date; }
     const dd = peak - perf;
     const capital = peak + cum;
-    out.push({ date, equity, perf: +perf.toFixed(2), peak: +peak.toFixed(2), peakDate, dd: +dd.toFixed(2), ddPct: capital > 0 ? dd / capital * 100 : 0 });
+    out.push({ date, equity, perf: +perf.toFixed(2), peak: +peak.toFixed(2), peakDate, dd: +dd.toFixed(2), ddPct: capital > 0 ? dd / capital * 100 : 0, capital: +capital.toFixed(2) });
   };
   // The first statement's equity is the starting capital, however it got there (a deposit on the
   // day, or money already in the account before the statements begin): not a gain.
@@ -181,10 +182,24 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   // 5. Drawdown from the peak.
   const dds = drawdowns(acc.closes, acc.equityNow);
   const dd = dds[dds.length - 1] || null;
-  add("dd", "Drawdown from the peak", `${L.ddHalfPct}% half size · ${L.ddFlatPct}% go flat (deposits taken out)`,
+  add("dd", "Drawdown from the peak", `${L.ddWarnPct}% caution · ${L.ddHalfPct}% half size · ${L.ddFlatPct}% go flat (deposits taken out)`,
     dd ? `${usd(dd.dd)} · ${dd.ddPct.toFixed(1)}% below the peak of ${dd.peakDate === "now" ? "today" : dmy(dd.peakDate)}` : "—",
-    !dd ? "na" : dd.ddPct > L.ddFlatPct ? "flat" : dd.ddPct > L.ddHalfPct ? "cut" : dd.ddPct > L.ddHalfPct * 0.75 ? "watch" : "ok",
-    !dd ? "—" : dd.ddPct > L.ddFlatPct ? "Go flat, review, restart at reduced size" : dd.ddPct > L.ddHalfPct ? "Trade at half size until back within 10% of the peak" : "—");
+    !dd ? "na" : dd.ddPct >= L.ddFlatPct ? "flat" : dd.ddPct >= L.ddHalfPct ? "cut" : dd.ddPct >= L.ddWarnPct - 1e-9 ? "watch" : "ok",
+    !dd ? "—" : dd.ddPct >= L.ddFlatPct ? "Go flat, review, restart at reduced size" : dd.ddPct >= L.ddHalfPct ? `Trade at half size until back within ${L.ddHalfPct}% of the peak`
+      : dd.ddPct >= L.ddWarnPct ? "No new positions; cut losers first" : "—");
+
+  /*
+   * The drawdown budget: how much more can be lost, from here, before each step — the number to
+   * keep in mind while a position runs against you. Today's room is the day's loss limit less what
+   * the day has already lost.
+   */
+  const budget = dd ? {
+    peak: dd.peak, peakDate: dd.peakDate, now: dd.perf, dd: dd.dd, ddPct: dd.ddPct, capital: dd.capital,
+    toWarn: +(dd.capital * L.ddWarnPct / 100 - dd.dd).toFixed(2),
+    toHalf: +(dd.capital * L.ddHalfPct / 100 - dd.dd).toFixed(2),
+    toFlat: +(dd.capital * L.ddFlatPct / 100 - dd.dd).toFixed(2),
+    today: +(dayLimit - Math.max(0, -(acc.todayPnl || 0))).toFixed(2),
+  } : null;
 
   // 6. Margin calls: never funded to keep the same size.
   const month = (acc.closes || []).filter((c) => MONTH(c.date) === MONTH(acc.today));
@@ -229,7 +244,7 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   });
 
   const posRules = positions.filter((p) => p.status !== "ok").map((p) => ({ status: p.status, label: p.product, action: p.action }));
-  return { bankroll: br, marginPct, room, roomLots, dd, var: v, varLimit, varUsed, positions, level: levelOf([...rules, ...posRules]), rules };
+  return { bankroll: br, marginPct, room, roomLots, dd, budget, var: v, varLimit, varUsed, positions, level: levelOf([...rules, ...posRules]), rules };
 }
 
 /*
@@ -276,8 +291,9 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     if (todays.length) flag("adds", "cut", `Added to a loser ${todays.length}×: ${[...new Set(todays.map((x) => x.product))].join(", ")} at ${todays.map((x) => x.price).join(", ")} (up to ${usd(Math.max(...todays.map((x) => x.openLoss)))} down)`);
     if (B > 0 && c.upl < -B * L.bookLossPct / 100) flag("bookloss", "cut", `Open loss ${usd(c.upl)} — over ${L.bookLossPct}% of bankroll: halve`);
     if (B > 0 && day < -B * L.dayLossPct / 100) flag("day", "cut", `Day ${sgn(day)} — over ${L.dayLossPct}% of bankroll: no new trades`);
-    if (d.ddPct > L.ddFlatPct) flag("ddflat", "cut", `${d.ddPct.toFixed(1)}% below the peak — go flat`);
-    else if (d.ddPct > L.ddHalfPct) flag("dd", "cut", `${d.ddPct.toFixed(1)}% below the peak — half size`);
+    if (d.ddPct >= L.ddFlatPct) flag("ddflat", "cut", `${d.ddPct.toFixed(1)}% below the peak — go flat`);
+    else if (d.ddPct >= L.ddHalfPct) flag("dd", "cut", `${d.ddPct.toFixed(1)}% below the peak — half size`);
+    else if (d.ddPct >= L.ddWarnPct - 1e-9) flag("ddwarn", "watch", `${d.ddPct.toFixed(1)}% below the peak — caution, no new positions`);
     if (c.excess < 0) { flag("call", "cut", `Margin deficit ${usd(c.excess)} — cut to meet it`); callSeen = true; }
     else if (callSeen && c.cash > 0) { flag("call", "cut", `Deposit ${usd(c.cash)} after a margin call — size should have been cut, not funded`); depositAfterCall = true; }
     days.push({ date: c.date, equity: c.equity, perf: d.perf, day: +day.toFixed(2), marginPct, upl: c.upl, excess: c.excess, ddPct: d.ddPct, flags });
