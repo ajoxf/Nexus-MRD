@@ -243,6 +243,23 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
       action: status === "cut" ? "Close it" : status === "watch" ? `Exit at ${exit} if it gets there — don't add` : `Stop at ${exit}` };
   });
 
+  /*
+   * The numbers behind each rule, for its card: the figure now, the limit it is held to, how much
+   * of the limit is used (%), and one line of context. unit: usd | pct | count.
+   */
+  const card = (id, c) => { const r = rules.find((x) => x.id === id); if (r) r.card = { ...c, used: c.used === undefined || c.used === null || !isFinite(c.used) ? null : c.used }; };
+  const worstPos = (acc.rows || []).reduce((w, r) => (!w || r.upnl < w.upnl ? r : w), null);
+  card("var", { value: v && v.method !== "none" ? v.var99 : 0, limit: varLimit, unit: "usd", used: varUsed, caption: v?.method === "none" || !v ? "Nothing open" : how });
+  card("margin", { value: isFinite(marginPct) ? marginPct : null, limit: L.marginPct, unit: "pct", used: marginPct / L.marginPct * 100, caption: `${usd(acc.im)} margin on ${usd(acc.tne)} equity` });
+  card("adds", { value: adds.length, limit: 0, unit: "count", used: adds.length ? 200 : 0, caption: adds.length ? `${adds[adds.length - 1].product} at ${adds[adds.length - 1].price}, ${usd(adds[adds.length - 1].openLoss)} down` : "None since the last statement" });
+  card("posloss", { value: worstPos && worstPos.upnl < 0 ? -worstPos.upnl : 0, limit: posLimit, unit: "usd", used: worstPos && posLimit > 0 ? Math.max(0, -worstPos.upnl) / posLimit * 100 : 0, caption: worstPos && worstPos.upnl < 0 ? `Worst: ${worstPos.product}` : "No position losing" });
+  card("bookloss", { value: Math.max(0, -book), limit: bookLimit, unit: "usd", used: bookLimit > 0 ? Math.max(0, -book) / bookLimit * 100 : 0, caption: `Open P/L ${sgn(book)}` });
+  card("day", { value: Math.max(0, -(acc.todayPnl || 0)), limit: dayLimit, unit: "usd", used: dayLimit > 0 ? Math.max(0, -(acc.todayPnl || 0)) / dayLimit * 100 : 0, caption: budget ? (budget.today > 0 ? `${usd(budget.today)} of room left today` : "Today's limit passed") : `Since the last close ${sgn(acc.todayPnl || 0)}` });
+  card("dd", { value: dd ? dd.ddPct : null, limit: L.ddFlatPct, unit: "pct", used: dd ? dd.ddPct / L.ddFlatPct * 100 : null, caption: budget ? (budget.toFlat > 0 ? `${usd(budget.dd)} below the peak · ${usd(budget.toFlat)} more to go flat` : `${usd(budget.dd)} below the peak`) : "—" });
+  card("call", { value: last ? last.excess : null, limit: 0, unit: "usd", used: last && last.excess < 0 ? 200 : 0, caption: "Margin excess at the last close" });
+  card("legged", { value: legged.length || outr.length, limit: 0, unit: "count", used: legged.length ? 200 : outr.length ? 80 : 0, caption: outr.length ? outr.map((p) => p.product).join(", ") : "None" });
+  card("expiry", { value: soon.length, limit: 0, unit: "count", used: soon.length ? 200 : 0, caption: soon.length ? soon[0] : "Nothing within " + L.expiryDays + " trading days" });
+
   const posRules = positions.filter((p) => p.status !== "ok").map((p) => ({ status: p.status, label: p.product, action: p.action }));
   return { bankroll: br, marginPct, room, roomLots, dd, budget, var: v, varLimit, varUsed, positions, level: levelOf([...rules, ...posRules]), rules };
 }

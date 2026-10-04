@@ -2506,10 +2506,14 @@ function Tracker({ user }) {
           <div key={flashAt || "steady"} className={`banner${flashAt ? ` flash flash-${worst.res.level.level}` : ""}`} role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
             <b className={worst.res.level.level === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[worst.res.level.level]} {worst.a.name}: {worst.res.level.title}</b>
             {worst.res.budget && <span> · {worst.res.budget.ddPct.toFixed(1)}% below the peak{worst.res.budget.toFlat > 0 ? ` · ${money(worst.res.budget.toFlat)} more before go flat` : ""}</span>}
-            {flashAt
-              ? <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>{risks.filter((r) => r.res.level.level !== "ok").flatMap((r) => r.res.level.all.map((x, i) => <li key={`${r.a.id}|${i}`} className={x.status === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[x.status]} {risks.length > 1 ? `${r.a.name} · ` : ""}{x.text}</li>))}</ul>
-              : <span> · {worst.res.level.actions[0]}{worst.res.level.actions.length > 1 ? ` (+${worst.res.level.actions.length - 1} more)` : ""}</span>}
+            {!flashAt && <span> · {worst.res.level.actions[0]}{worst.res.level.actions.length > 1 ? ` (+${worst.res.level.actions.length - 1} more)` : ""}</span>}
             {tab !== "risk" && <span> · <u>Risk tab</u></span>}
+            {flashAt > 0 && risks.filter((r) => r.res.level.level !== "ok").map((r) => (
+              <div key={r.a.id}>
+                {risks.length > 1 && <div style={{ marginTop: 6, fontWeight: 600 }}>{r.a.name}</div>}
+                <div className="riskcards">{byUrgency(r.res.rules).filter((x) => x.status !== "ok" && x.status !== "na").map((x) => <RiskCard key={x.id} rule={x} />)}</div>
+              </div>
+            ))}
           </div>
         )}
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}
@@ -2947,6 +2951,25 @@ const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut:
 const LEVEL_CLASS = { ok: "ok", watch: "warn", cut: "bad", flat: "bad" };
 const RULE_NAMES = { ddwarn: "Drawdown: caution", margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
 
+// One rule as a card: the figure now, its limit, a bar of how much is used, what to do.
+function RiskCard({ rule, onClick }) {
+  const c = rule.card || {};
+  const fmt = (x) => (x === null || x === undefined ? "—" : c.unit === "usd" ? money(x) : c.unit === "pct" ? `${(+x).toFixed(1)}%` : String(x));
+  const tag = { ok: "OK", watch: "Caution", cut: "Cut", flat: "Go flat", na: "—" }[rule.status];
+  return (
+    <div className={`rcard ${rule.status}`} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined} title={`${rule.threshold}${rule.now ? ` · now: ${rule.now}` : ""}`}>
+      <div className="rh"><span>{rule.label}</span><span className={STATUS_PILL[rule.status][0]}>{tag}</span></div>
+      <div className="rv">{fmt(c.value)}</div>
+      {c.unit !== "count" && c.limit > 0 && <div className="rl">limit {fmt(c.limit)}{c.used !== null && c.used !== undefined ? ` · ${c.used.toFixed(0)}% used` : ""}</div>}
+      {c.unit !== "count" && c.limit > 0 && <div className="rbar"><span style={{ width: `${Math.min(100, Math.max(0, c.used || 0))}%` }} /></div>}
+      {c.caption && <div className="rc" title={c.caption}>{c.caption}</div>}
+      {rule.status !== "ok" && rule.action && rule.action !== "—" && <div className="ra">{rule.action}</div>}
+    </div>
+  );
+}
+const RANK_ORDER = { flat: 0, cut: 1, watch: 2, ok: 3, na: 4 };
+const byUrgency = (rules) => [...rules].sort((a, b) => RANK_ORDER[a.status] - RANK_ORDER[b.status]);
+
 /*
  * The risk read-out for one account on the broker's statements: the rules now, the VaR, and the
  * replay of past statements. Shared by the Risk tab, the banner and the tab marker so they agree.
@@ -3004,9 +3027,12 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
               </div>
               <div className={LEVEL_CLASS[res.level.level]} style={{ border: "1px solid currentColor", borderRadius: 4, padding: "8px 12px", marginBottom: 10 }}>
                 <b style={{ fontSize: 15 }}>{res.level.level === "ok" ? "🟢" : res.level.level === "watch" ? "🟠" : res.level.level === "cut" ? "🔴" : "⛔"} {res.level.title}</b>
-                {res.level.actions.length > 0 && <ul style={{ margin: "4px 0 0 18px", padding: 0, fontSize: 12 }}>{res.level.actions.map((x, i) => <li key={i}>{x}</li>)}</ul>}
+                {res.level.all.length > 0 && <span style={{ fontSize: 12 }}> · {res.level.all.length} warning{res.level.all.length === 1 ? "" : "s"} — the cards below say what to do</span>}
               </div>
 
+              <div className="riskcards" style={{ margin: "0 0 12px" }}>
+                {byUrgency(res.rules).map((r) => <RiskCard key={r.id} rule={r} />)}
+              </div>
               {res.budget && (
                 <div className="tw" style={{ marginBottom: 8 }}>
                   <table>
@@ -3062,22 +3088,6 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                 </div>
               )}
 
-              <div className="tw" style={{ marginTop: 8 }}>
-                <table>
-                  <thead><tr><th className="txt">Rule</th><th className="txt">Limit</th><th className="txt">Now</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
-                  <tbody>
-                    {res.rules.map((r) => (
-                      <tr key={r.id}>
-                        <td className="txt"><b>{r.label}</b></td>
-                        <td className="txt faint" style={{ fontSize: 12 }}>{r.threshold}</td>
-                        <td className="txt" style={{ fontSize: 12 }}>{r.now}</td>
-                        <td className="txt"><span className={STATUS_PILL[r.status][0]}>{STATUS_PILL[r.status][1]}</span></td>
-                        <td className={`txt ${r.status === "cut" || r.status === "flat" ? "bad" : r.status === "watch" ? "warn" : "faint"}`} style={{ fontSize: 12 }}>{r.action}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
               {res.roomLots && Object.keys(res.roomLots).length > 0 && (
                 <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
                   Room under the {limits.marginPct}% margin cap: {money(res.room)} — about {Object.entries(res.roomLots).map(([k, n]) => `${n} ${k}`).join(" · ")} at the margin Orient has charged per spread.
