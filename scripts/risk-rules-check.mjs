@@ -63,7 +63,8 @@ is('…shown as lots of each kind of spread', res.roomLots, { 'Inter-Product': 1
 is('TNE / IM 250%: above the 200% floor, fine', st(checkRules(acc({ im: 44000 })), 'margin'), 'ok');
 is('TNE / IM 183% (under 200%): cut back to it', checkRules(acc({ im: 60000 })).rules.find((x) => x.id === 'margin').action, 'Cut back to TNE / IM 200% — $5,000 of margin too much (or add $10,000)');
 const live = checkRules(acc({ allFills: crack.slice(0, 4), fillsToday: crack.slice(2, 4), today: '2026-08-06' }));
-is('adding to a loser today: cut', st(live, 'adds'), 'cut');
+is('adding to a loser while the account is healthy: caution', st(live, 'adds'), 'watch');
+is('…and in drawdown or under the floor: cut', st(checkRules(acc({ allFills: crack.slice(0, 4), fillsToday: crack.slice(2, 4), today: '2026-08-06', im: 60000 })), 'adds'), 'cut');
 is('one position down over 3% of bankroll: close it', st(checkRules(acc({ rows: [{ product: 'Oct26 HO-CL Crack', lots: -3, upnl: -3500 }] })), 'posloss'), 'cut');
 is('the book down over 6%: halve', st(checkRules(acc({ rows: [{ product: 'A', lots: 1, upnl: -2900 }, { product: 'B', lots: 1, upnl: -2900 }, { product: 'C', lots: 1, upnl: -2900 }] })), 'bookloss'), 'cut');
 is('a day down over 4%: no new trades', st(checkRules(acc({ todayPnl: -4500 })), 'day'), 'cut');
@@ -101,6 +102,16 @@ is('how much more can go before half size and before flat, and today\'s room', [
 is('the replay warns at 5% too', replay(closes.slice(0, 4), []).days[3].flags.map((x) => x.id).includes('ddwarn'), true);
 
 is('spread names shortened, as TT and as paired from Orient\'s legs', [shortName('CL Nov26 - BZ Nov26 Inter-Product'), shortName('CL–BZ Nov26 Inter-Product'), shortName('Oct26 HO-CL Crack')], ['CL–BZ Nov26', 'CL–BZ Nov26', 'Oct26 HO-CL Crack']);
+
+// ---------- a roll is not averaging down ----------
+// Long 6 CL–BZ Oct at -7.05, now -7.70 ($3,900 down). Buying Oct while selling Nov keeps the CL–BZ total
+// the same: not flagged. Buying Oct alone grows it: flagged. Selling Oct and buying Nov: a roll, not flagged.
+const sp = (ts, side, product, price, qty = 1) => ({ ts, broker: 'o', product, side, qty, price });
+const OCT = 'CL Oct26 - BZ Oct26 Inter-Product', NOV = 'CL Nov26 - BZ Nov26 Inter-Product';
+const start = [sp('2026-08-18T09:00:00Z', 'Buy', OCT, -7.05, 6)];
+is('buy Oct + sell Nov together: the CL–BZ total does not grow — not averaging down', addsToLosers([...start, sp('2026-08-24T07:00:00Z', 'Sell', NOV, -7.68), sp('2026-08-24T07:01:00Z', 'Buy', OCT, -7.70)], { minLoss: 500 }).length, 0);
+is('buy Oct alone while the total is down: averaging down', addsToLosers([...start, sp('2026-08-24T07:00:00Z', 'Buy', OCT, -7.70)], { minLoss: 500 }).map((x) => [x.held, x.openLoss, x.months]), [[6, 3900, 1]]);
+is('roll: sell Oct, buy Nov — not averaging down', addsToLosers([...start, sp('2026-08-24T08:50:00Z', 'Sell', OCT, -7.57, 6), sp('2026-08-24T08:51:00Z', 'Buy', NOV, -7.62, 6)], { minLoss: 500 }).length, 0);
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
