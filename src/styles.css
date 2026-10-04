@@ -759,3 +759,27 @@ table.postable tr.total td { font-weight: 600; border-top: 1px solid var(--line,
 /* Daily statements as a tree: the group's row heads each day, sub-accounts sit beneath it. */
 tr.dayhead > td { border-top: 2px solid var(--line2); }
 tr.daysub > td { background: var(--panel2); }
+
+/* Risk warnings flash when a current price is typed (Tracker: flashAt). */
+.banner.flash { animation: risk-flash .5s ease-in-out 6 alternate; }
+.banner.flash-watch { border-color: #D9A23B; }
+.banner.flash-cut, .banner.flash-flat { border-color: #C9474F; }
+@keyframes risk-flash { from { background: #FFF3D6; } to { background: #F8D2D4; } }
+@media (prefers-reduced-motion: reduce) { .banner.flash { animation: none; } }
+
+/* ---------- risk cards (Risk tab and the risk banner) ---------- */
+.riskcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+.rcard { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; min-width: 0; text-align: left; }
+.rcard.watch { border-left-color: var(--warn); background: var(--warn-soft); }
+.rcard.cut, .rcard.flat { border-left-color: var(--bad); background: var(--bad-soft); }
+.rcard .rh { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.rcard .rv { font-family: var(--num); font-size: 24px; font-weight: 600; line-height: 1.1; color: var(--navy); font-variant-numeric: tabular-nums; }
+.rcard.watch .rv { color: var(--warn); } .rcard.cut .rv, .rcard.flat .rv { color: var(--bad); }
+.rcard .rl { font-size: 11px; color: var(--faint); }
+.rcard .rbar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.rcard .rbar span { display: block; height: 100%; background: var(--ok); }
+.rcard.watch .rbar span { background: var(--warn); } .rcard.cut .rbar span, .rcard.flat .rbar span { background: var(--bad); }
+.rcard .rc { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rcard .ra { font-size: 12px; font-weight: 600; color: var(--text); }
+.rcard.cut .ra, .rcard.flat .ra { color: var(--bad); } .rcard.watch .ra { color: var(--warn); }
+.banner .riskcards { margin-top: 8px; }
