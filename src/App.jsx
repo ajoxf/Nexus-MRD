@@ -2951,19 +2951,23 @@ const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut:
 const LEVEL_CLASS = { ok: "ok", watch: "warn", cut: "bad", flat: "bad" };
 const RULE_NAMES = { ddwarn: "Drawdown: caution", margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
 
-// One rule as a card: the figure now, its limit, a bar of how much is used, what to do.
-function RiskCard({ rule, onClick }) {
+// One rule as a tile: the figure now, a bar of how much of its limit is used, the limit, what to do.
+const LOSS_IDS = new Set(["posloss", "bookloss", "day"]);
+function RiskCard({ rule }) {
   const c = rule.card || {};
   const fmt = (x) => (x === null || x === undefined ? "—" : c.unit === "usd" ? money(x) : c.unit === "pct" ? `${(+x).toFixed(1)}%` : String(x));
-  const tag = { ok: "OK", watch: "Caution", cut: "Cut", flat: "Go flat", na: "—" }[rule.status];
+  const shown = c.unit === "count" ? (c.value ? String(c.value) : "None") : LOSS_IDS.has(rule.id) && c.value > 0 ? `−${fmt(c.value)}` : fmt(c.value);
+  const used = c.used === null || c.used === undefined ? null : c.used;
+  const usedTxt = used === null ? "" : used > 100 ? ` · ${(used / 100).toFixed(1)}× the limit` : ` · ${used.toFixed(0)}% used`;
+  const action = rule.status === "ok" ? "OK" : c.short || (rule.action && rule.action !== "—" ? rule.action : "");
   return (
-    <div className={`rcard ${rule.status}`} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined} title={`${rule.threshold}${rule.now ? ` · now: ${rule.now}` : ""}`}>
-      <div className="rh"><span>{rule.label}</span><span className={STATUS_PILL[rule.status][0]}>{tag}</span></div>
-      <div className="rv">{fmt(c.value)}</div>
-      {c.unit !== "count" && c.limit > 0 && <div className="rl">limit {fmt(c.limit)}{c.used !== null && c.used !== undefined ? ` · ${c.used.toFixed(0)}% used` : ""}</div>}
-      {c.unit !== "count" && c.limit > 0 && <div className="rbar"><span style={{ width: `${Math.min(100, Math.max(0, c.used || 0))}%` }} /></div>}
-      {c.caption && <div className="rc" title={c.caption}>{c.caption}</div>}
-      {rule.status !== "ok" && rule.action && rule.action !== "—" && <div className="ra">{rule.action}</div>}
+    <div className={`rcard ${rule.status}`} title={`${rule.label} — ${rule.threshold}${rule.now ? `\nNow: ${rule.now}` : ""}${rule.action && rule.action !== "—" ? `\n${rule.action}` : ""}`}>
+      <div className="rh">{rule.label}</div>
+      <div className="rv">{shown}</div>
+      <div className="rbar"><span style={{ width: `${Math.min(100, Math.max(0, used || 0))}%` }} /></div>
+      {c.unit !== "count" && c.limit > 0 ? <div className="rl">limit {fmt(c.limit)}{usedTxt}</div> : <div className="rl">{c.caption || "\u00a0"}</div>}
+      {c.unit !== "count" && c.limit > 0 && c.caption ? <div className="rc">{c.caption}</div> : null}
+      {action && <div className="ra">{action}</div>}
     </div>
   );
 }

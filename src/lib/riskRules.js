@@ -38,6 +38,8 @@ const MONTH = (d) => d.slice(0, 7);
 const pct = (x) => `${x.toFixed(0)}%`;
 const usd = (x) => `$${Math.round(Math.abs(x)).toLocaleString("en-US")}`;
 const sgn = (x) => `${x < 0 ? "−" : "+"}${usd(x)}`;
+// "CL Nov26 - BZ Nov26 Inter-Product" → "CL–BZ Nov26", for tiles; anything else as it is.
+export const shortName = (p) => String(p).replace(/^([A-Z]{1,3}) (\w{5}) - ([A-Z]{1,3}) \2 Inter-?Product$/i, "$1–$3 $2");
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const dmy = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || "") ? `${+d.slice(8)} ${MON[+d.slice(5, 7) - 1]}` : d);
 
@@ -252,13 +254,27 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   card("var", { value: v && v.method !== "none" ? v.var99 : 0, limit: varLimit, unit: "usd", used: varUsed, caption: v?.method === "none" || !v ? "Nothing open" : how });
   card("margin", { value: isFinite(marginPct) ? marginPct : null, limit: L.marginPct, unit: "pct", used: marginPct / L.marginPct * 100, caption: `${usd(acc.im)} margin on ${usd(acc.tne)} equity` });
   card("adds", { value: adds.length, limit: 0, unit: "count", used: adds.length ? 200 : 0, caption: adds.length ? `${adds[adds.length - 1].product} at ${adds[adds.length - 1].price}, ${usd(adds[adds.length - 1].openLoss)} down` : "None since the last statement" });
-  card("posloss", { value: worstPos && worstPos.upnl < 0 ? -worstPos.upnl : 0, limit: posLimit, unit: "usd", used: worstPos && posLimit > 0 ? Math.max(0, -worstPos.upnl) / posLimit * 100 : 0, caption: worstPos && worstPos.upnl < 0 ? `Worst: ${worstPos.product}` : "No position losing" });
+  card("posloss", { value: worstPos && worstPos.upnl < 0 ? -worstPos.upnl : 0, limit: posLimit, unit: "usd", used: worstPos && posLimit > 0 ? Math.max(0, -worstPos.upnl) / posLimit * 100 : 0, caption: worstPos && worstPos.upnl < 0 ? `Worst: ${shortName(worstPos.product)}` : "No position losing" });
   card("bookloss", { value: Math.max(0, -book), limit: bookLimit, unit: "usd", used: bookLimit > 0 ? Math.max(0, -book) / bookLimit * 100 : 0, caption: `Open P/L ${sgn(book)}` });
   card("day", { value: Math.max(0, -(acc.todayPnl || 0)), limit: dayLimit, unit: "usd", used: dayLimit > 0 ? Math.max(0, -(acc.todayPnl || 0)) / dayLimit * 100 : 0, caption: budget ? (budget.today > 0 ? `${usd(budget.today)} of room left today` : "Today's limit passed") : `Since the last close ${sgn(acc.todayPnl || 0)}` });
   card("dd", { value: dd ? dd.ddPct : null, limit: L.ddFlatPct, unit: "pct", used: dd ? dd.ddPct / L.ddFlatPct * 100 : null, caption: budget ? (budget.toFlat > 0 ? `${usd(budget.dd)} below the peak · ${usd(budget.toFlat)} more to go flat` : `${usd(budget.dd)} below the peak`) : "—" });
   card("call", { value: last ? last.excess : null, limit: 0, unit: "usd", used: last && last.excess < 0 ? 200 : 0, caption: "Margin excess at the last close" });
   card("legged", { value: legged.length || outr.length, limit: 0, unit: "count", used: legged.length ? 200 : outr.length ? 80 : 0, caption: outr.length ? outr.map((p) => p.product).join(", ") : "None" });
   card("expiry", { value: soon.length, limit: 0, unit: "count", used: soon.length ? 200 : 0, caption: soon.length ? soon[0] : "Nothing within " + L.expiryDays + " trading days" });
+
+  // A few words to act on, for the tile (the full sentence stays in `action`).
+  const short = (id, text) => { const r = rules.find((x) => x.id === id); if (r && r.card && r.status !== "ok" && r.status !== "na") r.card.short = text; };
+  const st = (id) => rules.find((x) => x.id === id)?.status;
+  short("var", st("var") === "flat" ? "Go flat" : st("var") === "cut" ? `Cut ${usd((v?.var99 || 0) - varLimit)} of VaR` : "No new risk");
+  short("margin", st("margin") === "cut" ? `Cut ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin` : "No new positions");
+  short("adds", "Stop adding");
+  short("posloss", bad.length ? `Close ${bad.map((r) => shortName(r.product)).join(", ")}` : "Watch it");
+  short("bookloss", st("bookloss") === "cut" ? "Halve the book" : "Watch it");
+  short("day", st("day") === "cut" ? "No new trades today" : "Slow down");
+  short("dd", st("dd") === "flat" ? "Go flat" : st("dd") === "cut" ? "Half size" : "No new positions");
+  short("call", st("call") === "cut" ? "Cut to meet the call" : "Half size this month");
+  short("legged", legged.length ? "Complete or flatten the leg" : "Check it's meant");
+  short("expiry", "Roll or close");
 
   const posRules = positions.filter((p) => p.status !== "ok").map((p) => ({ status: p.status, label: p.product, action: p.action }));
   return { bankroll: br, marginPct, room, roomLots, dd, budget, var: v, varLimit, varUsed, positions, level: levelOf([...rules, ...posRules]), rules };

@@ -1,4 +1,4 @@
-import { bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
+import { shortName, bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
 
 /*
  * The risk guardrails, worked by hand on a made-up account shaped like a real run: a good start,
@@ -84,6 +84,8 @@ is('VaR past 125% of the limit: go flat', checkRules(withVar(6000)).level.level,
 const cards = checkRules(acc({ im: 44000, todayPnl: -4500, var: { method: 'margin', var99: 6000, var95: 4000, byPosition: [] } })).rules;
 const cd = (id) => { const c = cards.find((x) => x.id === id).card; return [Math.round(c.value), Math.round(c.limit), Math.round(c.used)]; };
 is('every rule carries its numbers for a card: now, limit, % used', [cd('var'), cd('margin'), cd('day')], [[6000, 4000, 150], [40, 30, 133], [4500, 4000, 113]]);
+is('spread names shortened for tiles', [shortName('CL Nov26 - BZ Nov26 Inter-Product'), shortName('Oct26 HO-CL Crack')], ['CL–BZ Nov26', 'Oct26 HO-CL Crack']);
+is('each tile gets a few words to act on', ['var', 'margin', 'day'].map((id) => cards.find((x) => x.id === id).card.short), ['Go flat', 'No new positions', 'No new trades today']);
 is('every warning is listed, worst first, not only the worst level', checkRules(acc({ im: 44000, todayPnl: -4500, var: { method: 'margin', var99: 6000, var95: 4000, byPosition: [] } })).level.all.map((x) => x.status), ['flat', 'cut', 'watch']);
 is('the method is said', checkRules(withVar(3000)).rules[0].now, "$3,000 · 75% of the limit (estimated from Orient's margin)");
 const pos = checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 2, size: 1000, avg: -8, upnl: -1000 }, { product: 'Oct26 HO-CL Crack', lots: -1, size: 1000, avg: 90, upnl: -2600 }] })).positions;
