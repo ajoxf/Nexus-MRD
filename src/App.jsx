@@ -4,7 +4,6 @@ import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
 import { checkRules, replay, replayCsv, RISK_DEFAULTS } from "./lib/riskRules.js";
-import { bookVar, addSettles } from "./lib/var.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
 import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
@@ -2942,7 +2941,6 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 
 // ---------- Risk guardrails (accounts on the broker's statements) ----------
 const RISK_FIELDS = [
-  ["varPct", "VaR limit (1-day 99%), % of bankroll"], ["varWatchPct", "VaR: no new risk above, % of limit"], ["varHardPct", "VaR: go flat above, % of limit"],
   ["marginPct", "Margin cap, % of equity"], ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
   ["dayLossPct", "Day's loss, % of bankroll"], ["ddWarnPct", "Drawdown: caution, %"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
   ["addLossPct", "Adding to a loser: counts when it's down over, % of bankroll"], ["expiryDays", "Out before expiry, trading days"],
@@ -2975,7 +2973,7 @@ const RANK_ORDER = { flat: 0, cut: 1, watch: 2, ok: 3, na: 4 };
 const byUrgency = (rules) => [...rules].sort((a, b) => RANK_ORDER[a.status] - RANK_ORDER[b.status]);
 
 /*
- * The risk read-out for one account on the broker's statements: the rules now, the VaR, and the
+ * The risk read-out for one account on the broker's statements: the rules now and the
  * replay of past statements. Shared by the Risk tab, the banner and the tab marker so they agree.
  */
 function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0, 10)) {
@@ -2985,14 +2983,13 @@ function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0
   const mine = fills.filter((f) => f.broker === a.id);
   const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
   const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl, size: r.size, avg: r.avg, mark: r.mark, im: r.im }));
-  const v = bookVar(rows, addSettles(new Map(), fs.settleDays || []), a.IM);
   const expiries = new Map();
   for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
   const res = checkRules({
     closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
-    allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer, var: v,
+    allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer,
   }, limits);
-  return { res, v, limits, rp: replay(fs.closes || [], mine, limits, sizeOfFill) };
+  return { res, limits, rp: replay(fs.closes || [], mine, limits, sizeOfFill) };
 }
 const LEVEL_RANK = { ok: 0, watch: 1, cut: 2, flat: 3 };
 
@@ -3021,7 +3018,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
         {!accts.length && <div className="faint">The guardrails run on an account's daily statements. Upload them in the Statements tab.</div>}
         {accts.map((a) => {
           const fs = a.fromStatement;
-          const { res, v, rp } = riskOf(pf, settings, fills, a);
+          const { res, rp } = riskOf(pf, settings, fills, a);
           const flagged = rp.days.filter((d) => d.flags.length);
           return (
             <div key={a.id} style={{ marginBottom: 16 }}>
@@ -3054,25 +3051,10 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                 </div>
               )}
 
-              <div className="tw">
-                <table>
-                  <thead><tr><th className="txt">Value at Risk</th><th>1-day 95%</th><th>1-day 99%</th><th>Limit ({limits.varPct}% of bankroll)</th><th>Used</th><th>TNE / IM after a 99% day</th><th className="txt">How</th></tr></thead>
-                  <tbody><tr>
-                    <td className="txt"><b>The book</b></td>
-                    <td>{money(v.var95)}</td>
-                    <td><b>{money(v.var99)}</b></td>
-                    <td>{money(res.varLimit)}</td>
-                    <td><span className={STATUS_PILL[res.rules.find((r) => r.id === "var").status][0]}>{res.varUsed !== null && v.method !== "none" ? `${res.varUsed.toFixed(0)}%` : "—"}</span></td>
-                    <td>{a.IM > 0 ? `${((a.TNE - v.var99) / a.IM * 100).toFixed(0)}%` : "—"}</td>
-                    <td className="txt faint" style={{ fontSize: 11 }}>{v.method === "historical" ? `Historical: ${v.days} days of settlements replayed on today's positions` : v.method === "margin" ? `Estimated from Orient's margin (margin ÷ √2 for 1 day). Becomes historical once every position has 60 days of prices${v.days ? ` — ${v.days} so far` : ""}` : "Nothing open"}</td>
-                  </tr></tbody>
-                </table>
-              </div>
-
               {res.positions.length > 0 && (
                 <div className="tw" style={{ marginTop: 8 }}>
                   <table>
-                    <thead><tr><th className="txt">Position</th><th>Lots</th><th>Average</th><th>Price now</th><th>Open P/L</th><th>% of bankroll</th><th>Its 99% VaR</th><th>Exit price ({limits.posLossPct}% loss)</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
+                    <thead><tr><th className="txt">Position</th><th>Lots</th><th>Average</th><th>Price now</th><th>Open P/L</th><th>% of bankroll</th><th>Exit price ({limits.posLossPct}% loss)</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
                     <tbody>{res.positions.map((p) => (
                       <tr key={p.product}>
                         <td className="txt"><b>{p.product}</b></td>
@@ -3081,7 +3063,6 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                         <td>{p.mark !== undefined ? +(+p.mark).toFixed(4) : "—"}</td>
                         <td className={pc(p.upnl)}>{signed(p.upnl)}</td>
                         <td className={p.lossPct > 0 ? "bad" : "ok"}>{(-p.lossPct).toFixed(1)}%</td>
-                        <td>{p.var99 !== null ? money(p.var99) : "—"}</td>
                         <td><b>{p.exit ?? "—"}</b></td>
                         <td className="txt"><span className={STATUS_PILL[p.status][0]}>{STATUS_PILL[p.status][1]}</span></td>
                         <td className={`txt ${p.status === "cut" ? "bad" : p.status === "watch" ? "warn" : "faint"}`} style={{ fontSize: 12 }}>{p.action}</td>
@@ -3092,6 +3073,13 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                 </div>
               )}
 
+              {res.funding && res.funding.toCap > 0 && (
+                <div className="warn" style={{ fontSize: 12, marginTop: 6 }}>
+                  To hold today's size within the {limits.marginPct}% margin cap the account needs {money(res.funding.needAtCap)} of equity: <b>{money(res.funding.toCap)} more</b> than it has
+                  {res.funding.toCall > 0 ? <> — and <b>{money(res.funding.toCall)}</b> just to cover the margin (a margin call)</> : null}.
+                  {" "}The rules say cut first; adding money to keep a losing size is how the August–September losses grew.
+                </div>
+              )}
               {res.roomLots && Object.keys(res.roomLots).length > 0 && (
                 <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
                   Room under the {limits.marginPct}% margin cap: {money(res.room)} — about {Object.entries(res.roomLots).map(([k, n]) => `${n} ${k}`).join(" · ")} at the margin Orient has charged per spread.
@@ -3135,7 +3123,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                           <th>Day<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.dayLossPct}% of bankroll</div></th>
                           <th>Open P/L<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.bookLossPct}% of bankroll</div></th>
                           <th>Margin ÷ equity<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>cap {L.marginPct}% · cut {L.marginPct * 1.5}%</div></th>
-                          <th>VaR (from margin)<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit {L.varPct}% of bankroll</div></th>
+                          <th>To hold this size, add<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>equity for margin at {L.marginPct}%</div></th>
                           <th>Below peak<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>{L.ddWarnPct}% · {L.ddHalfPct}% · {L.ddFlatPct}%</div></th>
                           <th>Adds to losers<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>none allowed</div></th>
                           <th>Margin excess<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>never below $0</div></th>
@@ -3152,8 +3140,8 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                                 <td className={pc(d.perf)}>{signed(d.perf)}</td>
                                 <td className={cls(k.day.status)}>{d.day ? signed(d.day) : "—"}{k.day.status !== "ok" && sub(`limit ${signed(k.day.limit)} · ${over(d.day, k.day.limit)}`)}</td>
                                 <td className={cls(k.open.status)}>{d.upl ? signed(d.upl) : "—"}{k.open.status !== "ok" && sub(`limit ${signed(k.open.limit)} · ${over(d.upl, k.open.limit)}`)}</td>
-                                <td className={cls(k.margin.status)}>{isFinite(d.marginPct) ? `${d.marginPct.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(d.im - d.equity * L.marginPct / 100)} over the cap`)}</td>
-                                <td className={cls(k.var.status)}>{k.var.value ? money(k.var.value) : "—"}{k.var.status !== "ok" && sub(`limit ${money(k.var.limit)} · ${(k.var.used / 100).toFixed(1)}× it`)}</td>
+                                <td className={cls(k.margin.status)}>{isFinite(d.marginPct) ? `${d.marginPct.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(k.margin.over)} over the cap`)}</td>
+                                <td className={k.margin.toCap > 0 ? "warn" : "faint"}>{k.margin.toCap > 0 ? `+${money(k.margin.toCap)}` : "—"}{k.margin.toCall > 0 && sub(`+${money(k.margin.toCall)} just to cover margin`)}</td>
                                 <td className={cls(k.dd.status)}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : "—"}{k.dd.status !== "ok" && sub(`${money(k.dd.amount)} below the peak`)}</td>
                                 <td className={cls(k.adds.status)} title={k.adds.list.map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${x.product} at ${x.price} while ${x.held > 0 ? "long" : "short"} ${Math.abs(x.held)} from ${+x.avg.toFixed(4)} — ${money(x.openLoss)} down`).join("\n") || undefined}>
                                   {k.adds.count ? `${k.adds.count}×` : "—"}{k.adds.count ? sub(`up to ${money(k.adds.maxLoss)} down`) : null}
