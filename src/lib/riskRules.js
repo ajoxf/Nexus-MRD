@@ -348,7 +348,7 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
       dd: { value: d.ddPct, amount: d.dd, warn: L.ddWarnPct, half: L.ddHalfPct, flat: L.ddFlatPct,
         status: d.ddPct >= L.ddFlatPct ? "flat" : d.ddPct >= L.ddHalfPct ? "cut" : d.ddPct >= L.ddWarnPct - 1e-9 ? "watch" : "ok" },
       adds: { count: todays.length, maxLoss: todays.length ? Math.max(...todays.map((x) => x.openLoss)) : 0, limit: +addLimit.toFixed(2),
-        list: todays.map((x) => ({ product: x.product, side: x.side, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
+        list: todays.map((x) => ({ product: x.product, side: x.side, qty: x.qty, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
       excess: { value: c.excess, deposit: c.cash > 0 ? c.cash : 0, status: c.excess < 0 || (callSeen && c.cash > 0 && c.excess >= 0) ? "cut" : "ok" },
     };
     const rank = { ok: 0, watch: 1, cut: 2, flat: 3 };

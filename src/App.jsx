@@ -2959,16 +2959,15 @@ function openPositionsText(lots) {
   return [...net].filter(([, q]) => q).map(([label, q]) => `${sgn(q)} ${label}`);
 }
 
-// Adds to a losing position in plain words: "Sold 4 more HO–CL Oct26 Crack while it was $9,024 down".
+// Adds to a losing position, one line per trade:
+// "Sold at 93.75 · your average 91.95 · short 5 was $9,024 down → now short 6".
 function addsText(list) {
-  const by = new Map();
-  for (const x of list || []) {
-    const k = `${x.side}|${x.product}`;
-    const g = by.get(k) || { side: x.side, product: x.product, n: 0, worst: 0 };
-    g.n += 1; g.worst = Math.max(g.worst, x.openLoss);
-    by.set(k, g);
-  }
-  return [...by.values()].map((g) => `${g.side === "Buy" ? "Bought" : "Sold"} ${g.n} more ${shortName(g.product)} while it was ${money(g.worst)} down`);
+  const side = (q) => `${q > 0 ? "long" : "short"} ${+Math.abs(q).toFixed(2)}`;
+  const px = (x) => +(+x).toFixed(4);
+  return (list || []).map((x) => {
+    const after = x.held + (x.side === "Buy" ? 1 : -1) * (x.qty || 1);
+    return `${x.side === "Buy" ? "Bought" : "Sold"} ${shortName(x.product)} at ${px(x.price)} · your average ${px(x.avg)} · ${side(x.held)} was ${money(x.openLoss)} down → now ${side(after)}`;
+  });
 }
 
 // One rule as a tile: the figure now, a bar of how much of its limit is used, the limit, what to do.
@@ -3174,7 +3173,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                                 <td className={cls(k.margin.status)}>{isFinite(d.ratio) ? `${d.ratio.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(k.margin.over)} margin too much`)}</td>
                                 <td className={k.margin.toCap > 0 ? "warn" : "faint"}>{k.margin.toCap > 0 ? `+${money(k.margin.toCap)}` : "—"}{k.margin.toCall > 0 && sub(`+${money(k.margin.toCall)} just to cover margin`)}</td>
                                 <td className={cls(k.dd.status)}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : "—"}{k.dd.status !== "ok" && sub(`${money(k.dd.amount)} below the peak`)}</td>
-                                <td className={`txt ${cls(k.adds.status)}`} style={{ fontSize: 11, minWidth: 190 }}>{k.adds.count ? addsText(k.adds.list).map((t, i) => <div key={i}>{t}</div>) : "—"}</td>
+                                <td className={`txt ${cls(k.adds.status)}`} style={{ fontSize: 11, minWidth: 330, whiteSpace: "nowrap" }}>{k.adds.count ? addsText(k.adds.list).map((t, i) => <div key={i}>{t}</div>) : "—"}</td>
                                 <td className={cls(k.excess.status)}>{signed(d.excess)}{k.excess.deposit ? sub(`deposit ${money(k.excess.deposit)}`) : null}</td>
                                 <td className="txt"><span className={STATUS_PILL[d.level][0]}>{levelTxt[d.level]}</span></td>
                                 <td className={`txt ${cls(d.level)}`} style={{ fontSize: 11, minWidth: 220 }}>{d.todo || "—"}</td>
