@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
-import { checkRules, replay, RISK_DEFAULTS } from "./lib/riskRules.js";
+import { checkRules, replay, replayCsv, RISK_DEFAULTS } from "./lib/riskRules.js";
 import { bookVar, addSettles } from "./lib/var.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
@@ -3108,28 +3108,69 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                   </span>
                 )}
               </div>
-              {showReplay && (
-                <div className="tw" style={{ marginTop: 6 }}>
-                  <table className="postable">
-                    <thead><tr><th className="txt">Close</th><th>Equity</th><th>Trading P/L to date</th><th>Day</th><th>Margin ÷ equity</th><th>Open P/L</th><th>Below peak</th><th className="txt">What the rules would have said</th></tr></thead>
-                    <tbody>
-                      {rp.days.map((d) => (
-                        <tr key={d.date}>
-                          <td className="txt">{day(d.date)}</td>
-                          <td>{money(d.equity)}</td>
-                          <td className={pc(d.perf)}>{signed(d.perf)}</td>
-                          <td className={pc(d.day)}>{d.day ? signed(d.day) : ""}</td>
-                          <td className={d.marginPct > limits.marginPct ? "bad" : ""}>{isFinite(d.marginPct) ? `${d.marginPct.toFixed(0)}%` : "—"}</td>
-                          <td className={pc(d.upl)}>{d.upl ? signed(d.upl) : ""}</td>
-                          <td className={d.ddPct > limits.ddHalfPct ? "bad" : ""}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : ""}</td>
-                          <td className="txt" style={{ fontSize: 11 }}>{d.flags.map((f, i) => <div key={i} className={f.level === "cut" ? "bad" : "warn"}>{f.text}</div>)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Change "Your limits" to see when other thresholds would have fired.</div>
-                </div>
-              )}
+              {showReplay && (() => {
+                const L = limits;
+                const cls = (st) => (st === "flat" || st === "cut" ? "bad" : st === "watch" ? "warn" : "");
+                const over = (v, lim) => (v < lim ? `over by ${money(lim - v)}` : `room ${money(v - lim)}`);   // both negative-signed losses
+                const sub = (t) => <div className="faint" style={{ fontSize: 10, whiteSpace: "nowrap" }}>{t}</div>;
+                const levelTxt = { ok: "OK", watch: "Caution", cut: "Reduce", flat: "Go flat" };
+                const csv = () => {
+                  const blob = new Blob([replayCsv(rp)], { type: "text/csv" });
+                  const link = document.createElement("a");
+                  link.href = URL.createObjectURL(blob); link.download = `risk-replay-${a.name.replace(/\W+/g, "-")}.csv`; link.click();
+                  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+                };
+                return (
+                  <div style={{ marginTop: 6 }}>
+                    <div className="faint" style={{ fontSize: 11, margin: "0 0 4px" }}>
+                      Every rule on every close. Where a rule was close to or past its limit, the line underneath gives the limit that day and how far over it was. Limits in $ come from that month's bankroll, shown when it changes.
+                      {" "}<button className="btn ghost" style={{ padding: "0 8px", fontSize: 11 }} onClick={csv}>Download CSV</button>
+                    </div>
+                    <div className="tw">
+                      <table className="postable">
+                        <thead><tr>
+                          <th className="txt">Close</th>
+                          <th>Equity<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>bankroll</div></th>
+                          <th>Trading P/L<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>to date</div></th>
+                          <th>Day<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.dayLossPct}% of bankroll</div></th>
+                          <th>Open P/L<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.bookLossPct}% of bankroll</div></th>
+                          <th>Margin ÷ equity<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>cap {L.marginPct}% · cut {L.marginPct * 1.5}%</div></th>
+                          <th>VaR (from margin)<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit {L.varPct}% of bankroll</div></th>
+                          <th>Below peak<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>{L.ddWarnPct}% · {L.ddHalfPct}% · {L.ddFlatPct}%</div></th>
+                          <th>Adds to losers<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>none allowed</div></th>
+                          <th>Margin excess<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>never below $0</div></th>
+                          <th className="txt">Level</th>
+                          <th className="txt">What to do</th>
+                        </tr></thead>
+                        <tbody>
+                          {rp.days.map((d) => {
+                            const k = d.checks;
+                            return (
+                              <tr key={d.date}>
+                                <td className="txt"><b>{day(d.date)}</b></td>
+                                <td>{money(d.equity)}{(rp.days[rp.days.indexOf(d) - 1]?.checks.bankroll !== k.bankroll) && sub(`bankroll ${money(k.bankroll)}`)}</td>
+                                <td className={pc(d.perf)}>{signed(d.perf)}</td>
+                                <td className={cls(k.day.status)}>{d.day ? signed(d.day) : "—"}{k.day.status !== "ok" && sub(`limit ${signed(k.day.limit)} · ${over(d.day, k.day.limit)}`)}</td>
+                                <td className={cls(k.open.status)}>{d.upl ? signed(d.upl) : "—"}{k.open.status !== "ok" && sub(`limit ${signed(k.open.limit)} · ${over(d.upl, k.open.limit)}`)}</td>
+                                <td className={cls(k.margin.status)}>{isFinite(d.marginPct) ? `${d.marginPct.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(d.im - d.equity * L.marginPct / 100)} over the cap`)}</td>
+                                <td className={cls(k.var.status)}>{k.var.value ? money(k.var.value) : "—"}{k.var.status !== "ok" && sub(`limit ${money(k.var.limit)} · ${(k.var.used / 100).toFixed(1)}× it`)}</td>
+                                <td className={cls(k.dd.status)}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : "—"}{k.dd.status !== "ok" && sub(`${money(k.dd.amount)} below the peak`)}</td>
+                                <td className={cls(k.adds.status)} title={k.adds.list.map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${x.product} at ${x.price} while ${x.held > 0 ? "long" : "short"} ${Math.abs(x.held)} from ${+x.avg.toFixed(4)} — ${money(x.openLoss)} down`).join("\n") || undefined}>
+                                  {k.adds.count ? `${k.adds.count}×` : "—"}{k.adds.count ? sub(`up to ${money(k.adds.maxLoss)} down`) : null}
+                                </td>
+                                <td className={cls(k.excess.status)}>{signed(d.excess)}{k.excess.deposit ? sub(`deposit ${money(k.excess.deposit)}`) : null}</td>
+                                <td className="txt"><span className={STATUS_PILL[d.level][0]}>{levelTxt[d.level]}</span></td>
+                                <td className={`txt ${cls(d.level)}`} style={{ fontSize: 11, minWidth: 220 }}>{d.todo || "—"}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Hover "Adds to losers" for each fill. Change "Your limits" to see when other thresholds would have fired.</div>
+                  </div>
+                );
+              })()}
             </div>
           );
         })}

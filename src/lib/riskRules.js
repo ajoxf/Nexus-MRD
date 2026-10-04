@@ -1,4 +1,5 @@
 import { instrumentOf } from "./brokerFeed.js";
+import { MARGIN_VAR } from "./var.js";
 
 /*
  * Risk guardrails: the rules that stop a drawdown before it gets large.
@@ -338,7 +339,40 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     else if (d.ddPct >= L.ddWarnPct - 1e-9) flag("ddwarn", "watch", `${d.ddPct.toFixed(1)}% below the peak — caution, no new positions`);
     if (c.excess < 0) { flag("call", "cut", `Margin deficit ${usd(c.excess)} — cut to meet it`); callSeen = true; }
     else if (callSeen && c.cash > 0) { flag("call", "cut", `Deposit ${usd(c.cash)} after a margin call — size should have been cut, not funded`); depositAfterCall = true; }
-    days.push({ date: c.date, equity: c.equity, perf: d.perf, day: +day.toFixed(2), marginPct, upl: c.upl, excess: c.excess, ddPct: d.ddPct, flags });
+    // VaR from that day's margin (the same estimate the live check uses without price history).
+    const varEst = c.im * MARGIN_VAR.day99, varLimit = B * L.varPct / 100, varUsed = varLimit > 0 ? varEst / varLimit * 100 : 0;
+    const varStatus = !c.im ? "ok" : varUsed > L.varHardPct ? "flat" : varUsed > 100 ? "cut" : varUsed > L.varWatchPct ? "watch" : "ok";
+    if (varStatus !== "ok") flag("var", varStatus === "watch" ? "watch" : "cut", `VaR ${usd(varEst)} — ${(varUsed / 100).toFixed(1)}× the ${usd(varLimit)} limit`);
+
+    // Every rule's figure, its limit that day, and what it said — for the replay table and the CSV.
+    const st = (bad, warn) => (bad ? "cut" : warn ? "watch" : "ok");
+    const dayLimit = B * L.dayLossPct / 100, openLimit = B * L.bookLossPct / 100, addLimit = B * L.addLossPct / 100;
+    const checks = {
+      bankroll: B,
+      var: { value: +varEst.toFixed(2), limit: +varLimit.toFixed(2), used: varUsed, status: varStatus },
+      margin: { value: marginPct, limit: L.marginPct, cutAt: L.marginPct * 1.5, status: st(marginPct > L.marginPct * 1.5, marginPct > L.marginPct) },
+      day: { value: +day.toFixed(2), limit: +(-dayLimit).toFixed(2), status: st(B > 0 && day < -dayLimit, B > 0 && day < -dayLimit * 0.75) },
+      open: { value: c.upl, limit: +(-openLimit).toFixed(2), status: st(B > 0 && c.upl < -openLimit, B > 0 && c.upl < -openLimit * 0.75) },
+      dd: { value: d.ddPct, amount: d.dd, warn: L.ddWarnPct, half: L.ddHalfPct, flat: L.ddFlatPct,
+        status: d.ddPct >= L.ddFlatPct ? "flat" : d.ddPct >= L.ddHalfPct ? "cut" : d.ddPct >= L.ddWarnPct - 1e-9 ? "watch" : "ok" },
+      adds: { count: todays.length, maxLoss: todays.length ? Math.max(...todays.map((x) => x.openLoss)) : 0, limit: +addLimit.toFixed(2),
+        list: todays.map((x) => ({ product: x.product, side: x.side, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
+      excess: { value: c.excess, deposit: c.cash > 0 ? c.cash : 0, status: c.excess < 0 || (callSeen && c.cash > 0 && c.excess >= 0) ? "cut" : "ok" },
+    };
+    const rank = { ok: 0, watch: 1, cut: 2, flat: 3 };
+    const worst = Object.values(checks).filter((x) => x && x.status).reduce((w, x) => (rank[x.status] > rank[w] ? x.status : w), "ok");
+    const flatWhy = [checks.var.status === "flat" && `VaR ${(varUsed / 100).toFixed(1)}× its limit`, checks.dd.status === "flat" && `${d.ddPct.toFixed(1)}% below the peak`].filter(Boolean).join(", ");
+    const todo = worst === "flat" ? `Go flat — ${flatWhy}` : worst === "ok" ? "" : [
+      checks.adds.count && "Stop adding to losers",
+      checks.day.status === "cut" && "No new trades today",
+      checks.open.status === "cut" && "Halve the book",
+      checks.dd.status === "cut" && "Half size",
+      checks.margin.status === "cut" && `Cut margin to ${L.marginPct}% (${usd(c.im - c.equity * L.marginPct / 100)})`,
+      checks.var.status === "cut" && `Cut VaR to ${usd(varLimit)}`,
+      checks.excess.status === "cut" && (c.excess < 0 ? "Cut to meet the margin call" : "Don't fund a call — cut size"),
+      worst === "watch" && "No new positions",
+    ].filter(Boolean).join(" · ");
+    days.push({ date: c.date, equity: c.equity, perf: d.perf, day: +day.toFixed(2), marginPct, upl: c.upl, excess: c.excess, im: c.im, ddPct: d.ddPct, flags, checks, level: worst, todo });
   });
   const flatDay = first.ddflat ? days.find((x) => x.date === first.ddflat) : null;
   const end = days[days.length - 1];
@@ -365,4 +399,20 @@ export function tradingDaysBetween(from, to) {
     if (![0, 6].includes(next.getUTCDay())) n += sign;
   }
   return n;
+}
+
+// The replay as CSV: one row per close, every rule's figure next to its limit.
+export function replayCsv(rp) {
+  const head = ["Close", "Equity", "Bankroll", "Trading P/L to date", "Day", "Day limit", "Margin % of equity", "Margin cap %", "Open P/L", "Open loss limit",
+    "Below peak %", "Below peak $", "Caution %", "Half size %", "Go flat %", "VaR (from margin)", "VaR limit", "Adds to losers", "Biggest add loss", "Add threshold",
+    "Margin excess", "Deposit", "Level", "What to do"];
+  const r2 = (x) => (x === null || x === undefined || !isFinite(x) ? "" : (+x).toFixed(2));
+  const q = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+  const rows = rp.days.map((d) => {
+    const k = d.checks;
+    return [d.date, r2(d.equity), r2(k.bankroll), r2(d.perf), r2(d.day), r2(k.day.limit), r2(k.margin.value), r2(k.margin.limit), r2(d.upl), r2(k.open.limit),
+      r2(k.dd.value), r2(k.dd.amount), k.dd.warn, k.dd.half, k.dd.flat, r2(k.var.value), r2(k.var.limit), k.adds.count, r2(k.adds.maxLoss), r2(k.adds.limit),
+      r2(k.excess.value), r2(k.excess.deposit), d.level, q(d.todo)].join(",");
+  });
+  return [head.join(","), ...rows].join("\n");
 }

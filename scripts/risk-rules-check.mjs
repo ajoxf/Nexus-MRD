@@ -1,4 +1,4 @@
-import { shortName, bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
+import { replayCsv, shortName, bankrollFor, drawdowns, addsToLosers, checkRules, replay, tradingDaysBetween, RISK_DEFAULTS } from '../src/lib/riskRules.js';
 
 /*
  * The risk guardrails, worked by hand on a made-up account shaped like a real run: a good start,
@@ -43,11 +43,15 @@ is('legs of a spread trade are not trades', addsToLosers([{ ...f('2026-08-05T09:
 // ---------- the replay ----------
 const r = replay(closes, crack);
 const ids = (date) => r.days.find((d) => d.date === date).flags.map((x) => x.id);
-is('5 Aug: margin 45% of equity — no new positions', ids('2026-08-05'), ['margin']);
-is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day, 5% off the peak', ids('2026-08-06'), ['margin', 'adds', 'bookloss', 'day', 'ddwarn']);
-is('7 Aug: everything, and go flat', ids('2026-08-07'), ['margin', 'bookloss', 'day', 'ddflat', 'call']);
+is('5 Aug: margin 45% of equity — no new positions; VaR from margin over its limit', ids('2026-08-05'), ['margin', 'var']);
+is('6 Aug: margin 57%, adding to the losing short, 9k open loss, a 5.5k day, 5% off the peak', ids('2026-08-06'), ['margin', 'adds', 'bookloss', 'day', 'ddwarn', 'var']);
+is('7 Aug: everything, and go flat', ids('2026-08-07'), ['margin', 'bookloss', 'day', 'ddflat', 'call', 'var']);
+const d6 = r.days[3].checks;
+is('each replay day carries every rule\'s figure and its limit', [d6.bankroll, d6.day.value, d6.day.limit, d6.open.value, d6.open.limit, d6.adds.count, d6.adds.limit], [100000, -5500, -4000, -9000, -6000, 2, 500]);
+is('…and one line of what to do', [r.days[3].todo, r.days[1].todo], ['Go flat — VaR 10.6× its limit', 'Go flat — VaR 3.5× its limit']);
+is('the replay as CSV, one row per close', [replayCsv(r).split('\n').length, replayCsv(r).split('\n')[0].split(',')[5]], [7, 'Day limit']);
 is('10 Aug: a deposit after the call is flagged', r.days[5].flags.map((x) => x.id).includes('call'), true);
-is('the first day each rule would have fired', r.first, { margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddwarn: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
+is('the first day each rule would have fired', r.first, { var: '2026-08-04', margin: '2026-08-05', adds: '2026-08-06', bookloss: '2026-08-06', day: '2026-08-06', ddwarn: '2026-08-06', ddflat: '2026-08-07', call: '2026-08-07' });
 is('going flat on 7 Aug would have kept 7k of what followed', r.flat, { date: '2026-08-07', perf: -8000, endPerf: -15000, saved: 7000 });
 
 // ---------- the live check ----------
