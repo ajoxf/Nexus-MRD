@@ -5,7 +5,15 @@ const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 // persistSession keeps you signed in across page reloads; without it every
 // refresh would drop you back at the sign-in screen.
-export const supabase = URL && KEY
+/*
+ * /demo: an invented account, generated in the browser (src/lib/demo.js). It never talks to the
+ * database — no client is created — and keeps its data under its own keys in this browser, so a
+ * visitor to the demo can neither see nor touch a real account, and a trader who opens the demo
+ * on their own machine keeps their own browser data apart from it.
+ */
+export const isDemo = typeof window !== "undefined" && /^\/demo(\/|$)/.test(window.location.pathname);
+
+export const supabase = URL && KEY && !isDemo
   ? createClient(URL, KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } })
   : null;
 export const isRemote = !!supabase;
@@ -303,7 +311,30 @@ export const auth = isRemote
     };
 
 // ---------- Browser storage (used until a database is connected) ----------
-const LS_SETTINGS = "mrt:settings", LS_FILLS = "mrt:fills", LS_STATEMENTS = "mrt:statements";
+const LS = isDemo ? "nexus-demo:" : "mrt:";
+const LS_SETTINGS = `${LS}settings`, LS_FILLS = `${LS}fills`, LS_STATEMENTS = `${LS}statements`;
+
+/*
+ * The demo is generated afresh once a day (its dates run up to yesterday), and again whenever the
+ * visitor asks for a clean copy. Anything they change in between — a mark, a fill, a limit — is
+ * theirs to play with, in this browser only.
+ */
+const DEMO_VERSION = "1";
+const demoReady = !isDemo ? Promise.resolve() : import("./demo.js").then(({ buildDemo }) => {
+  const stamp = `${DEMO_VERSION}|${new Date().toDateString()}`;
+  try {
+    if (localStorage.getItem(`${LS}stamp`) === stamp) return;
+    const d = buildDemo(new Date());
+    localStorage.setItem(LS_SETTINGS, JSON.stringify(d.settings));
+    localStorage.setItem(LS_FILLS, JSON.stringify(d.fills));
+    localStorage.setItem(LS_STATEMENTS, JSON.stringify(d.statements));
+    localStorage.setItem(`${LS}stamp`, stamp);
+  } catch (e) { console.error("[demo] could not set up the demo account", e); }
+});
+export function resetDemo() {
+  for (const k of ["settings", "fills", "statements", "stamp"]) localStorage.removeItem(`${LS}${k}`);
+  window.location.reload();
+}
 const readFills = () => JSON.parse(localStorage.getItem(LS_FILLS) || "[]");
 const writeFills = (f) => localStorage.setItem(LS_FILLS, JSON.stringify(f));
 
@@ -316,10 +347,10 @@ const local = {
   async loadSubscription() { return { status: "active", current_period_end: null, trial_started_at: null }; },
   // Nobody to administer in browser-storage mode: there is one account and it is this one.
   async isAdmin() { return false; },
-  async getUser() { return { id: "local", email: "This browser" }; },
-  async loadSettings() { return JSON.parse(localStorage.getItem(LS_SETTINGS) || "null"); },
+  async getUser() { return isDemo ? { id: "demo", email: "Demo account" } : { id: "local", email: "This browser" }; },
+  async loadSettings() { await demoReady; return JSON.parse(localStorage.getItem(LS_SETTINGS) || "null"); },
   async saveSettings(obj) { localStorage.setItem(LS_SETTINGS, JSON.stringify(obj)); },
-  async loadFills() { return readFills(); },
+  async loadFills() { await demoReady; return readFills(); },
   async addFills(rows) {
     const cur = readFills();
     const rk = (f) => `${f.broker || "default"}|${f.ref}`;
@@ -342,7 +373,7 @@ const local = {
     return { added: fresh.length, updated };
   },
   // Browser-storage mode keeps statements in this browser only, like everything else here.
-  async loadStatements() { try { return JSON.parse(localStorage.getItem(LS_STATEMENTS) || "[]"); } catch { return []; } },
+  async loadStatements() { await demoReady; try { return JSON.parse(localStorage.getItem(LS_STATEMENTS) || "[]"); } catch { return []; } },
   async saveStatements(rows) {
     const cur = await this.loadStatements();
     const have = new Set(cur.map((r) => r.checksum));
