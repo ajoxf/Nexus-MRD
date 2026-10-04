@@ -489,6 +489,8 @@ export function replayCsv(rp, positionsOn = null) {
  * minimum (equity = margin, excess 0). Returns what would have to be added to `equity`.
  */
 export function fundingFor(im, equity, capPct, minRatio = null) {
+  // No margin in use: no size to hold, nothing to add.
+  if (!(im > 0)) return { needAtCap: 0, toCap: 0, toCall: 0, ...(minRatio > 0 ? { toMin: 0 } : {}) };
   const atCap = capPct > 0 ? im / (capPct / 100) : Infinity;
   const out = { needAtCap: +atCap.toFixed(2), toCap: +Math.max(0, atCap - equity).toFixed(2), toCall: +Math.max(0, im - equity).toFixed(2) };
   // The trader's own minimum TNE / IM (e.g. 200%): equity = margin × ratio.

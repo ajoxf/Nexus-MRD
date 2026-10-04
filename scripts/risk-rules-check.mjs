@@ -113,5 +113,7 @@ is('buy Oct + sell Nov together: the CL–BZ total does not grow — not averagi
 is('buy Oct alone while the total is down: averaging down', addsToLosers([...start, sp('2026-08-24T07:00:00Z', 'Buy', OCT, -7.70)], { minLoss: 500 }).map((x) => [x.held, x.openLoss, x.months]), [[6, 3900, 1]]);
 is('roll: sell Oct, buy Nov — not averaging down', addsToLosers([...start, sp('2026-08-24T08:50:00Z', 'Sell', OCT, -7.57, 6), sp('2026-08-24T08:51:00Z', 'Buy', NOV, -7.62, 6)], { minLoss: 500 }).length, 0);
 
+is('no margin in use: nothing to add, even with equity below zero', fundingFor(0, -8729, 50), { needAtCap: 0, toCap: 0, toCall: 0 });
+
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);
