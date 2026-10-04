@@ -759,3 +759,10 @@ table.postable tr.total td { font-weight: 600; border-top: 1px solid var(--line,
 /* Daily statements as a tree: the group's row heads each day, sub-accounts sit beneath it. */
 tr.dayhead > td { border-top: 2px solid var(--line2); }
 tr.daysub > td { background: var(--panel2); }
+
+/* Risk warnings flash when a current price is typed (Tracker: flashAt). */
+.banner.flash { animation: risk-flash .5s ease-in-out 6 alternate; }
+.banner.flash-watch { border-color: #D9A23B; }
+.banner.flash-cut, .banner.flash-flat { border-color: #C9474F; }
+@keyframes risk-flash { from { background: #FFF3D6; } to { background: #F8D2D4; } }
+@media (prefers-reduced-motion: reduce) { .banner.flash { animation: none; } }

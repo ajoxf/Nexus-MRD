@@ -2345,6 +2345,19 @@ function Tracker({ user }) {
     });
   }, [pf, settings]);
 
+  /*
+   * Typing a current price flashes the risk warnings: once the trader pauses (0.7 s), every rule
+   * is checked at the new price and, if anything isn't Normal, the banner flashes with all of it
+   * for a few seconds — on whatever tab the price was typed.
+   */
+  const [flashAt, setFlashAt] = useState(0);
+  const flashTimer = useRef(null);
+  useEffect(() => {
+    if (!flashAt) return;
+    const t = setTimeout(() => setFlashAt(0), 6000);
+    return () => clearTimeout(t);
+  }, [flashAt]);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
   if (loadErr) return <div className="auth"><div className="panel"><div className="ph"><h2 className="bad">Couldn't load your data</h2></div><div className="pb"><p>{loadErr}</p><p className="dim">Please reload the page.</p></div></div></div>;
   if (!settings || !pf) return <div className="auth dim">Loading your data…</div>;
 
@@ -2361,7 +2374,10 @@ function Tracker({ user }) {
   const setView = (v) => setSettings((s) => ({ ...s, view: v }));
   const setBroker = (id, k, v) => setSettings((s) => ({ ...s, brokers: s.brokers.map((b) => (b.id === id ? { ...b, [k]: v } : b)) }));
   // A typed price carries when it was typed, so the next statement's settlement can replace it.
-  const setMark = (key, k, v) => setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v, ...(k === "price" ? { priceTs: new Date().toISOString() } : {}) } } }));
+  const setMark = (key, k, v) => {
+    setSettings((s) => ({ ...s, marks: { ...s.marks, [key]: { ...s.marks[key], [k]: v, ...(k === "price" ? { priceTs: new Date().toISOString() } : {}) } } }));
+    if (k === "price" || k === "stop") { clearTimeout(flashTimer.current); flashTimer.current = setTimeout(() => setFlashAt(Date.now()), 700); }
+  };
   const addFills = async (rows) => { const res = await db.addFills(rows); await reloadFills(); return res; };
   const setScen = (patch) => setSettings((s) => ({ ...s, scenario: { ...s.scenario, ...patch } }));
   /*
@@ -2486,11 +2502,14 @@ function Tracker({ user }) {
 
       <main className="main">
         {!isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
-        {worst && worst.res.level.level !== "ok" && tab !== "risk" && (
-          <div className="banner" role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
+        {worst && worst.res.level.level !== "ok" && (tab !== "risk" || flashAt > 0) && (
+          <div key={flashAt || "steady"} className={`banner${flashAt ? ` flash flash-${worst.res.level.level}` : ""}`} role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
             <b className={worst.res.level.level === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[worst.res.level.level]} {worst.a.name}: {worst.res.level.title}</b>
             {worst.res.budget && <span> · {worst.res.budget.ddPct.toFixed(1)}% below the peak{worst.res.budget.toFlat > 0 ? ` · ${money(worst.res.budget.toFlat)} more before go flat` : ""}</span>}
-            <span> · {worst.res.level.actions[0]}{worst.res.level.actions.length > 1 ? ` (+${worst.res.level.actions.length - 1} more)` : ""} · <u>Risk tab</u></span>
+            {flashAt
+              ? <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>{risks.filter((r) => r.res.level.level !== "ok").flatMap((r) => r.res.level.all.map((x, i) => <li key={`${r.a.id}|${i}`} className={x.status === "watch" ? "warn" : "bad"}>{{ watch: "🟠", cut: "🔴", flat: "⛔" }[x.status]} {risks.length > 1 ? `${r.a.name} · ` : ""}{x.text}</li>))}</ul>
+              : <span> · {worst.res.level.actions[0]}{worst.res.level.actions.length > 1 ? ` (+${worst.res.level.actions.length - 1} more)` : ""}</span>}
+            {tab !== "risk" && <span> · <u>Risk tab</u></span>}
           </div>
         )}
         {tab === "dash" && <Dashboard pf={pf} settings={settings} view={view} setView={setView} fills={fills} setMark={setMark} addFills={addFills} reloadFills={reloadFills} goFills={() => goTab("fills")} goSettings={() => goTab("settings")} goScen={() => goTab("scen")} />}

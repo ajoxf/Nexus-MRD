@@ -255,6 +255,15 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
  *   ok      Normal
  */
 export function levelOf(rules) {
+  const level = levelOnly(rules);
+  // Every warning, worst first: what the banner flashes when a price is typed.
+  const rank = { flat: 0, cut: 1, watch: 2 };
+  level.all = rules.filter((r) => r.status in rank).sort((a, b) => rank[a.status] - rank[b.status])
+    .map((r) => ({ status: r.status, text: `${r.label}: ${r.action}` }));
+  return level;
+}
+
+function levelOnly(rules) {
   const has = (s) => rules.filter((r) => r.status === s);
   if (has("flat").length) return { level: "flat", title: "Go flat", actions: has("flat").map((r) => `${r.label}: ${r.action}`) };
   if (has("cut").length) return { level: "cut", title: "Reduce now", actions: has("cut").map((r) => `${r.label}: ${r.action}`) };

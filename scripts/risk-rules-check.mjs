@@ -81,6 +81,7 @@ is('VaR limit 4% of a 100k bankroll; 3k is 75%: fine', [checkRules(withVar(3000)
 is('VaR at 80% of the limit: no new risk, and the level says caution', [checkRules(withVar(3520)).rules[0].status, checkRules(withVar(3520)).level.title], ['watch', 'Caution — no new positions']);
 is('VaR past the limit: cut the excess', checkRules(withVar(5000)).rules[0].action, 'Cut $1,000 of VaR today, largest position first');
 is('VaR past 125% of the limit: go flat', checkRules(withVar(6000)).level.level, 'flat');
+is('every warning is listed, worst first, not only the worst level', checkRules(acc({ im: 44000, todayPnl: -4500, var: { method: 'margin', var99: 6000, var95: 4000, byPosition: [] } })).level.all.map((x) => x.status), ['flat', 'cut', 'watch']);
 is('the method is said', checkRules(withVar(3000)).rules[0].now, "$3,000 · 75% of the limit (estimated from Orient's margin)");
 const pos = checkRules(acc({ rows: [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 2, size: 1000, avg: -8, upnl: -1000 }, { product: 'Oct26 HO-CL Crack', lots: -1, size: 1000, avg: 90, upnl: -2600 }] })).positions;
 // bankroll 100k: 3% = 3,000. Long 2 at -8: exit 3,000 / 2,000 = 1.50 lower; short 1 at 90: 3.00 higher.
