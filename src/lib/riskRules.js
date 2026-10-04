@@ -91,25 +91,90 @@ export function drawdowns(closes, liveEquity = null) {
 }
 
 /*
- * Fills that add to a position already losing at the fill's own price — selling more of a short
- * above its average, buying more of a long below it — by more than minLoss dollars (so a scalper's
- * one-tick add isn't a "loser"). Average cost per product and account, in the order the fills
- * were made; a position that goes through zero starts again. Legs of a spread trade are skipped
- * (the spread row is the trade). sizeOf(fill) → contract size; minLoss: dollars, or (fill) → dollars.
+ * Fills that add to a losing position — averaging down.
+ *
+ * Judged on the trader's whole exposure to a kind of spread, across months: CL–BZ Oct, Nov and Dec
+ * are one CL–BZ position, the HO–CL cracks one, each calendar one, each outright contract its own.
+ * So a roll (sell Oct, buy Nov) or a month-against-month trade, where the total doesn't grow, is
+ * not averaging down; selling more of a losing crack is. A fill counts when it adds in the
+ * direction already held, the total an hour later (pairMinutes) is bigger than just before it,
+ * and the total is losing more than minLoss dollars —
+ * each month valued at this fill's price for its own month, else the month's last traded price.
+ * Legs of a spread trade are skipped (the spread row is the trade).
+ * sizeOf(fill) → contract size; minLoss: dollars, or (fill) → dollars.
+ * Each result: { ts, product, side, qty, price, avg (of the whole exposure), held (total before),
+ * openLoss, months (how many months make up the exposure) }.
  */
-export function addsToLosers(fills, { sizeOf = () => 1000, minLoss = 0 } = {}) {
-  const pos = new Map();
+/*
+ * A spread traded leg by leg — CL Oct26 sold and BZ Oct26 bought within `minutes` — is one CL–BZ
+ * Oct26 spread trade (sold at CL − BZ), so a spread closed by legging out is seen as closed.
+ * Matched lot for lot; whatever doesn't match stays an outright.
+ */
+function legsAsSpreads(fills, minutes) {
   const out = [];
-  const sorted = [...(fills || [])].filter((f) => !f.is_leg).sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  const used = new Map();
+  const t = (f) => new Date(f.ts).getTime();
+  const left = (f) => Math.abs(+f.qty) - (used.get(f) || 0);
+  const outright = (f) => { const i = instrumentOf(f.product); return i && i.kind === "Outright" ? i.legs[0] : null; };
+  const label = (m) => { const y = m.slice(2, 4), mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m.slice(4) - 1]; return `${mo}${y}`; };
+  for (const cl of fills) {
+    const a = outright(cl);
+    if (!a || a.code !== "CL") continue;
+    while (left(cl) > 1e-9) {
+      const bz = fills.filter((g) => { const b = outright(g); return b && b.code === "BZ" && b.month === a.month && g.broker === cl.broker && g.side !== cl.side && left(g) > 1e-9 && Math.abs(t(g) - t(cl)) <= minutes * 60000; })
+        .sort((x, y) => Math.abs(t(x) - t(cl)) - Math.abs(t(y) - t(cl)))[0];
+      if (!bz) break;
+      const n = Math.min(left(cl), left(bz));
+      used.set(cl, (used.get(cl) || 0) + n); used.set(bz, (used.get(bz) || 0) + n);
+      const m = label(a.month);
+      out.push({ ts: String(cl.ts) > String(bz.ts) ? cl.ts : bz.ts, broker: cl.broker, product: `CL ${m} - BZ ${m} Inter-Product`, side: cl.side, qty: n, price: +(+cl.price - +bz.price).toFixed(6), synthetic: true });
+    }
+  }
+  for (const f of fills) { const r = left(f); if (r > 1e-9) out.push(r === Math.abs(+f.qty) ? f : { ...f, qty: r }); }
+  return out;
+}
+
+export function familyOf(product) {
+  const ins = instrumentOf(product);
+  if (!ins) return String(product);
+  if (ins.kind === "Outright") return `Outright|${ins.legs[0].code}|${ins.legs[0].month}`;
+  return `${ins.kind}|${ins.legs.map((l) => l.code).join("-")}`;
+}
+
+export function addsToLosers(fills, { sizeOf = () => 1000, minLoss = 0, pairMinutes = 60 } = {}) {
+  const pos = new Map();   // per product: { lots, avg, last, size, fam }
+  const out = [];
+  const sorted = legsAsSpreads([...(fills || [])].filter((f) => !f.is_leg), pairMinutes).sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  // The exposure to each kind of spread an hour after each fill: a roll or a month-against-month
+  // trade leaves it where it was; averaging down leaves it bigger.
+  const famKey = (f) => `${f.broker}|${familyOf(f.product)}`;
+  const signed = (f) => (f.side === "Buy" ? 1 : -1) * Math.abs(+f.qty);
+  const tms = (f) => new Date(f.ts).getTime();
+  const totalAt = (fam, upTo) => sorted.reduce((t, g) => (famKey(g) === fam && tms(g) <= upTo ? t + signed(g) : t), 0);
   for (const f of sorted) {
     const k = `${f.broker}|${f.product}`;
-    const p = pos.get(k) || { lots: 0, avg: 0 };
+    const fam = `${f.broker}|${familyOf(f.product)}`;
+    const p = pos.get(k) || { lots: 0, avg: 0, last: null, size: sizeOf(f), fam };
     const q = (f.side === "Buy" ? 1 : -1) * Math.abs(+f.qty);
     const price = +f.price;
-    if (p.lots && Math.sign(q) === Math.sign(p.lots)) {
-      const openLoss = (p.lots > 0 ? p.avg - price : price - p.avg) * Math.abs(p.lots) * sizeOf(f);
+
+    // The whole exposure to this kind of spread, before the fill.
+    const members = [...pos.entries()].filter(([key, x]) => x.fam === fam && x.lots);
+    const total = members.reduce((t, [, x]) => t + x.lots, 0);
+    const later = totalAt(fam, tms(f) + pairMinutes * 60000);
+    // Bigger than both just before and an hour before: a roll legged in either order isn't growth.
+    const before = Math.max(Math.abs(total), Math.sign(totalAt(fam, tms(f) - pairMinutes * 60000)) === Math.sign(total) ? Math.abs(totalAt(fam, tms(f) - pairMinutes * 60000)) : 0);
+    const grew = Math.sign(later) === Math.sign(total) && Math.abs(later) > before + 1e-9;
+    if (total && Math.sign(q) === Math.sign(total) && grew) {
+      const pnl = members.reduce((t, [key, x]) => t + x.lots * ((key === k ? price : x.last ?? x.avg) - x.avg) * x.size, 0);
+      const openLoss = -pnl;
       const floor = typeof minLoss === "function" ? minLoss(f) : minLoss;
-      if (openLoss > Math.max(floor, 1e-9)) out.push({ ts: f.ts, broker: f.broker, product: f.product, side: f.side, qty: Math.abs(q), price, avg: +p.avg.toFixed(6), held: p.lots, openLoss: +openLoss.toFixed(2) });
+      const avg = members.reduce((t, [, x]) => t + x.avg * Math.abs(x.lots), 0) / members.reduce((t, [, x]) => t + Math.abs(x.lots), 0);
+      if (openLoss > Math.max(floor, 1e-9)) out.push({ ts: f.ts, broker: f.broker, product: f.product, side: f.side, qty: Math.abs(q), price, avg: +avg.toFixed(6), held: total, openLoss: +openLoss.toFixed(2), months: members.length });
+    }
+
+    // This product's own position, average cost.
+    if (p.lots && Math.sign(q) === Math.sign(p.lots)) {
       p.avg = (p.avg * Math.abs(p.lots) + price * Math.abs(q)) / (Math.abs(p.lots) + Math.abs(q));
       p.lots += q;
     } else if (p.lots && Math.abs(q) > Math.abs(p.lots)) {
@@ -119,6 +184,7 @@ export function addsToLosers(fills, { sizeOf = () => 1000, minLoss = 0 } = {}) {
       p.lots += q;
     }
     if (Math.abs(p.lots) < 1e-9) { p.lots = 0; p.avg = 0; }
+    p.last = price;
     pos.set(k, p);
   }
   return out;
@@ -158,9 +224,17 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
 
   // 2. Adding to a loser, in the fills since the last statement.
   const adds = addsToLosers(acc.allFills || [], { sizeOf: acc.sizeOf, minLoss: B * L.addLossPct / 100 }).filter((x) => (acc.fillsToday || []).some((f) => f.ts === x.ts && f.product === x.product));
+  /*
+   * How loud: while the account is healthy (TNE / IM at or above the floor, and within the caution
+   * level of the peak) averaging down is a caution; under the floor or in drawdown, cut.
+   */
+  const ddNow = drawdowns(acc.closes, acc.equityNow);
+  const ddPctNow = ddNow.length ? ddNow[ddNow.length - 1].ddPct : 0;
+  const healthy = (!(acc.im > 0) || acc.tne / acc.im * 100 >= (acc.minRatio > 0 ? acc.minRatio : L.ratioPct)) && ddPctNow < L.ddWarnPct;
+  const addsLevel = healthy ? "watch" : "cut";
   add("adds", "No adding to a losing position", `Never add to a position that is already over ${usd(B * L.addLossPct / 100)} down`,
     adds.length ? adds.map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${x.qty} more ${shortName(x.product)} at ${x.price} while it was ${usd(x.openLoss)} down`).join(" · ") : "none since the last statement",
-    adds.length ? "cut" : "ok", adds.length ? "Stop adding to it. Hold or cut what you have — don't average down" : "—");
+    adds.length ? addsLevel : "ok", adds.length ? (addsLevel === "cut" ? "Stop adding to it. Hold or cut what you have — don't average down" : "Don't add more to it — the account is healthy, but this is how drawdowns start") : "—");
 
   // 3. Open loss: each position, and the book.
   const posLimit = B * L.posLossPct / 100, bookLimit = B * L.bookLossPct / 100;
@@ -262,7 +336,7 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   const short = (id, text) => { const r = rules.find((x) => x.id === id); if (r && r.card && r.status !== "ok" && r.status !== "na") r.card.short = text; };
   const st = (id) => rules.find((x) => x.id === id)?.status;
   short("margin", `Cut ${usd(acc.im - acc.tne * L.marginPct / 100)} of margin`);
-  short("adds", "Stop adding to it");
+  short("adds", st("adds") === "cut" ? "Stop adding to it" : "Don't add more");
   short("posloss", bad.length ? `Close ${bad.map((r) => shortName(r.product)).join(", ")}` : "Watch it");
   short("bookloss", st("bookloss") === "cut" ? "Halve the book" : "Watch it");
   short("day", st("day") === "cut" ? "No new trades today" : "Slow down");
@@ -328,7 +402,9 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
     const ratio = c.im > 0 ? c.equity / c.im * 100 : Infinity;
     if (marginPct > L.marginPct) flag("margin", "cut", `TNE / IM ${pct(ratio)} — under ${L.ratioPct}%: cut back to it`);
     const todays = adds.filter((x) => String(x.ts).slice(0, 10) === c.date);
-    if (todays.length) flag("adds", "cut", `Added to a losing position ${todays.length}×: ${[...new Set(todays.map((x) => x.product))].join(", ")} at ${todays.map((x) => x.price).join(", ")} (up to ${usd(Math.max(...todays.map((x) => x.openLoss)))} down)`);
+    const addsHealthy = (!(c.im > 0) || c.equity / c.im * 100 >= L.ratioPct) && d.ddPct < L.ddWarnPct;
+    const addsLevel = addsHealthy ? "watch" : "cut";
+    if (todays.length) flag("adds", addsLevel, `Added to a losing position ${todays.length}×: ${[...new Set(todays.map((x) => x.product))].join(", ")} at ${todays.map((x) => x.price).join(", ")} (up to ${usd(Math.max(...todays.map((x) => x.openLoss)))} down)`);
     if (B > 0 && c.upl < -B * L.bookLossPct / 100) flag("bookloss", "cut", `Open loss ${usd(c.upl)} — over ${L.bookLossPct}% of bankroll: halve`);
     if (B > 0 && day < -B * L.dayLossPct / 100) flag("day", "cut", `Day ${sgn(day)} — over ${L.dayLossPct}% of bankroll: no new trades`);
     if (d.ddPct >= L.ddFlatPct) flag("ddflat", "cut", `${d.ddPct.toFixed(1)}% below the peak — go flat`);
@@ -348,14 +424,14 @@ export function replay(closes, fills, limits = RISK_DEFAULTS, sizeOf = () => 100
       dd: { value: d.ddPct, amount: d.dd, warn: L.ddWarnPct, half: L.ddHalfPct, flat: L.ddFlatPct,
         status: d.ddPct >= L.ddFlatPct ? "flat" : d.ddPct >= L.ddHalfPct ? "cut" : d.ddPct >= L.ddWarnPct - 1e-9 ? "watch" : "ok" },
       adds: { count: todays.length, maxLoss: todays.length ? Math.max(...todays.map((x) => x.openLoss)) : 0, limit: +addLimit.toFixed(2),
-        list: todays.map((x) => ({ product: x.product, side: x.side, qty: x.qty, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss })), status: todays.length ? "cut" : "ok" },
+        list: todays.map((x) => ({ product: x.product, side: x.side, qty: x.qty, price: x.price, held: x.held, avg: x.avg, openLoss: x.openLoss, months: x.months })), status: todays.length ? addsLevel : "ok" },
       excess: { value: c.excess, deposit: c.cash > 0 ? c.cash : 0, status: c.excess < 0 || (callSeen && c.cash > 0 && c.excess >= 0) ? "cut" : "ok" },
     };
     const rank = { ok: 0, watch: 1, cut: 2, flat: 3 };
     const worst = Object.values(checks).filter((x) => x && x.status).reduce((w, x) => (rank[x.status] > rank[w] ? x.status : w), "ok");
     const flatWhy = checks.dd.status === "flat" ? `${d.ddPct.toFixed(1)}% below the peak` : "";
     const todo = worst === "flat" ? `Go flat — ${flatWhy}` : worst === "ok" ? "" : [
-      checks.adds.count && "Stop adding to losing positions",
+      checks.adds.count && (checks.adds.status === "cut" ? "Stop adding to losing positions" : "Don't add to a losing position"),
       checks.day.status === "cut" && "No new trades today",
       checks.open.status === "cut" && "Halve the book",
       checks.dd.status === "cut" && "Half size",

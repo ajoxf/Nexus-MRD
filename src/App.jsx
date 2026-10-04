@@ -2966,7 +2966,8 @@ function addsText(list) {
   const px = (x) => +(+x).toFixed(4);
   return (list || []).map((x) => {
     const after = x.held + (x.side === "Buy" ? 1 : -1) * (x.qty || 1);
-    return `${x.side === "Buy" ? "Bought" : "Sold"} ${shortName(x.product)} at ${px(x.price)} · your average ${px(x.avg)} · ${side(x.held)} was ${money(x.openLoss)} down → now ${side(after)}`;
+    const across = x.months > 1 ? ` (all months)` : "";
+    return `${x.side === "Buy" ? "Bought" : "Sold"} ${shortName(x.product)} at ${px(x.price)} · your average ${px(x.avg)} · ${side(x.held)}${across} was ${money(x.openLoss)} down → now ${side(after)}`;
   });
 }
 
