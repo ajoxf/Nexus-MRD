@@ -2501,7 +2501,7 @@ function Tracker({ user }) {
 
       <main className="main">
         {isDemo
-          ? <div className="banner">Demo account — an invented trader, with generated Orient statements and TT fills. Nothing here is real, and nothing you change leaves this browser. <button className="linklike" onClick={resetDemo}>Start the demo again</button></div>
+          ? <div className="banner demo-banner">Demo account — an invented trader, with generated Orient statements and TT fills. Nothing here is real, and nothing you change leaves this browser. <button className="linklike" onClick={resetDemo}>Start the demo again</button></div>
           : !isRemote && <div className="banner">No database connected — data is saved in this browser only.</div>}
         {worst && worst.res.level.level !== "ok" && (tab !== "risk" || flashAt > 0) && (
           <div key={flashAt || "steady"} className={`banner${flashAt ? ` flash flash-${worst.res.level.level}` : ""}`} role="alert" style={{ cursor: "pointer" }} onClick={() => goTab("risk")}>
