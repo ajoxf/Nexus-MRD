@@ -2992,9 +2992,20 @@ const byUrgency = (rules) => [...rules].sort((a, b) => RANK_ORDER[a.status] - RA
  * The risk read-out for one account on the broker's statements: the rules now and the
  * replay of past statements. Shared by the Risk tab, the banner and the tab marker so they agree.
  */
+/*
+ * An account's risk limits: its own where set (settings.riskByAccount[id]), else the shared ones
+ * set before limits were per account (settings.risk), else the defaults. An emptied box falls back.
+ */
+function limitsFor(settings, id) {
+  const out = { ...RISK_DEFAULTS };
+  for (const src of [settings.risk || {}, settings.riskByAccount?.[id] || {}])
+    for (const [k, v] of Object.entries(src)) if (v !== "" && v !== null && isFinite(+v)) out[k] = +v;
+  return out;
+}
+
 function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0, 10)) {
   const fs = a.fromStatement;
-  const limits = { ...RISK_DEFAULTS, ...(settings.risk || {}) };
+  const limits = limitsFor(settings, a.id);
   const br = settings.brokers.find((b) => b.id === a.id) || { products: {} };
   const mine = fills.filter((f) => f.broker === a.id);
   const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
@@ -3010,12 +3021,13 @@ function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0
 const LEVEL_RANK = { ok: 0, watch: 1, cut: 2, flat: 3 };
 
 function GuardPanel({ pf, settings, setSettings, view, fills }) {
-  const [showLimits, setShowLimits] = useState(false);
+  const [showLimits, setShowLimits] = useState(() => new Set());   // account ids with the limits open
   const [showReplay, setShowReplay] = useState(false);
   const [openDays, setOpenDays] = useState(() => new Set());
   const toggleDay = (k) => setOpenDays((o) => { const n2 = new Set(o); if (n2.has(k)) n2.delete(k); else n2.add(k); return n2; });
-  const limits = { ...RISK_DEFAULTS, ...(settings.risk || {}) };
-  const setLimit = (k, v) => setSettings((s) => ({ ...s, risk: { ...(s.risk || {}), [k]: v === "" ? "" : +v } }));
+  const setLimit = (id, k, v) => setSettings((s) => ({ ...s, riskByAccount: { ...(s.riskByAccount || {}), [id]: { ...(s.riskByAccount?.[id] || {}), [k]: v === "" ? "" : +v } } }));
+  const resetLimits = (id) => setSettings((s) => { const r = { ...(s.riskByAccount || {}) }; delete r[id]; return { ...s, riskByAccount: r }; });
+  const toggleLimits = (id) => setShowLimits((o) => { const n2 = new Set(o); if (n2.has(id)) n2.delete(id); else n2.add(id); return n2; });
   const today = new Date().toISOString().slice(0, 10);
   const accts = pf.accounts.filter((a) => a.fromStatement && (view === "all" || a.id === view));
   const others = pf.accounts.filter((a) => !a.fromStatement && (view === "all" || a.id === view));
@@ -3023,27 +3035,36 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
 
   return (
     <section className="panel">
-      <div className="ph"><h2>Risk<span className="dim">When positions are getting out of hand, and what to do — on your fills and Orient's statements</span></h2>
-        <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setShowLimits((x) => !x)}>Your limits {showLimits ? "▾" : "▸"}</button></div>
+      <div className="ph"><h2>Risk<span className="dim">When positions are getting out of hand, and what to do — on your fills and Orient's statements</span></h2></div>
       <div className="pb">
-        {showLimits && (
-          <div className="fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", alignItems: "end", marginBottom: 12 }}>
-            {RISK_FIELDS.map(([k, label]) => (
-              <F key={k} label={label}><input className="in" type="number" step="any" value={limits[k]} onChange={(e) => setLimit(k, e.target.value)} placeholder={String(RISK_DEFAULTS[k])} /></F>
-            ))}
-          </div>
-        )}
         {!accts.length && <div className="faint">The guardrails run on an account's daily statements. Upload them in the Statements tab.</div>}
         {accts.map((a) => {
           const fs = a.fromStatement;
-          const { res, rp } = riskOf(pf, settings, fills, a);
+          const { res, rp, limits } = riskOf(pf, settings, fills, a);
+          const own = settings.riskByAccount?.[a.id] || {};
+          const custom = Object.values(own).some((v) => v !== "" && v !== null && v !== undefined);
           const flagged = rp.days.filter((d) => d.flags.length);
           return (
             <div key={a.id} style={{ marginBottom: 16 }}>
-              <div style={{ marginBottom: 6 }}><b>{a.name}</b>
+              <div style={{ marginBottom: 6, display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}><b>{a.name}</b>
                 
                 {res.bankroll && <span className="faint" style={{ fontSize: 11 }}> · bankroll {money(res.bankroll.amount)} ({res.bankroll.from === "previous month" ? `Orient's equity on ${day(res.bankroll.baseDate)}` : `first statement, ${day(res.bankroll.baseDate)}`}{res.bankroll.cash ? `, ${signed(res.bankroll.cash)} moved in/out since` : ""})</span>}
+              <span style={{ flex: 1 }} />
+                <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => toggleLimits(a.id)}>{a.name}'s limits{custom ? " (own)" : " (default)"} {showLimits.has(a.id) ? "▾" : "▸"}</button>
               </div>
+              {showLimits.has(a.id) && (
+                <div style={{ border: "1px solid var(--line)", borderRadius: 4, padding: "8px 12px", marginBottom: 10 }}>
+                  <div className="fg" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", alignItems: "end" }}>
+                    {RISK_FIELDS.map(([k, label]) => (
+                      <F key={k} label={label}><input className="in" type="number" step="any" value={own[k] ?? ""} onChange={(e) => setLimit(a.id, k, e.target.value)} placeholder={`${limits[k]}${own[k] === undefined || own[k] === "" ? " (default)" : ""}`} aria-label={`${a.name}: ${label}`} /></F>
+                    ))}
+                  </div>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+                    These apply to {a.name} only; an empty box uses the default shown. The TNE / IM floor ({n(settings.limits?.minRatio) || 200}%) is set once in Settings for every account.
+                    {custom && <> <button className="btn ghost" style={{ padding: "0 8px", fontSize: 11 }} onClick={() => resetLimits(a.id)}>Back to defaults</button></>}
+                  </div>
+                </div>
+              )}
               <div className={LEVEL_CLASS[res.level.level]} style={{ border: "1px solid currentColor", borderRadius: 4, padding: "8px 12px", marginBottom: 10 }}>
                 <b style={{ fontSize: 15 }}>{res.level.level === "ok" ? "🟢" : res.level.level === "watch" ? "🟠" : res.level.level === "cut" ? "🔴" : "⛔"} {res.level.title}</b>
                 {res.level.all.length > 0 && <span style={{ fontSize: 12 }}> · {res.level.all.length} warning{res.level.all.length === 1 ? "" : "s"} — the cards below say what to do</span>}
@@ -3201,7 +3222,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                         </tbody>
                       </table>
                     </div>
-                    <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Change "Your limits" to see when other thresholds would have fired.</div>
+                    <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Change the account's limits to see when other thresholds would have fired.</div>
                   </div>
                 );
               })()}
