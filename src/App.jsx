@@ -3,7 +3,7 @@ import { db, isRemote, auth } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
-import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS } from "./lib/riskRules.js";
+import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS, tradingDaysBetween } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
 import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
@@ -15,7 +15,7 @@ import Papa from "papaparse";
 import { runScenario, breakingMove } from "./lib/scenario.js";
 import { legKey } from "./lib/spreads.js";
 import { isOptionSymbol } from "./lib/options.js";
-import { expiryState, formatExpiry, expiringRows, contractExpiry } from "./lib/expiry.js";
+import { expiryState, formatExpiry, expiringRows, contractFor, orientExpiries } from "./lib/expiry.js";
 import { applyOrder, moveTo, moveBy, isCustomised } from "./lib/layout.js";
 import { accessState, hasAccess, canStartTrial, daysLeft, LOCKED_COPY } from "./lib/access.js";
 import { normaliseCode, looksLikeCode, CODE_REFUSAL_COPY } from "./lib/codes.js";
@@ -2717,7 +2717,7 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
    */
   const ROLL_WINDOW = 7;
   rows.forEach((r) => {
-    r.contract = contractExpiry(r.spec);
+    r.contract = contractFor(r.spec, r.product, expiriesOf(pf.acct(r.broker)?.fromStatement));
     r.expiry = r.contract && expiryState(r.contract.near, new Date(), ROLL_WINDOW);
   });
   const anyExpiry = rows.some((r) => r.expiry);
@@ -2844,14 +2844,14 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
                           title={r.contract
                             ? (r.contract.far
                                 ? `Legs stop trading ${formatExpiry(r.contract.near)} and ${formatExpiry(r.contract.far)} — the earlier one is the deadline`
-                                : `Last trading day ${formatExpiry(r.contract.near)}`)
-                            : "No last trading day recorded — set it on the broker's product list"}>
+                                : `Last trading day ${formatExpiry(r.contract.near)}`) + (r.contract.source === "orient" ? " · from Orient's statement" : " · typed in Settings")
+                            : "No last trading day recorded — upload the daily statements, or set it on the broker's product list"}>
                           {r.expiry
                             ? <>
                                 {formatExpiry(r.contract.near)}
                                 <span className="lands">
                                   {r.expiry.expired ? `expired ${r.expiry.label}` : r.expiry.label}
-                                  {r.contract.far && <> · then {formatExpiry(r.contract.far)}</>}
+                                  {r.contract.far && r.contract.far !== r.contract.near && <> · then {formatExpiry(r.contract.far)}</>}
                                 </span>
                               </>
                             : "—"}
@@ -3003,6 +3003,11 @@ function limitsFor(settings, id) {
   return out;
 }
 
+// Every last trading day Orient has printed for an account: all its daily statements, latest wins.
+function expiriesOf(fs) {
+  return fs ? orientExpiries(...(fs.settleDays || []).map((d) => d.lots), fs.lots) : new Map();
+}
+
 function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0, 10)) {
   const fs = a.fromStatement;
   const limits = limitsFor(settings, a.id);
@@ -3010,13 +3015,27 @@ function riskOf(pf, settings, fills, a, today = new Date().toISOString().slice(0
   const mine = fills.filter((f) => f.broker === a.id);
   const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
   const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl, size: r.size, avg: r.avg, mark: r.mark, im: r.im }));
-  const expiries = new Map();
-  for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
+  const expiries = expiriesOf(fs);
+  // A date typed in Settings wins over Orient's, leg by leg, as it does on the Positions tab.
+  for (const [product, sp] of Object.entries(br.products || {})) {
+    const legs = instrumentOf(product)?.legs || [];
+    if (legs.length === 1 && sp?.expiry) expiries.set(`${legs[0].code}|${legs[0].month}`, sp.expiry);
+  }
   const res = checkRules({
     closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
     allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer, minRatio: n(settings.limits?.minRatio),
   }, limits);
-  return { res, limits, rp: replay(fs.closes || [], mine, limits, sizeOfFill, n(settings.limits?.minRatio)) };
+  // Every leg held, with its last trading day, nearest first.
+  const held = new Map();
+  for (const r of rows) if (r.lots) for (const l of instrumentOf(r.product)?.legs || []) {
+    const k = `${l.code}|${l.month}`;
+    const h = held.get(k) || { key: k, code: l.code, month: l.month, date: expiries.get(k) || null, in: [] };
+    h.in.push(`${r.product} ${r.lots > 0 ? "+" : ""}${r.lots}`);
+    held.set(k, h);
+  }
+  const legs = [...held.values()].map((h) => ({ ...h, days: h.date ? tradingDaysBetween(today, h.date) : null }))
+    .sort((x, y) => (x.date ? 0 : 1) - (y.date ? 0 : 1) || String(x.date).localeCompare(String(y.date)) || x.key.localeCompare(y.key));
+  return { res, limits, legs, rp: replay(fs.closes || [], mine, limits, sizeOfFill, n(settings.limits?.minRatio)) };
 }
 const LEVEL_RANK = { ok: 0, watch: 1, cut: 2, flat: 3 };
 
@@ -3040,7 +3059,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
         {!accts.length && <div className="faint">The guardrails run on an account's daily statements. Upload them in the Statements tab.</div>}
         {accts.map((a) => {
           const fs = a.fromStatement;
-          const { res, rp, limits } = riskOf(pf, settings, fills, a);
+          const { res, rp, limits, legs } = riskOf(pf, settings, fills, a);
           const own = settings.riskByAccount?.[a.id] || {};
           const custom = Object.values(own).some((v) => v !== "" && v !== null && v !== undefined);
           const flagged = rp.days.filter((d) => d.flags.length);
@@ -3109,6 +3128,27 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                     ))}</tbody>
                   </table>
                   <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>Exit price = where this position's loss reaches {limits.posLossPct}% of the bankroll. Set it as a stop in TT.</div>
+                </div>
+              )}
+
+              {legs.length > 0 && (
+                <div className="tw" style={{ marginTop: 8 }}>
+                  <table>
+                    <thead><tr><th className="txt">Expiry dates</th><th className="txt">Held in</th><th>Last trading day</th><th>Trading days left</th><th className="txt">Status (out or rolled {limits.expiryDays} trading days before)</th></tr></thead>
+                    <tbody>{legs.map((l) => {
+                      const st = l.days === null ? null : l.days < 0 ? ["bad", "Expired — check it is closed"] : l.days <= limits.expiryDays ? ["bad", "Roll or close now"] : l.days <= limits.expiryDays + 5 ? ["warn", `Plan the roll — ${l.days - limits.expiryDays} trading day${l.days - limits.expiryDays === 1 ? "" : "s"} to the deadline`] : ["ok", "Fine"];
+                      return (
+                        <tr key={l.key}>
+                          <td className="txt"><b>{l.code} {MONTHS[+l.month.slice(4) - 1]}{l.month.slice(2, 4)}</b></td>
+                          <td className="txt dim" style={{ fontSize: 12 }}>{l.in.join(" · ")}</td>
+                          <td>{l.date ? formatExpiry(l.date) : "—"}</td>
+                          <td className={st ? st[0] : "faint"}><b>{l.days ?? "—"}</b></td>
+                          <td className={`txt ${st ? st[0] : "faint"}`} style={{ fontSize: 12 }}>{st ? st[1] : "Not on Orient's statements yet"}</td>
+                        </tr>
+                      );
+                    })}</tbody>
+                  </table>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>Last trading days from Orient's Open Position files (a date typed in Settings → products wins). Trading days count weekdays from today; exchange holidays are not taken out.</div>
                 </div>
               )}
 
