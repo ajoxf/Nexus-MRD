@@ -2959,16 +2959,10 @@ function openPositionsText(lots) {
   return [...net].filter(([, q]) => q).map(([label, q]) => `${sgn(q)} ${label}`);
 }
 
-// Adds to a losing position, one line per trade:
-// "Sold at 93.75 · your average 91.95 · short 5 was $9,024 down → now short 6".
+// Adds to a losing position, one line per trade: "Bought CL–BZ Oct26 at -7.69 · Average -7.0498".
 function addsText(list) {
-  const side = (q) => `${q > 0 ? "long" : "short"} ${+Math.abs(q).toFixed(2)}`;
   const px = (x) => +(+x).toFixed(4);
-  return (list || []).map((x) => {
-    const after = x.held + (x.side === "Buy" ? 1 : -1) * (x.qty || 1);
-    const across = x.months > 1 ? ` (all months)` : "";
-    return `${x.side === "Buy" ? "Bought" : "Sold"} ${shortName(x.product)} at ${px(x.price)} · your average ${px(x.avg)} · ${side(x.held)}${across} was ${money(x.openLoss)} down → now ${side(after)}`;
-  });
+  return (list || []).map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${shortName(x.product)} at ${px(x.price)} · Average ${px(x.avg)}`);
 }
 
 // One rule as a tile: the figure now, a bar of how much of its limit is used, the limit, what to do.
@@ -3018,6 +3012,8 @@ const LEVEL_RANK = { ok: 0, watch: 1, cut: 2, flat: 3 };
 function GuardPanel({ pf, settings, setSettings, view, fills }) {
   const [showLimits, setShowLimits] = useState(false);
   const [showReplay, setShowReplay] = useState(false);
+  const [openDays, setOpenDays] = useState(() => new Set());
+  const toggleDay = (k) => setOpenDays((o) => { const n2 = new Set(o); if (n2.has(k)) n2.delete(k); else n2.add(k); return n2; });
   const limits = { ...RISK_DEFAULTS, ...(settings.risk || {}) };
   const setLimit = (k, v) => setSettings((s) => ({ ...s, risk: { ...(s.risk || {}), [k]: v === "" ? "" : +v } }));
   const today = new Date().toISOString().slice(0, 10);
@@ -3163,9 +3159,14 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                         <tbody>
                           {rp.days.map((d) => {
                             const k = d.checks;
+                            const dk = `${a.id}|${d.date}`, isOpen = openDays.has(dk);
                             return (
-                              <tr key={d.date}>
-                                <td className="txt"><b>{day(d.date)}</b></td>
+                              <React.Fragment key={d.date}>
+                              <tr>
+                                <td className="txt" style={{ whiteSpace: "nowrap" }}>
+                                  <button className="btn ghost" style={{ padding: "0 6px", fontSize: 11, marginRight: 4 }} aria-expanded={isOpen} onClick={() => toggleDay(dk)}>{isOpen ? "▾" : "▸"}</button>
+                                  <b>{day(d.date)}</b>
+                                </td>
                                 <td className="txt" style={{ fontSize: 11, minWidth: 150 }}>{positionsOn(d.date, d.im)}</td>
                                 <td>{money(d.equity)}{(rp.days[rp.days.indexOf(d) - 1]?.checks.bankroll !== k.bankroll) && sub(`bankroll ${money(k.bankroll)}`)}</td>
                                 <td className={pc(d.perf)}>{signed(d.perf)}</td>
@@ -3174,11 +3175,27 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                                 <td className={cls(k.margin.status)}>{isFinite(d.ratio) ? `${d.ratio.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(k.margin.over)} margin too much`)}</td>
                                 <td className={k.margin.toCap > 0 ? "warn" : "faint"}>{k.margin.toCap > 0 ? `+${money(k.margin.toCap)}` : "—"}{k.margin.toCall > 0 && sub(`+${money(k.margin.toCall)} just to cover margin`)}</td>
                                 <td className={cls(k.dd.status)}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : "—"}{k.dd.status !== "ok" && sub(`${money(k.dd.amount)} below the peak`)}</td>
-                                <td className={`txt ${cls(k.adds.status)}`} style={{ fontSize: 11, minWidth: 330, whiteSpace: "nowrap" }}>{k.adds.count ? addsText(k.adds.list).map((t, i) => <div key={i}>{t}</div>) : "—"}</td>
+                                <td className={`txt ${cls(k.adds.status)}`} style={{ fontSize: 11 }}>{k.adds.count ? <button className="btn ghost" style={{ padding: "0 6px", fontSize: 11 }} onClick={() => toggleDay(dk)}>{k.adds.count} trade{k.adds.count === 1 ? "" : "s"} {isOpen ? "▾" : "▸"}</button> : "—"}</td>
                                 <td className={cls(k.excess.status)}>{signed(d.excess)}{k.excess.deposit ? sub(`deposit ${money(k.excess.deposit)}`) : null}</td>
                                 <td className="txt"><span className={STATUS_PILL[d.level][0]}>{levelTxt[d.level]}</span></td>
                                 <td className={`txt ${cls(d.level)}`} style={{ fontSize: 11, minWidth: 220 }}>{d.todo || "—"}</td>
                               </tr>
+                              {isOpen && (
+                                <tr>
+                                  <td />
+                                  <td className="txt" colSpan={12} style={{ fontSize: 11, padding: "6px 8px 10px" }}>
+                                    {k.adds.count > 0 && (
+                                      <div style={{ marginBottom: 6 }}>
+                                        <b>Added to a losing position</b>
+                                        {addsText(k.adds.list).map((t, i) => <div key={i} className={cls(k.adds.status)}>{t}</div>)}
+                                      </div>
+                                    )}
+                                    <b>What the rules said</b>
+                                    {d.flags.length ? d.flags.map((f, i) => <div key={i} className={f.level === "cut" ? "bad" : "warn"}>{f.text}</div>) : <div className="ok">Nothing — within every rule</div>}
+                                  </td>
+                                </tr>
+                              )}
+                              </React.Fragment>
                             );
                           })}
                         </tbody>
