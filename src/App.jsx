@@ -2941,13 +2941,13 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 
 // ---------- Risk guardrails (accounts on the broker's statements) ----------
 const RISK_FIELDS = [
-  ["ratioPct", "TNE / IM to add positions, %"], ["cutRatioPct", "TNE / IM to hold — cut below, %"], ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
+ ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
   ["dayLossPct", "Day's loss, % of bankroll"], ["ddWarnPct", "Drawdown: caution, %"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
   ["addLossPct", "Adding to a loser: counts when it's down over, % of bankroll"], ["expiryDays", "Out before expiry, trading days"],
 ];
 const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut: ["pill bad", "CUT"], flat: ["pill bad", "GO FLAT"], na: ["pill dim", "—"] };
 const LEVEL_CLASS = { ok: "ok", watch: "warn", cut: "bad", flat: "bad" };
-const RULE_NAMES = { ddwarn: "Drawdown: caution", margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
+const RULE_NAMES = { ddwarn: "Drawdown: caution", margin: "TNE / IM under 200%", adds: "Added to a losing position", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
 
 // Open lots as lines: "+3 CL–BZ Nov26", "−6 Oct26 HO–CL Crack", then outrights.
 function openPositionsText(lots) {
@@ -2957,6 +2957,18 @@ function openPositionsText(lots) {
   const net = new Map();
   for (const x of [...spreads.map((y) => ({ ...y, label: shortName(y.label) })), ...outrights]) if (x.lots) net.set(x.label, (net.get(x.label) || 0) + x.lots);
   return [...net].filter(([, q]) => q).map(([label, q]) => `${sgn(q)} ${label}`);
+}
+
+// Adds to a losing position in plain words: "Sold 4 more HO–CL Oct26 Crack while it was $9,024 down".
+function addsText(list) {
+  const by = new Map();
+  for (const x of list || []) {
+    const k = `${x.side}|${x.product}`;
+    const g = by.get(k) || { side: x.side, product: x.product, n: 0, worst: 0 };
+    g.n += 1; g.worst = Math.max(g.worst, x.openLoss);
+    by.set(k, g);
+  }
+  return [...by.values()].map((g) => `${g.side === "Buy" ? "Bought" : "Sold"} ${g.n} more ${shortName(g.product)} while it was ${money(g.worst)} down`);
 }
 
 // One rule as a tile: the figure now, a bar of how much of its limit is used, the limit, what to do.
@@ -3083,17 +3095,16 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                 </div>
               )}
 
-              {res.funding && (res.funding.toCap > 0 || res.funding.toMin > 0) && (
+              {res.funding && res.funding.toCap > 0 && (
                 <div className="warn" style={{ fontSize: 12, marginTop: 6 }}>
-                  To hold today's size at TNE / IM {limits.ratioPct}% the account needs {money(res.funding.needAtCap)} of equity: <b>{money(res.funding.toCap)} more</b> than it has
-                  {res.funding.toMin > 0 ? <>; <b>{money(res.funding.toMin)}</b> to get back to your {n(settings.limits?.minRatio)}% TNE / IM minimum</> : null}
+                  To hold today's size at TNE / IM {n(settings.limits?.minRatio) || 200}% the account needs {money(res.funding.needAtCap)} of equity: <b>{money(res.funding.toCap)} more</b> than it has
                   {res.funding.toCall > 0 ? <>; and <b>{money(res.funding.toCall)}</b> just to cover the margin (a margin call)</> : null}.
                   {" "}The rules say cut first; adding money to keep a losing size is how the August–September losses grew.
                 </div>
               )}
               {res.roomLots && Object.keys(res.roomLots).length > 0 && (
                 <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-                  Room above TNE / IM {limits.ratioPct}%: {money(res.room)} of margin — about {Object.entries(res.roomLots).map(([k, n]) => `${n} ${k}`).join(" · ")} at the margin Orient has charged per spread.
+                  Room above TNE / IM {n(settings.limits?.minRatio) || 200}%: {money(res.room)} of margin — about {Object.entries(res.roomLots).map(([k, n]) => `${n} ${k}`).join(" · ")} at the margin Orient has charged per spread.
                 </div>
               )}
 
@@ -3141,10 +3152,10 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                           <th>Trading P/L<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>to date</div></th>
                           <th>Day<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.dayLossPct}% of bankroll</div></th>
                           <th>Open P/L<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>limit −{L.bookLossPct}% of bankroll</div></th>
-                          <th>TNE / IM<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>add ≥ {L.ratioPct}% · cut &lt; {L.cutRatioPct}%</div></th>
-                          <th>To hold this size, add<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>for TNE/IM {L.ratioPct}% · {n(settings.limits?.minRatio)}%</div></th>
+                          <th>TNE / IM<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>floor {n(settings.limits?.minRatio) || 200}%</div></th>
+                          <th>To hold this size, add<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>to get back to {n(settings.limits?.minRatio) || 200}%</div></th>
                           <th>Below peak<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>{L.ddWarnPct}% · {L.ddHalfPct}% · {L.ddFlatPct}%</div></th>
-                          <th>Adds to losers<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>none allowed</div></th>
+                          <th className="txt">Added to a losing position<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>averaging down — never allowed</div></th>
                           <th>Margin excess<div className="faint" style={{ fontSize: 10, fontWeight: 400 }}>never below $0</div></th>
                           <th className="txt">Level</th>
                           <th className="txt">What to do</th>
@@ -3161,11 +3172,9 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                                 <td className={cls(k.day.status)}>{d.day ? signed(d.day) : "—"}{k.day.status !== "ok" && sub(`limit ${signed(k.day.limit)} · ${over(d.day, k.day.limit)}`)}</td>
                                 <td className={cls(k.open.status)}>{d.upl ? signed(d.upl) : "—"}{k.open.status !== "ok" && sub(`limit ${signed(k.open.limit)} · ${over(d.upl, k.open.limit)}`)}</td>
                                 <td className={cls(k.margin.status)}>{isFinite(d.ratio) ? `${d.ratio.toFixed(0)}%` : "—"}{k.margin.status !== "ok" && sub(`${money(k.margin.over)} margin too much`)}</td>
-                                <td className={k.margin.toCap > 0 ? "warn" : "faint"}>{k.margin.toCap > 0 ? `+${money(k.margin.toCap)}` : "—"}{k.margin.toMin > 0 && sub(`+${money(k.margin.toMin)} for TNE/IM ${n(settings.limits?.minRatio)}%`)}{k.margin.toCall > 0 && sub(`+${money(k.margin.toCall)} just to cover margin`)}</td>
+                                <td className={k.margin.toCap > 0 ? "warn" : "faint"}>{k.margin.toCap > 0 ? `+${money(k.margin.toCap)}` : "—"}{k.margin.toCall > 0 && sub(`+${money(k.margin.toCall)} just to cover margin`)}</td>
                                 <td className={cls(k.dd.status)}>{d.ddPct ? `${d.ddPct.toFixed(1)}%` : "—"}{k.dd.status !== "ok" && sub(`${money(k.dd.amount)} below the peak`)}</td>
-                                <td className={cls(k.adds.status)} title={k.adds.list.map((x) => `${x.side === "Buy" ? "Bought" : "Sold"} ${x.product} at ${x.price} while ${x.held > 0 ? "long" : "short"} ${Math.abs(x.held)} from ${+x.avg.toFixed(4)} — ${money(x.openLoss)} down`).join("\n") || undefined}>
-                                  {k.adds.count ? `${k.adds.count}×` : "—"}{k.adds.count ? sub(`up to ${money(k.adds.maxLoss)} down`) : null}
-                                </td>
+                                <td className={`txt ${cls(k.adds.status)}`} style={{ fontSize: 11, minWidth: 190 }}>{k.adds.count ? addsText(k.adds.list).map((t, i) => <div key={i}>{t}</div>) : "—"}</td>
                                 <td className={cls(k.excess.status)}>{signed(d.excess)}{k.excess.deposit ? sub(`deposit ${money(k.excess.deposit)}`) : null}</td>
                                 <td className="txt"><span className={STATUS_PILL[d.level][0]}>{levelTxt[d.level]}</span></td>
                                 <td className={`txt ${cls(d.level)}`} style={{ fontSize: 11, minWidth: 220 }}>{d.todo || "—"}</td>
@@ -3175,7 +3184,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                         </tbody>
                       </table>
                     </div>
-                    <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Hover "Adds to losers" for each fill. Change "Your limits" to see when other thresholds would have fired.</div>
+                    <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{flagged.length} of {rp.days.length} closes had a warning. Trading P/L leaves out deposits and withdrawals. Change "Your limits" to see when other thresholds would have fired.</div>
                   </div>
                 );
               })()}
