@@ -1,7 +1,11 @@
+import { instrumentOf } from "./brokerFeed.js";
+
 /*
  * Contract expiry.
  *
- * Every expiry here was typed in by the trader. Nothing is derived from an exchange rule:
+ * Every expiry here is either one the trader typed in or one the broker printed: Orient's Open
+ * Position file carries each contract's "Expiry Date". A typed date wins, so a trader who knows
+ * better can always say so. Nothing is derived from an exchange rule:
  * CME's WTI stops trading three business days before the 25th of the month before delivery,
  * Brent on the last business day of the second month before, and both bend around exchange
  * holidays. Those rules are knowable, but a date computed from a holiday calendar nobody has
@@ -77,6 +81,37 @@ export function contractExpiry(spec) {
 }
 
 /*
+ * Orient's last trading days, from the Open Position files: Map "CODE|YYYYMM" -> "YYYY-MM-DD".
+ * lotLists: any number of lists of lots ({ code, month, expiry: "YYYYMMDD" }). Later lists win.
+ */
+export function orientExpiries(...lotLists) {
+  const out = new Map();
+  for (const lots of lotLists) for (const l of lots || []) {
+    const e = String(l?.expiry ?? "").trim();
+    if (!/^\d{8}$/.test(e)) continue;
+    const iso = `${e.slice(0, 4)}-${e.slice(4, 6)}-${e.slice(6)}`;
+    if (parseExpiry(iso)) out.set(`${l.code}|${l.month}`, iso);
+  }
+  return out;
+}
+
+/*
+ * The contract's dates: a typed date first (source "typed"), else the legs' dates from the
+ * broker's files (source "orient"). A spread with only one leg found is not given half an
+ * answer: both legs are needed, or it is unknown.
+ */
+export function contractFor(spec, product, brokerDates) {
+  const typed = contractExpiry(spec);
+  if (typed) return { ...typed, source: "typed" };
+  const legs = instrumentOf(product)?.legs;
+  if (!legs || !brokerDates) return null;
+  const dates = legs.map((l) => brokerDates.get(`${l.code}|${l.month}`));
+  if (dates.some((d) => !d)) return null;
+  const c = contractExpiry({ expiry: dates[0], expiry2: dates[1] });
+  return c && { ...c, source: "orient" };
+}
+
+/*
  * The open positions whose contract is at or past its roll window, nearest first — what the
  * dashboard turns into a warning. A position with no expiry recorded is not "safe", it is
  * unknown, so it is left out rather than reported as fine.
@@ -84,7 +119,7 @@ export function contractExpiry(spec) {
 export function expiringRows(rows, now = new Date(), soonDays = 7) {
   return rows
     .map((r) => {
-      const c = contractExpiry(r.spec);
+      const c = r.contract !== undefined ? r.contract : contractExpiry(r.spec);
       return { row: r, contract: c, state: c && expiryState(c.near, now, soonDays) };
     })
     .filter((x) => x.state && x.state.due)

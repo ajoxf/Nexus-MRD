@@ -1,4 +1,4 @@
-import { parseExpiry, daysUntil, expiryState, formatExpiry, expiringRows, contractExpiry } from '../src/lib/expiry.js';
+import { parseExpiry, daysUntil, expiryState, formatExpiry, expiringRows, contractExpiry, contractFor, orientExpiries } from '../src/lib/expiry.js';
 
 /*
  * Expiry dates, and the two ways a date feature goes wrong: it accepts something that is not a
@@ -97,6 +97,23 @@ const dueSpread = expiringRows([CAL, OUTRIGHT], TODAY, 7);
 is('the spread is due on its front leg', dueSpread.map((x) => x.row.product).join(), 'CL Nov26-Jan27 Calendar');
 is('and the state is read off the near leg', dueSpread[0].state.days, 5);
 is('the far leg rides along for display', dueSpread[0].contract.far, '2026-12-21');
+
+// --- dates from Orient's Open Position files ----------------------------------------------------
+const OR = orientExpiries(
+  [{ code: 'BZ', month: '202612', expiry: '20261030' }, { code: 'CL', month: '202612', expiry: '20261119' }],
+  [{ code: 'BZ', month: '202612', expiry: '20261029' }, { code: 'HO', month: '202612', expiry: 'junk' }],
+);
+is('Orient dates become calendar dates', OR.get('CL|202612'), '2026-11-19');
+is('a later statement wins', OR.get('BZ|202612'), '2026-10-29');
+is('junk is ignored', OR.has('HO|202612'), false);
+const sp = contractFor({}, 'CL Dec26-BZ Dec26 Inter-Product', OR);
+is('a spread takes the nearer leg from Orient', sp.near, '2026-10-29');
+is('and keeps the far one', sp.far, '2026-11-19');
+is('and says where it came from', sp.source, 'orient');
+is('a typed date wins over Orient', contractFor({ expiry: '2026-10-27' }, 'BZ Dec26', OR).near, '2026-10-27');
+is('typed is labelled typed', contractFor({ expiry: '2026-10-27' }, 'BZ Dec26', OR).source, 'typed');
+is('one leg missing is unknown, not half an answer', contractFor({}, 'HO Dec26-CL Dec26 Inter-Product', OR), null);
+is('expiringRows uses a contract already worked out', expiringRows([{ product: 'x', contract: sp }], new Date(2026, 9, 25), 7).length, 1);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
