@@ -20,6 +20,9 @@ import { instrumentOf } from "./brokerFeed.js";
  */
 
 export const RISK_DEFAULTS = {
+  varPct: 4,          // 1-day 99% VaR ≤ this % of bankroll
+  varWatchPct: 75,    // VaR above this % of its limit: no new risk
+  varHardPct: 125,    // VaR above this % of its limit: go flat
   marginPct: 30,      // initial margin ≤ this % of equity; above it no new positions, above 1.5× cut
   posLossPct: 3,      // one position's open loss over this % of bankroll: close it
   bookLossPct: 6,     // the book's open loss over this % of bankroll: halve it
@@ -132,6 +135,17 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   const rules = [];
   const add = (id, label, threshold, now, status, action) => rules.push({ id, label, threshold, now, status, action });
 
+  // 0. VaR against its limit (acc.var: bookVar(...)).
+  const v = acc.var;
+  const varLimit = B * L.varPct / 100;
+  const varUsed = v && varLimit > 0 ? v.var99 / varLimit * 100 : null;
+  const how = v?.method === "historical" ? `historical, ${v.days} days` : v?.method === "margin" ? "estimated from Orient's margin" : "";
+  add("var", "VaR (1-day, 99%)", `≤ ${usd(varLimit)} (${L.varPct}% of bankroll)`,
+    !v || v.method === "none" ? "nothing open" : `${usd(v.var99)} · ${varUsed.toFixed(0)}% of the limit (${how})`,
+    varUsed === null || v.method === "none" ? "ok" : varUsed > L.varHardPct ? "flat" : varUsed > 100 ? "cut" : varUsed > L.varWatchPct ? "watch" : "ok",
+    varUsed === null || v.method === "none" ? "—" : varUsed > L.varHardPct ? "Go flat — the book is far past its risk limit"
+      : varUsed > 100 ? `Cut ${usd(v.var99 - varLimit)} of VaR today, largest position first` : varUsed > L.varWatchPct ? "No new risk" : "—");
+
   // 1. Size: margin as a share of equity.
   const marginPct = acc.tne > 0 ? acc.im / acc.tne * 100 : acc.im > 0 ? Infinity : 0;
   const room = Math.max(0, acc.tne * L.marginPct / 100 - acc.im);
@@ -169,7 +183,7 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   const dd = dds[dds.length - 1] || null;
   add("dd", "Drawdown from the peak", `${L.ddHalfPct}% half size · ${L.ddFlatPct}% go flat (deposits taken out)`,
     dd ? `${usd(dd.dd)} · ${dd.ddPct.toFixed(1)}% below the peak of ${dd.peakDate === "now" ? "today" : dmy(dd.peakDate)}` : "—",
-    !dd ? "na" : dd.ddPct > L.ddHalfPct ? "cut" : dd.ddPct > L.ddHalfPct * 0.75 ? "watch" : "ok",
+    !dd ? "na" : dd.ddPct > L.ddFlatPct ? "flat" : dd.ddPct > L.ddHalfPct ? "cut" : dd.ddPct > L.ddHalfPct * 0.75 ? "watch" : "ok",
     !dd ? "—" : dd.ddPct > L.ddFlatPct ? "Go flat, review, restart at reduced size" : dd.ddPct > L.ddHalfPct ? "Trade at half size until back within 10% of the peak" : "—");
 
   // 6. Margin calls: never funded to keep the same size.
@@ -202,7 +216,35 @@ export function checkRules(acc, limits = RISK_DEFAULTS) {
   add("expiry", "Expiry", `Out or rolled ${L.expiryDays} trading days before a leg expires`, soon.length ? [...new Set(soon)].join(" · ") : "nothing close",
     soon.length ? "cut" : "ok", soon.length ? "Roll or close before liquidity goes" : "—");
 
-  return { bankroll: br, marginPct, room, roomLots, dd, rules };
+  // Each position: its share of the risk, and the price at which its loss reaches the limit.
+  const positions = (acc.rows || []).filter((r) => r.lots).map((r) => {
+    const pv = v?.byPosition?.find((x) => x.product === r.product);
+    const lossPct = B > 0 ? -r.upnl / B * 100 : 0;
+    const perPoint = (r.size || 0) * Math.abs(r.lots);
+    // Long: exit below the average; short: above. The loss at the exit is the 3% limit.
+    const exit = perPoint > 0 && r.avg !== undefined ? +(r.avg - Math.sign(r.lots) * posLimit / perPoint).toFixed(4) : null;
+    const status = r.upnl < -posLimit ? "cut" : r.upnl < -posLimit * 0.66 ? "watch" : "ok";
+    return { ...r, var99: pv ? pv.var99 : null, lossPct, exit, status,
+      action: status === "cut" ? "Close it" : status === "watch" ? `Exit at ${exit} if it gets there — don't add` : `Stop at ${exit}` };
+  });
+
+  const posRules = positions.filter((p) => p.status !== "ok").map((p) => ({ status: p.status, label: p.product, action: p.action }));
+  return { bankroll: br, marginPct, room, roomLots, dd, var: v, varLimit, varUsed, positions, level: levelOf([...rules, ...posRules]), rules };
+}
+
+/*
+ * The one line a trader reads first: the worst status among the rules, as an instruction.
+ *   flat    Go flat now
+ *   cut     Reduce now — what each rule says
+ *   watch   Caution — no new positions
+ *   ok      Normal
+ */
+export function levelOf(rules) {
+  const has = (s) => rules.filter((r) => r.status === s);
+  if (has("flat").length) return { level: "flat", title: "Go flat", actions: has("flat").map((r) => `${r.label}: ${r.action}`) };
+  if (has("cut").length) return { level: "cut", title: "Reduce now", actions: has("cut").map((r) => `${r.label}: ${r.action}`) };
+  if (has("watch").length) return { level: "watch", title: "Caution — no new positions", actions: has("watch").map((r) => `${r.label}: ${r.action}`) };
+  return { level: "ok", title: "Normal — within every limit", actions: [] };
 }
 
 /*

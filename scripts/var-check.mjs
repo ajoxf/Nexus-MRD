@@ -1,4 +1,4 @@
-import { historicalVar, lossAt, addSettles } from '../src/lib/var.js';
+import { historicalVar, lossAt, addSettles, bookVar, MARGIN_VAR } from '../src/lib/var.js';
 
 /*
  * Historical VaR on spreads, with numbers worked by hand. Made-up settlements.
@@ -53,6 +53,14 @@ is('too few days is said, not hidden', historicalVar([{ product: 'CL Nov26', lot
 const more = addSettles(H, [{ date: '2026-09-08', lots: [{ code: 'CL', month: '202611', kind: 'F', settle: 79.4 }] }, { date: '2026-09-07', lots: [{ code: 'CL', month: '202611', kind: 'F', settle: 99 }] }]);
 is('a statement adds a new day; the uploaded file keeps its own', [more.get('CL|202611').get('2026-09-08'), more.get('CL|202611').get('2026-09-07')], [79.4, 79]);
 is('…and the history passed in is not changed', H.get('CL|202611').has('2026-09-08'), false);
+
+// ---------- which VaR: history when there's enough, else from margin ----------
+const pos = [{ product: 'CL Nov26 - BZ Nov26 Inter-Product', lots: 2, size: 1000, im: 3000 }];
+const est = bookVar(pos, H, 3000);
+is('4 days of history is not enough: VaR from margin, 1-day 99% = margin ÷ √2', [est.method, est.var99, est.days], ['margin', 2121.32, 4]);
+is('…95% scaled from 99% by 1.645 / 2.326', est.var95, +(3000 * MARGIN_VAR.day95).toFixed(2));
+is('with enough days: historical', bookVar(pos, H, 3000, { minDays: 3 }).method, 'historical');
+is('nothing open: nothing at risk', bookVar([], H, 0).method, 'none');
 
 console.log(fail ? `\n${fail} FAILED of ${pass + fail}` : `\nall ${pass} passed`);
 process.exit(fail ? 1 : 0);

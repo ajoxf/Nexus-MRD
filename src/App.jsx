@@ -4,6 +4,7 @@ import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
 import { checkRules, replay, RISK_DEFAULTS } from "./lib/riskRules.js";
+import { bookVar, addSettles } from "./lib/var.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
 import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
@@ -2904,11 +2905,13 @@ function Dashboard({ pf, settings, view, setView, fills, setMark, addFills, relo
 
 // ---------- Risk guardrails (accounts on the broker's statements) ----------
 const RISK_FIELDS = [
+  ["varPct", "VaR limit (1-day 99%), % of bankroll"], ["varWatchPct", "VaR: no new risk above, % of limit"], ["varHardPct", "VaR: go flat above, % of limit"],
   ["marginPct", "Margin cap, % of equity"], ["posLossPct", "One position's open loss, % of bankroll"], ["bookLossPct", "Book's open loss, % of bankroll"],
   ["dayLossPct", "Day's loss, % of bankroll"], ["ddHalfPct", "Drawdown: half size, %"], ["ddFlatPct", "Drawdown: go flat, %"],
   ["addLossPct", "Adding to a loser: counts when it's down over, % of bankroll"], ["expiryDays", "Out before expiry, trading days"],
 ];
-const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut: ["pill bad", "CUT"], na: ["pill dim", "—"] };
+const STATUS_PILL = { ok: ["pill ok", "OK"], watch: ["pill warn", "Watch"], cut: ["pill bad", "CUT"], flat: ["pill bad", "GO FLAT"], na: ["pill dim", "—"] };
+const LEVEL_CLASS = { ok: "ok", watch: "warn", cut: "bad", flat: "bad" };
 const RULE_NAMES = { margin: "Margin over the cap", adds: "Added to a loser", bookloss: "Book's open loss", day: "Day's loss", dd: "Drawdown: half size", ddflat: "Drawdown: go flat", call: "Margin call" };
 
 function GuardPanel({ pf, settings, setSettings, view, fills }) {
@@ -2923,7 +2926,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
 
   return (
     <section className="panel">
-      <div className="ph"><h2>Risk guardrails<span className="dim">Size, losers and losses — checked on your fills and Orient's statements</span></h2>
+      <div className="ph"><h2>Risk: VaR and rules<span className="dim">When positions are getting out of hand, and what to do — on your fills and Orient's statements</span></h2>
         <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setShowLimits((x) => !x)}>Your limits {showLimits ? "▾" : "▸"}</button></div>
       <div className="pb">
         {showLimits && (
@@ -2939,23 +2942,66 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
           const br = settings.brokers.find((b) => b.id === a.id) || { products: {} };
           const mine = fills.filter((f) => f.broker === a.id);
           const sizeOfFill = (f) => sizeOf(br.products?.[f.product] || {}, f.product);
-          const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl }));
+          const rows = pf.rows.filter((r) => r.broker === a.id).map((r) => ({ product: r.product, lots: r.dir * r.lots, upnl: r.upnl, size: r.size, avg: r.avg, mark: r.mark, im: r.im }));
+          const v = bookVar(rows, addSettles(new Map(), fs.settleDays || []), a.IM);
           const expiries = new Map();
           for (const l of fs.lots || []) if (/^\d{8}$/.test(String(l.expiry || ""))) expiries.set(`${l.code}|${l.month}`, `${l.expiry.slice(0, 4)}-${l.expiry.slice(4, 6)}-${l.expiry.slice(6)}`);
           const res = checkRules({
             closes: fs.closes || [], equityNow: fs.equity + fs.sinceClose, tne: a.TNE, im: a.IM, todayPnl: fs.sinceClose, rows,
-            allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer,
+            allFills: mine, fillsToday: mine.filter((f) => f.ts > `${fs.date}T23:59:59.999Z`), sizeOf: sizeOfFill, expiries, today, imPer: fs.imPer, var: v,
           }, limits);
-          const cuts = res.rules.filter((r) => r.status === "cut");
           const rp = replay(fs.closes || [], mine, limits, sizeOfFill);
           const flagged = rp.days.filter((d) => d.flags.length);
           return (
             <div key={a.id} style={{ marginBottom: 16 }}>
               <div style={{ marginBottom: 6 }}><b>{a.name}</b>
-                {cuts.length ? <span className="bad"> · {cuts.length} rule{cuts.length === 1 ? "" : "s"} say cut</span> : res.rules.some((r) => r.status === "watch") ? <span className="warn"> · watch</span> : <span className="ok"> · within every rule</span>}
+                
                 {res.bankroll && <span className="faint" style={{ fontSize: 11 }}> · bankroll {money(res.bankroll.amount)} ({res.bankroll.from === "previous month" ? `Orient's equity on ${day(res.bankroll.baseDate)}` : `first statement, ${day(res.bankroll.baseDate)}`}{res.bankroll.cash ? `, ${signed(res.bankroll.cash)} moved in/out since` : ""})</span>}
               </div>
+              <div className={LEVEL_CLASS[res.level.level]} style={{ border: "1px solid currentColor", borderRadius: 4, padding: "8px 12px", marginBottom: 10 }}>
+                <b style={{ fontSize: 15 }}>{res.level.level === "ok" ? "🟢" : res.level.level === "watch" ? "🟠" : res.level.level === "cut" ? "🔴" : "⛔"} {res.level.title}</b>
+                {res.level.actions.length > 0 && <ul style={{ margin: "4px 0 0 18px", padding: 0, fontSize: 12 }}>{res.level.actions.map((x, i) => <li key={i}>{x}</li>)}</ul>}
+              </div>
+
               <div className="tw">
+                <table>
+                  <thead><tr><th className="txt">Value at Risk</th><th>1-day 95%</th><th>1-day 99%</th><th>Limit ({limits.varPct}% of bankroll)</th><th>Used</th><th>TNE / IM after a 99% day</th><th className="txt">How</th></tr></thead>
+                  <tbody><tr>
+                    <td className="txt"><b>The book</b></td>
+                    <td>{money(v.var95)}</td>
+                    <td><b>{money(v.var99)}</b></td>
+                    <td>{money(res.varLimit)}</td>
+                    <td><span className={STATUS_PILL[res.rules.find((r) => r.id === "var").status][0]}>{res.varUsed !== null && v.method !== "none" ? `${res.varUsed.toFixed(0)}%` : "—"}</span></td>
+                    <td>{a.IM > 0 ? `${((a.TNE - v.var99) / a.IM * 100).toFixed(0)}%` : "—"}</td>
+                    <td className="txt faint" style={{ fontSize: 11 }}>{v.method === "historical" ? `Historical: ${v.days} days of settlements replayed on today's positions` : v.method === "margin" ? `Estimated from Orient's margin (margin ÷ √2 for 1 day). Becomes historical once every position has 60 days of prices${v.days ? ` — ${v.days} so far` : ""}` : "Nothing open"}</td>
+                  </tr></tbody>
+                </table>
+              </div>
+
+              {res.positions.length > 0 && (
+                <div className="tw" style={{ marginTop: 8 }}>
+                  <table>
+                    <thead><tr><th className="txt">Position</th><th>Lots</th><th>Average</th><th>Price now</th><th>Open P/L</th><th>% of bankroll</th><th>Its 99% VaR</th><th>Exit price ({limits.posLossPct}% loss)</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
+                    <tbody>{res.positions.map((p) => (
+                      <tr key={p.product}>
+                        <td className="txt"><b>{p.product}</b></td>
+                        <td>{p.lots > 0 ? `+${p.lots}` : p.lots}</td>
+                        <td>{+(+p.avg).toFixed(4)}</td>
+                        <td>{p.mark !== undefined ? +(+p.mark).toFixed(4) : "—"}</td>
+                        <td className={pc(p.upnl)}>{signed(p.upnl)}</td>
+                        <td className={p.lossPct > 0 ? "bad" : "ok"}>{(-p.lossPct).toFixed(1)}%</td>
+                        <td>{p.var99 !== null ? money(p.var99) : "—"}</td>
+                        <td><b>{p.exit ?? "—"}</b></td>
+                        <td className="txt"><span className={STATUS_PILL[p.status][0]}>{STATUS_PILL[p.status][1]}</span></td>
+                        <td className={`txt ${p.status === "cut" ? "bad" : p.status === "watch" ? "warn" : "faint"}`} style={{ fontSize: 12 }}>{p.action}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>Exit price = where this position's loss reaches {limits.posLossPct}% of the bankroll. Set it as a stop in TT.</div>
+                </div>
+              )}
+
+              <div className="tw" style={{ marginTop: 8 }}>
                 <table>
                   <thead><tr><th className="txt">Rule</th><th className="txt">Limit</th><th className="txt">Now</th><th className="txt">Status</th><th className="txt">What to do</th></tr></thead>
                   <tbody>
@@ -2965,7 +3011,7 @@ function GuardPanel({ pf, settings, setSettings, view, fills }) {
                         <td className="txt faint" style={{ fontSize: 12 }}>{r.threshold}</td>
                         <td className="txt" style={{ fontSize: 12 }}>{r.now}</td>
                         <td className="txt"><span className={STATUS_PILL[r.status][0]}>{STATUS_PILL[r.status][1]}</span></td>
-                        <td className={`txt ${r.status === "cut" ? "bad" : r.status === "watch" ? "warn" : "faint"}`} style={{ fontSize: 12 }}>{r.action}</td>
+                        <td className={`txt ${r.status === "cut" || r.status === "flat" ? "bad" : r.status === "watch" ? "warn" : "faint"}`} style={{ fontSize: 12 }}>{r.action}</td>
                       </tr>
                     ))}
                   </tbody>

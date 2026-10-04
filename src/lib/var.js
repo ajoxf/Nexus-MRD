@@ -106,3 +106,37 @@ export function addSettles(history, days) {
   }
   return out;
 }
+
+/*
+ * VaR from margin, while there isn't enough price history.
+ *
+ * An exchange sets initial margin to cover roughly a 99% loss over its close-out period (about two
+ * days for futures) — the clearing house's own VaR of the position, spread offsets included. So a
+ * 1-day 99% figure is margin ÷ √2, and 95% scales by 1.645 / 2.326. This is an estimate of how the
+ * exchange's margin is set, not something Orient states; historical VaR replaces it as soon as
+ * every position has `minDays` of settlement prices.
+ */
+export const MARGIN_VAR = { day99: 1 / Math.SQRT2, day95: (1 / Math.SQRT2) * (1.645 / 2.326) };
+
+export function marginVar(totalIm, positions) {
+  const r2 = (x) => +x.toFixed(2);
+  return {
+    method: "margin",
+    var99: r2(totalIm * MARGIN_VAR.day99),
+    var95: r2(totalIm * MARGIN_VAR.day95),
+    worst: null,
+    byPosition: (positions || []).map((p) => ({ product: p.product, lots: p.lots, var99: r2((p.im || 0) * MARGIN_VAR.day99) })),
+  };
+}
+
+/*
+ * The VaR to show: historical when every position has enough days, else margin-based.
+ * positions: [{ product, lots (signed), size, im }].
+ */
+export function bookVar(positions, history, totalIm, { minDays = 60 } = {}) {
+  const live = (positions || []).filter((p) => p.lots);
+  if (!live.length) return { method: "none", var99: 0, var95: 0, worst: null, byPosition: [], days: 0 };
+  const h = historicalVar(live, history, { minDays });
+  if (!h.tooShort && !h.missing.length) return { ...h, method: "historical" };
+  return { ...marginVar(totalIm, live), days: h.days, missingHistory: h.missing };
+}
