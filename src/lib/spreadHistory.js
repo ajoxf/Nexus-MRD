@@ -84,6 +84,10 @@ export function readTradeConfirmations(rows) {
       tradeId: cell("tradeId"), orderId: cell("orderId"), account: subAccount(cell("sub"), cell("group")), group: plainAccount(cell("group")),
       date: cell("tradeDate"), time: cell("time"), code: cell("code"), month: cell("month"), kind,
       side, price: num("price"), qty: num("qty"), fees: r2(money("comm") + money("fee") + money("nfa")),
+      // The same three charges kept apart, for the charge breakdown (src/lib/charges.js). Orient
+      // writes them negative, as it does everywhere; `fees` above stays their sum so existing
+      // callers are unchanged.
+      comm: r2(money("comm")), exchFee: r2(money("fee")), nfa: r2(money("nfa")),
     });
   });
   return problems.length ? { trades: [], problems } : { trades, problems };

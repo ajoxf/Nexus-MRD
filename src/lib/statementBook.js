@@ -3,6 +3,7 @@ import { readFinancialSummary, readOpenPositions, isFinancialSummary, isOpenPosi
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades } from "./spreadHistory.js";
 import { matchFills, accountOf } from "./fillMatch.js";
 import { buildFeed } from "./brokerFeed.js";
+import { buildCharges } from "./charges.js";
 
 /*
  * The saved statements, turned into a feed for each RAMP account they belong to.
@@ -77,4 +78,36 @@ export function fillsPlAt(book, priceOf, sizeFn) {
     open += (p.side === "Long" ? 1 : -1) * (px - p.avg) * sizeFn(p.broker, p.product) * p.lots;
   }
   return { realised: +realised.toFixed(2), open: +open.toFixed(2), unpriced };
+}
+
+/*
+ * The charge breakdown from the saved statements: what was charged, under which heading, on which
+ * date (src/lib/charges.js explains why the "Fee" column is not a breakdown on its own).
+ *
+ * Every daily statement is used, the group's zips and the sub-accounts' alike — charges.js counts
+ * each trade and each journal entry once. Monthly statements are left out: their PDFs restate the
+ * dailies, and counting them would double every charge in the month.
+ *
+ * rows: the saved statements as db.loadStatements returns them.
+ * Returns { [group]: result-of-buildCharges }, one entry per Orient group found.
+ */
+export function chargesFor(rows) {
+  const days = [], accountsByDate = [];
+  for (const r of rows || []) {
+    if (!/daily/i.test(r.zip_name || "") || !r.statement_date) continue;
+    const files = (r.files || []).filter((f) => f && f.name && typeof f.text === "string");
+    if (!files.length) continue;
+    days.push({ date: r.statement_date, files: files.map((f) => ({ name: f.name, rows: parse(f.text) })) });
+    const fs = files.find((f) => isFinancialSummary(f.name));
+    if (fs) accountsByDate.push(readFinancialSummary(parse(fs.text)).accounts);
+  }
+  if (!days.length) return {};
+  // The same rule feedsFor uses: the main account is the one every other number starts with.
+  const groups = [...new Set(accountsByDate.map((a) => mainAccount(a)?.no).filter((g) => g && g.length <= 6))];
+  const out = {};
+  for (const g of groups) {
+    const c = buildCharges(days, g);
+    if (c.byDate.length || c.problems.length) out[g] = c;
+  }
+  return out;
 }
