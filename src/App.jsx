@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, createContext
 import { db, isRemote, auth, isDemo, resetDemo } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
-import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
+import { feedsFor, pnlAt, fillsPlAt, chargesFor } from "./lib/statementBook.js";
+import { CATEGORIES } from "./lib/charges.js";
 import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS, tradingDaysBetween } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
@@ -2525,7 +2526,7 @@ function Tracker({ user }) {
         {tab === "fills" && <FillsTab settings={settings} setSettings={setSettings} view={view} fills={fills} addFills={addFills} reloadFills={reloadFills} setBroker={setBroker} />}
         {tab === "statements" && <StatementsPanel fills={fills} onChanged={reloadStatements} />}
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
-        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
+        {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} stmtRows={stmtRows} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
         {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
       </main>
@@ -6457,7 +6458,154 @@ function DailyPnl({ pf, settings, view }) {
   );
 }
 
-function AnalysisTab({ pf, settings, setSettings, view, fills }) {
+/*
+ * What the desk is charged, itemised, with the date of every charge.
+ *
+ * The question this answers is "what am I paying, and for what" — which the statements do not
+ * answer on their own, because Orient's daily "Fee" column is a bucket: per-trade exchange and
+ * clearing fees sit in it next to the monthly TT platform bill and the market-data feeds. On
+ * 27 Oct 2026 "Fee" was 740.00 and none of it was trading. src/lib/charges.js does the splitting
+ * and checks every day back against Orient's own Commission and Fee to the cent; this shows it.
+ *
+ * Read-only, like everything else built on the statements. Nothing here posts to the book.
+ */
+function ChargesPanel({ stmtRows, settings }) {
+  const groups = useMemo(() => chargesFor(stmtRows), [stmtRows]);
+  const keys = Object.keys(groups);
+  const [picked, setPicked] = useState(null);
+  const g = picked && groups[picked] ? picked : keys[0];
+  const c = g ? groups[g] : null;
+  const hidden = Boolean(settings.prefs?.hideFigures);
+  // Standing costs are the ones a quiet month does not reduce, so they are worth seeing alone.
+  const [onlyStanding, setOnlyStanding] = useState(false);
+  const STANDING = useMemo(() => new Set(CATEGORIES.filter((x) => !x.trade).map((x) => x.key)), []);
+  const day = (k) => (k ? new Date(`${k}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" }) : "—");
+  /*
+   * Shown to the cent, as the Statements tab shows statement figures to the cent.
+   * cents() rounds to whole units, which turns an NFA fee of 0.04 into "$0" — a charge
+   * reported as nothing. These are the broker's own figures and they reconcile to the
+   * cent, so they are displayed that way.
+   */
+  const cents = (v, cur = "USD") => (v < 0 ? "-" : "") + symbolFor(cur) + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  if (!stmtRows?.length) return (
+    <section className="panel">
+      <div className="ph"><h2>What you're charged<span className="dim">commission, exchange fees, platform and market data</span></h2></div>
+      <div className="empty">No statements opened yet. Open the daily statement zips on the Statements tab and every charge in them is itemised here, with its date.</div>
+    </section>
+  );
+  if (!c || !c.byDate.length) return (
+    <section className="panel">
+      <div className="ph"><h2>What you're charged<span className="dim">commission, exchange fees, platform and market data</span></h2></div>
+      <div className="empty">
+        No charges found in the statements opened so far.
+        {c?.problems?.length ? <div className="warn" style={{ marginTop: 8 }}>{c.problems[0]}</div> : null}
+      </div>
+    </section>
+  );
+
+  const lines = onlyStanding ? c.lines.filter((l) => STANDING.has(l.category)) : c.lines;
+  const shownTotal = lines.reduce((t, l) => t + l.cost, 0);
+  const csv = () => {
+    const head = "Date,Heading,What it was,Cost (USD),From\n";
+    const body = c.lines.map((l) => [l.date, l.label, `"${String(l.detail || "").replace(/"/g, '""')}"`, l.cost.toFixed(2), l.kind].join(",")).join("\n");
+    const foot = `\n,,Total,${c.totals.total.toFixed(2)},`;
+    saveCsv(head + body + foot, `nexus_charges_${g}_${c.dates.from}_to_${c.dates.to}.csv`);
+  };
+
+  return (
+    <section className="panel">
+      <div className="ph">
+        <h2>What you're charged<span className="dim">{c.days} charged {c.days === 1 ? "day" : "days"} · {day(c.dates.from)} to {day(c.dates.to)}</span></h2>
+        <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {keys.length > 1 && (
+            <select className="in" value={g} onChange={(e) => setPicked(e.target.value)} aria-label="Account group" style={{ width: "auto" }}>
+              {keys.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          )}
+          <button type="button" className="btn ghost" onClick={() => setOnlyStanding((v) => !v)}
+            title="Standing costs are the ones a quiet month does not reduce: platform, market data, MAP and anything Orient did not itemise">
+            {onlyStanding ? "Standing costs only" : "All charges"}
+          </button>
+          <button type="button" className="btn ghost" onClick={csv} title="Every charge with its date, oldest first, whatever is on screen">Export CSV</button>
+        </span>
+      </div>
+
+      {!hidden && <div className="strip">
+        <div className="kpi"><label>Total charged</label><b className="bad">{cents(c.totals.total)}</b><span className="faint" style={{ fontSize: 11 }}>{day(c.dates.from)} to {day(c.dates.to)}</span></div>
+        <div className="kpi"><label>Cost of trading</label><b>{cents(c.totals.trade)}</b><span className="faint" style={{ fontSize: 11 }}>commission, exchange, NFA</span></div>
+        <div className="kpi"><label>Standing costs</label><b className={c.totals.standing > c.totals.trade ? "bad" : ""}>{cents(c.totals.standing)}</b><span className="faint" style={{ fontSize: 11 }}>platform, data, MAP, other</span></div>
+        {CATEGORIES.filter((x) => Math.abs(c.totals[x.key]) > 0.0049).map((x) => (
+          <div className="kpi hide-m" key={x.key}><label>{x.label}</label><b>{cents(c.totals[x.key])}</b></div>
+        ))}
+      </div>}
+
+      {/*
+        * The dates matter twice over, and they are not the same date.
+        *
+        * A charge's DATE is the day Orient took it; the PERIOD it covers is in Orient's own
+        * wording in the "What it was" column — September's platform fee was taken on 27 Oct.
+        * Showing only one of the two would answer the wrong question.
+        */}
+      <div className="ph" style={{ background: "transparent", borderBottom: 0 }}>
+        <span className="faint" style={{ fontSize: 11 }}>
+          The date is the day Orient took the charge · the period it covers is in Orient's own wording
+          {c.totals.other > 0.0049 ? ` · ${cents(c.totals.other)} is not itemised by Orient` : ""}
+        </span>
+      </div>
+
+      <div className="tw tall">
+        {/* A plain table, not className="daily": that one is capped at 1180px for the
+            narrow column it normally sits in, and this panel is full width. */}
+        <table>
+          <colgroup><col style={{ width: "16%" }} /><col style={{ width: "24%" }} /><col style={{ width: "42%" }} /><col style={{ width: "18%" }} /></colgroup>
+          <thead><tr>
+            <th className="txt">Date</th><th className="txt">Heading</th>
+            <th className="txt" title="Orient's own description, which is where the period a charge covers is written down">What it was</th>
+            <th>Cost</th>
+          </tr></thead>
+          <tbody>
+            {lines.map((l, i) => (
+              <tr key={`${l.date}|${l.category}|${l.detail}|${i}`}>
+                <td className="txt">{day(l.date)}</td>
+                <td className="txt">{l.label}{!STANDING.has(l.category) ? null : <span className="faint" style={{ fontSize: 10, marginLeft: 5 }}>standing</span>}</td>
+                <td className="txt" style={{ whiteSpace: "normal" }}>
+                  {l.detail}
+                  {l.kind === "residual" && <span className="faint" style={{ fontSize: 10, marginLeft: 5 }}>no journal line for this day</span>}
+                </td>
+                {/* A charge is money out, so it is shown as a positive cost. A negative one is a
+                    credit — there is a real commission rebate in the history — and it is marked. */}
+                <td className={l.cost < 0 ? "ok" : ""}>{hidden ? "•••" : l.cost < 0 ? `${cents(l.cost)} credit` : cents(l.cost)}</td>
+              </tr>
+            ))}
+          </tbody>
+          {!hidden && <tfoot><tr>
+            <td className="txt" colSpan={3}><b>{onlyStanding ? "Standing costs" : "Total charged"}</b>{onlyStanding ? <span className="faint" style={{ fontSize: 11, marginLeft: 6 }}>of {cents(c.totals.total)} in all</span> : null}</td>
+            <td><b>{cents(shownTotal)}</b></td>
+          </tr></tfoot>}
+        </table>
+      </div>
+
+      {/*
+        * Anything that stopped a file being read, or a day that does not add back to Orient's own
+        * figures. Shown, never swallowed: a breakdown that quietly dropped a file would be a
+        * smaller number that looked just as confident.
+        */}
+      {c.problems.length > 0 && (
+        <div className="pb">
+          <div className="signin-err warn">
+            <b>{c.problems.length === 1 ? "One thing to know" : `${c.problems.length} things to know`}</b>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {c.problems.slice(0, 6).map((p, i) => <li key={i} style={{ fontSize: 12 }}>{p}</li>)}
+            </ul>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AnalysisTab({ pf, settings, setSettings, view, fills, stmtRows }) {
   const brokers = settings.brokers;
   const bname = (id) => brokers.find((b) => b.id === id)?.name || id;
   const closed = pf.book.closed.filter((c) => view === "all" || c.broker === view);
@@ -6501,10 +6649,15 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
     </section>
   );
 
+  const charges = <ChargesPanel stmtRows={stmtRows} settings={settings} />;
+
   if (!a.n) return (
     <>
       {history}
       {daily}
+      {/* Worth showing before a single trade is closed: the platform and market-data bills
+          arrive whether or not anything was traded, which is the point of seeing them apart. */}
+      {charges}
       <section className="panel"><div className="ph"><h2>Analysis</h2></div>
         <div className="empty">No closed trades yet. Once trades are squared off, this page shows how the book has performed.</div>
       </section>
@@ -6566,6 +6719,15 @@ function AnalysisTab({ pf, settings, setSettings, view, fills }) {
         </div>
       </div>
 
+
+      {/*
+        * The charges, below the day-by-day table and above the product detail.
+        *
+        * It sits here because it answers the question the P&L above provokes — a month's net is
+        * one number, and "of which 740 was the platform" is the next thing anybody asks — and
+        * because it is about money leaving the account, not about how trades performed.
+        */}
+      {charges}
 
       <section className="panel">
         <div className="ph"><h2>Product detail</h2></div>
