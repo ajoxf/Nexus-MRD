@@ -6,6 +6,8 @@ import { feedsFor, pnlAt, fillsPlAt } from "./lib/statementBook.js";
 import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS, tradingDaysBetween } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
+import { GMAIL_SCOPE, statementQuery, wantedMessages, listMessageIds, messageHeads, fetchAttachment } from "./lib/gmail.js";
+import { googleConfigured, requestGmailToken } from "./lib/googleAuth.js";
 import { dealsAgainstFills, readMonthlyStatement, checkMonthly, tieToDaily, restoreLines, isGstInvoice, readGstInvoice, checkGst, tieGst, checkMonthlyFamily } from "./lib/monthly.js";
 import { spreadsFromLots } from "./lib/statementSpreads.js";
 import { readTradeConfirmations, isTradeConfirmation, uniqueTrades, spreadBook, checkHistory } from "./lib/spreadHistory.js";
@@ -4810,6 +4812,9 @@ export function StatementsPanel({ fills = [], onChanged }) {
   const fileRef = useRef(null);
   const folderRef = useRef(null);
   const monthlyRef = useRef(null);
+  // The Gmail access token, for this page only: never stored, gone when the tab closes.
+  const gToken = useRef("");
+  const [gBusy, setGBusy] = useState(false);
   const plural = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
   // Whether statements are being kept: null while loading, then ["ok" | "warn" | "bad", text].
   const [keep, setKeep] = useState(null);
@@ -4885,6 +4890,45 @@ export function StatementsPanel({ fills = [], onChanged }) {
     setMsg(parts.length ? [problems.length ? "bad" : "ok", parts.join(" · ")] : null);
     setBusy(false);
     await keepOpened(added);
+  };
+
+  /*
+   * The same statements, fetched from Gmail instead of chosen by hand.
+   *
+   * Read only, and nothing in the mailbox is touched: no delete, no archive, no label, no forward.
+   * The zips come down still encrypted and go straight into openAll(), which is the same path a
+   * dropped file takes — so the password is still typed here, still held only in memory, and the
+   * checksum still decides what is already open. Fetching a statement twice costs a download and
+   * changes nothing.
+   */
+  const fromGmail = async () => {
+    setGBusy(true);
+    setMsg(null);
+    try {
+      if (!googleConfigured()) throw Object.assign(new Error("Google isn't set up for this deployment yet."), { code: "NO_CLIENT_ID" });
+      if (!gToken.current) gToken.current = await requestGmailToken(GMAIL_SCOPE);
+
+      // Only ask for what is not already here: the newest statement kept is where to start from.
+      // A day back, because a statement arrives the morning after the day it covers.
+      const newest = listRef.current.map((s) => s.date).filter(Boolean).sort().pop();
+      const since = newest ? new Date(Date.parse(`${newest}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : null;
+
+      const ids = await listMessageIds(gToken.current, statementQuery(since ? { since } : {}));
+      if (!ids.length) { setMsg(["ok", "Nothing new in Gmail."]); return; }
+      const heads = await messageHeads(gToken.current, ids);
+      const take = wantedMessages(heads);
+      if (!take.length) { setMsg(["ok", "Nothing new in Gmail."]); return; }
+
+      const files = [];
+      for (const m of take) for (const att of m.attachments) files.push(await fetchAttachment(gToken.current, m.id, att));
+      setGBusy(false);
+      await openAll(files, pw.current);
+    } catch (e) {
+      // A token that has expired or been withdrawn: forget it so the next press signs in again.
+      if (e.code === "GMAIL_AUTH") gToken.current = "";
+      if (e.code !== "CANCELLED") setMsg(["bad", e.message]);
+      setGBusy(false);
+    }
   };
 
   // Zips only; anything else in a folder (the broker's other attachments, say) is passed over quietly.
@@ -5088,7 +5132,18 @@ export function StatementsPanel({ fills = [], onChanged }) {
           <button className="btn ghost" disabled={busy} onClick={() => fileRef.current?.click()}>Upload daily statements (zips)</button>
           <button className="btn ghost" disabled={busy} onClick={() => folderRef.current?.click()}>Choose a folder of daily statements</button>
           <button className="btn ghost" disabled={busy} onClick={() => monthlyRef.current?.click()} title="Orient's month-end PDFs: each sub-account, the group, and the GST invoice. Password-protected is fine.">Upload monthly statements (PDFs)</button>
+          {googleConfigured() && (
+            <button className="btn ghost" disabled={busy || gBusy} onClick={fromGmail}
+              title="Reads only Orient's statement mail, and only to download the zips. Nothing in your mailbox is changed, moved or deleted.">
+              {gBusy ? "Fetching from Gmail…" : "Get from Gmail"}
+            </button>
+          )}
         </div>
+        {googleConfigured() && (
+          <div className="faint" style={{ fontSize: 11 }}>
+            Gmail is read only: RAMP downloads Orient's statement zips and changes nothing in your mailbox. The zips open here, with the password you type, exactly as a dropped file does.
+          </div>
+        )}
 
         {askPw && (
           <form onSubmit={submitPw}>
