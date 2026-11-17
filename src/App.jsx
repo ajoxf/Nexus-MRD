@@ -4,6 +4,7 @@ import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt, chargesFor } from "./lib/statementBook.js";
 import { CATEGORIES } from "./lib/charges.js";
+import { buildBackup, backupZip, backupName, readBackupFile, restorePlan, backupSummary } from "./lib/backup.js";
 import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS, tradingDaysBetween } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
 import { openStatementZip, mergeStatements, filesFromEntries, toStored, fromStored, openMonthlyPdf, isMonthly, MONTHLY_FILE } from "./lib/statements.js";
@@ -2528,7 +2529,7 @@ function Tracker({ user }) {
         {tab === "closed" && <ClosedTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} />}
         {tab === "analysis" && <AnalysisTab pf={pf} settings={settings} setSettings={setSettings} view={view} fills={fills} stmtRows={stmtRows} />}
         {tab === "funds" && <FundsTab pf={pf} settings={settings} setSettings={setSettings} view={view} />}
-        {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} />}
+        {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} pf={pf} fills={fills} reloadFills={reloadFills} stmtRows={stmtRows} reloadStatements={reloadStatements} />}
       </main>
     </div>
     </DirtyCtx.Provider>
@@ -4380,7 +4381,154 @@ function Sortable({ className, storeKey, items, settings, setSettings }) {
   );
 }
 
-function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
+/*
+ * One file that holds everything, and the way back from it.
+ *
+ * The emergency this is for is not "I deleted a fill" — the Fills tab already offers a CSV
+ * before any delete. It is "the account is gone": a database lost, a project paused and
+ * purged, a sign-in that no longer works. So the file is written to be restorable into a
+ * DIFFERENT account (src/lib/backup.js strips the row ids that tie it to this one), and
+ * the restore adds rather than replaces, because the usual mistake is restoring an old
+ * backup over newer work.
+ */
+function BackupPanel({ settings, setSettings, fills, stmtRows, reloadFills, reloadStatements }) {
+  const ask = useConfirm();
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef(null);
+
+  const download = async () => {
+    setBusy("Collecting everything…");
+    setMsg(null);
+    try {
+      /*
+       * Read from the database, not from what this screen happens to be holding. The screen
+       * can be filtered, or a tab behind; a backup that quietly held a subset would only be
+       * discovered on the day it was needed.
+       */
+      const [sNow, fNow, stNow] = await Promise.all([
+        db.loadSettings().catch(() => null),
+        db.loadFills(),
+        db.loadStatements().catch(() => []),
+      ]);
+      const backup = buildBackup({ settings: sNow ?? settings, fills: fNow, statements: stNow });
+      setBusy("Making the zip…");
+      const blob = await backupZip(backup);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = backupName();
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      setMsg(["ok", `Backup downloaded — ${backup.counts.fills} fill${backup.counts.fills === 1 ? "" : "s"}, ${backup.counts.statements} statement${backup.counts.statements === 1 ? "" : "s"}, and your settings.`]);
+    } catch (e) {
+      setMsg(["bad", `Couldn't make the backup: ${e.message}`]);
+    }
+    setBusy("");
+  };
+
+  const restore = async (file) => {
+    if (fileRef.current) fileRef.current.value = "";
+    if (!file) return;
+    setBusy("Reading the file…");
+    setMsg(null);
+    let backup, problems;
+    try { ({ backup, problems } = await readBackupFile(file)); }
+    catch (e) { setBusy(""); setMsg(["bad", `Couldn't read that file: ${e.message}`]); return; }
+    setBusy("");
+    // A backup that does not read is never restored in part: src/lib/backup.js says why.
+    if (!backup) { setMsg(["bad", problems[0]]); return; }
+
+    const s = backupSummary(backup);
+    const plan = restorePlan(backup, { fills, statements: stmtRows, settings });
+    const taken = s.takenAt ? new Date(s.takenAt).toLocaleString() : "an unknown date";
+    const lines = [
+      `This backup was taken on ${taken}.`,
+      "",
+      plan.newFills ? `${plan.newFills} fill${plan.newFills === 1 ? "" : "s"} will be added.` : "No new fills — every fill in it is already here.",
+      plan.newStatements ? `${plan.newStatements} statement${plan.newStatements === 1 ? "" : "s"} will be added.` : "No new statements — every statement in it is already here.",
+    ];
+    if (plan.sameFills || plan.sameStatements) lines.push(`${plan.sameFills} fill${plan.sameFills === 1 ? "" : "s"} and ${plan.sameStatements} statement${plan.sameStatements === 1 ? "" : "s"} in the file are already here and will be left alone.`);
+
+    const { ok, checked } = await ask({
+      title: plan.nothingToDo && !plan.settingsDiffer ? "Nothing to restore" : "Restore from this backup?",
+      body: lines.join("\n"),
+      detail: "Restoring only adds. Nothing already in your account is removed or overwritten by it"
+        + (plan.settingsDiffer ? " — except your settings, if you tick the box below." : "."),
+      checkbox: plan.settingsDiffer
+        ? { label: "Also replace my settings (brokers, products, limits, marks, cash) with the ones in the backup", defaultChecked: false }
+        : null,
+      confirmLabel: plan.nothingToDo && !plan.settingsDiffer ? "Close" : "Restore",
+      tone: plan.settingsDiffer ? "danger" : undefined,
+    });
+    if (!ok || (plan.nothingToDo && !checked)) { if (plan.nothingToDo) setMsg(["ok", "Nothing to restore — everything in that backup is already here."]); return; }
+
+    setBusy("Restoring…");
+    const done = [];
+    const failed = [];
+    /*
+     * Each part on its own, and the settings LAST.
+     *
+     * A restore that fell over halfway should still have put back what it managed, and the
+     * settings are the only destructive part, so they go after the additive ones have
+     * succeeded rather than before.
+     */
+    try {
+      if (backup.fills.length) { const r = await db.addFills(backup.fills); done.push(`${r.added ?? 0} fill${(r.added ?? 0) === 1 ? "" : "s"} added`); }
+    } catch (e) { failed.push(`fills (${e.message})`); }
+    try {
+      if (backup.statements.length) { const n = await db.saveStatements(backup.statements); done.push(`${n} statement${n === 1 ? "" : "s"} added`); }
+    } catch (e) { failed.push(`statements (${e.message})`); }
+    if (checked && backup.settings) {
+      try { await db.saveSettings(backup.settings); setSettings(backup.settings); done.push("settings replaced"); }
+      catch (e) { failed.push(`settings (${e.message})`); }
+    }
+
+    await Promise.all([reloadFills?.(), reloadStatements?.()]);
+    setBusy("");
+    setMsg([failed.length ? "bad" : "ok",
+      [done.length ? `Restored: ${done.join(" · ")}.` : "Nothing needed restoring.",
+       failed.length ? `Could not restore ${failed.join("; ")}.` : ""].filter(Boolean).join(" ")]);
+  };
+
+  const n = { fills: fills.length, statements: stmtRows?.length || 0 };
+
+  return (
+    <section className="panel">
+      <div className="ph">
+        <h2>Backup<span className="dim">everything in one file</span></h2>
+        <span className="faint" style={{ fontSize: 11 }}>{n.fills} fill{n.fills === 1 ? "" : "s"} · {n.statements} statement{n.statements === 1 ? "" : "s"} · your settings</span>
+      </div>
+      <div className="pb">
+        <p className="faint" style={{ fontSize: 12, margin: "0 0 10px" }}>
+          One zip with every fill, every statement RAMP has opened, and all your settings — brokers,
+          products, limits, marks and cash. Keep it somewhere you would keep a broker statement:
+          it holds your positions and balances. It holds <b>no passwords</b> of any kind.
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn" disabled={!!busy} onClick={download}>
+            {busy === "Collecting everything…" || busy === "Making the zip…" ? busy : "Download backup"}
+          </button>
+          <button type="button" className="btn ghost" disabled={!!busy} onClick={() => fileRef.current?.click()}>
+            Restore from backup
+          </button>
+          {/* The zip as downloaded, or the bare JSON for somebody who unzipped it first. */}
+          <input ref={fileRef} type="file" accept=".zip,.json,application/zip,application/json" style={{ display: "none" }}
+            onChange={(e) => restore(e.target.files?.[0])} />
+        </div>
+        {busy && busy !== "Collecting everything…" && busy !== "Making the zip…" && <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>{busy}</div>}
+        {msg && <div className={`signin-err ${msg[0] === "bad" ? "" : "warn"}`} style={{ marginTop: 10 }}>{msg[1]}</div>}
+        <p className="faint" style={{ fontSize: 11, margin: "10px 0 0" }}>
+          Restoring <b>adds; it never deletes</b> — a fill already here is left alone, and an old
+          backup cannot undo newer work. Settings are the one thing that replaces rather than
+          merges, and RAMP asks first. The original password-protected statement zips are not in
+          the file: RAMP keeps the figures it read out of them, not the files themselves.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function SettingsTab({ settings, setSettings, pf, fills, reloadFills, stmtRows, reloadStatements }) {
   const addBroker = () => {
     const id = `b${Date.now().toString(36)}`;
     setSettings((s) => ({ ...s, brokers: [...s.brokers, { ...NEW_BROKER, id, name: `Broker ${s.brokers.length + 1}` }] }));
@@ -4401,6 +4549,9 @@ function SettingsTab({ settings, setSettings, pf, fills, reloadFills }) {
       <Sortable className="setcards" storeKey="settings" settings={settings} setSettings={setSettings}
         items={[
           { id: "limits", title: "Your limits", node: <LimitsPanel settings={settings} setSettings={setSettings} pf={pf} addBroker={addBroker} /> },
+          /* Before "Delete or reset data", deliberately: the thing you want in reach the
+             moment before you destroy something is the thing that gets it back. */
+          { id: "backup", title: "Backup", node: <BackupPanel settings={settings} setSettings={setSettings} fills={fills} stmtRows={stmtRows} reloadFills={reloadFills} reloadStatements={reloadStatements} /> },
           { id: "reset", title: "Delete or reset data", node: <ResetPanel settings={settings} setSettings={setSettings} fills={fills} reloadFills={reloadFills} /> },
           /* Only where there is an account to close. In browser-storage mode there is no
              server, no subscription and nobody to ask — "delete all fills" is already the
