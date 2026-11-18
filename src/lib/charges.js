@@ -73,6 +73,25 @@ export const CATEGORY_KEYS = CATEGORIES.map((c) => c.key);
 export const labelOf = (key) => CATEGORIES.find((c) => c.key === key)?.label || key;
 
 /*
+ * The note that says part of the total has no name to it.
+ *
+ * A helper rather than inline markup because it has to obey "Hide figures", and the first
+ * version did not: every amount on the charges panel was blanked by that switch except this
+ * one line, which printed the unitemised total regardless.
+ *
+ * The FACT survives hiding — it is something to know about the data, not a figure, the same
+ * reasoning that keeps the TNE/IM gauge and its verdict on screen when the money is put
+ * away — but the amount does not. `fmt` formats the money, so this module stays free of the
+ * app's display settings.
+ */
+export function unitemisedNote(other, { hidden = false, fmt = (v) => String(v) } = {}) {
+  if (!(Math.abs(other) > 0.0049)) return "";
+  return hidden
+    ? " \u00b7 some charges are not itemised by Orient"
+    : ` \u00b7 ${fmt(other)} is not itemised by Orient`;
+}
+
+/*
  * A Journal Code → one of the categories above.
  *
  * Matched on Orient's own codes ("PLATFORM FEE-TT", "MKT DATA-CME", "MAP FEES"). The exchange
