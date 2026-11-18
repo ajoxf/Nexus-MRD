@@ -3,7 +3,7 @@ import { db, isRemote, auth, isDemo, resetDemo } from "./lib/db.js";
 import { computeBook, withCommission } from "./lib/positions.js";
 import { settleOf, instrumentOf } from "./lib/brokerFeed.js";
 import { feedsFor, pnlAt, fillsPlAt, chargesFor } from "./lib/statementBook.js";
-import { CATEGORIES } from "./lib/charges.js";
+import { CATEGORIES, unitemisedNote } from "./lib/charges.js";
 import { buildBackup, backupZip, backupName, readBackupFile, restorePlan, backupSummary } from "./lib/backup.js";
 import { checkRules, replay, replayCsv, shortName, RISK_DEFAULTS, tradingDaysBetween } from "./lib/riskRules.js";
 import { flattenPlan, planFills, planPnl } from "./lib/flatten.js";
@@ -6701,7 +6701,16 @@ function ChargesPanel({ stmtRows, settings }) {
       <div className="ph" style={{ background: "transparent", borderBottom: 0 }}>
         <span className="faint" style={{ fontSize: 11 }}>
           The date is the day Orient took the charge · the period it covers is in Orient's own wording
-          {c.totals.other > 0.0049 ? ` · ${cents(c.totals.other)} is not itemised by Orient` : ""}
+          {/*
+            * "Hide figures" means hidden, including here. This line used to print the
+            * unitemised total whatever the switch said, so every amount on the panel was
+            * blanked except this one — which rather defeats the switch.
+            *
+            * The FACT that some charges are not itemised stays either way: it is a thing to
+            * know about the data, not a figure, and the same reasoning keeps the TNE/IM gauge
+            * and its verdict on screen when the money is put away.
+            */}
+          {unitemisedNote(c.totals.other, { hidden, fmt: cents })}
         </span>
       </div>
 

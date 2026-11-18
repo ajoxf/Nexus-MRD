@@ -1,5 +1,5 @@
 import Papa from 'papaparse';
-import { buildCharges, readJournalRecords, uniqueJournalEntries, categoryOfJournalCode, isJournalRecord, isTradeConfirmation, CATEGORY_KEYS, labelOf } from '../src/lib/charges.js';
+import { buildCharges, readJournalRecords, uniqueJournalEntries, categoryOfJournalCode, isJournalRecord, isTradeConfirmation, unitemisedNote, CATEGORY_KEYS, labelOf } from '../src/lib/charges.js';
 
 let fail = 0;
 const eq = (name, got, want) => {
@@ -242,6 +242,32 @@ eq('no statements means no totals', buildCharges([], GROUP).totals.total, 0);
 eq('a day with no charges is not listed',
   buildCharges([{ date: '2026-11-10', files: [fs('2026-11-10', [fsRow(GROUP, {})])] }], GROUP).byDate, []);
 eq('every category has a label', CATEGORY_KEYS.every((k) => labelOf(k) !== k), true);
+
+/* ---------------------------------------------------------------------------
+ * The unitemised note obeys "Hide figures".
+ *
+ * It did not, once: every amount on the charges panel was blanked by that switch
+ * except this one line, which printed the unitemised total regardless. The figure
+ * goes when figures are hidden; the fact that one exists stays.
+ * ------------------------------------------------------------------------- */
+{
+  const money = (v) => `$${v.toFixed(2)}`;
+  const DOT = '·';
+  eq('with figures shown, the note carries the amount',
+    unitemisedNote(495, { hidden: false, fmt: money }), ` ${DOT} $495.00 is not itemised by Orient`);
+  eq('with figures hidden, the amount is gone',
+    unitemisedNote(495, { hidden: true, fmt: money }), ` ${DOT} some charges are not itemised by Orient`);
+  eq('…and not one digit of it survives, in any form',
+    /\d/.test(unitemisedNote(495, { hidden: true, fmt: money })), false);
+  eq('but the fact itself survives, because it is not a figure',
+    /not itemised/.test(unitemisedNote(495, { hidden: true, fmt: money })), true);
+  eq('nothing unitemised, nothing said', unitemisedNote(0, { hidden: false, fmt: money }), '');
+  eq('…and hiding does not invent a note', unitemisedNote(0, { hidden: true, fmt: money }), '');
+  eq('a rounding crumb is not a charge', unitemisedNote(0.004, { hidden: false, fmt: money }), '');
+  eq('a credit is worth saying, and is hidden just the same',
+    [unitemisedNote(-100, { hidden: false, fmt: money }), unitemisedNote(-100, { hidden: true, fmt: money })],
+    [` ${DOT} $-100.00 is not itemised by Orient`, ` ${DOT} some charges are not itemised by Orient`]);
+}
 
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);
